@@ -1,0 +1,59 @@
+warning: unused import: `Serialize`
+ --> src\domain.rs:3:26
+  |
+3 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tokio::io::AsyncWriteExt`
+ --> src\domain.rs:6:5
+  |
+6 | use tokio::io::AsyncWriteExt; // Kept for legacy if needed,...
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::net::TcpStream`
+ --> src\domain.rs:7:5
+  |
+7 | use tokio::net::TcpStream;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::time::sleep`
+ --> src\domain.rs:8:5
+  |
+8 | use tokio::time::sleep;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: field `handle` is never read
+  --> src\domain.rs:54:5
+   |
+51 | struct RdapResponse {
+   |        ------------ field in this struct
+...
+54 |     handle: String,
+   |     ^^^^^^
+   |
+   = note: `RdapResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `domain-scanner-rust` (bin "domain-scanner-rust") generated 5 warnings (run `cargo fix --bin "domain-scanner-rust" -p domain-scanner-rust` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running `target\debug\domain-scanner-rust.exe -l 3 -s .li -p D -workers 1`
+╔════════════════════════════════════════════════════════════╗
+║                    Domain Scanner v1.3.4                   ║
+║                                                            ║
+║  A powerful tool for checking domain name availability     ║
+║                                                            ║
+║  Developer: www.ict.run                                    ║
+║  GitHub:    https://github.com/xuemian168/domain-scanner   ║
+║                                                            ║
+║  License:   AGPL-3.0                                       ║
+║  Copyright © 2025                                          ║
+╚════════════════════════════════════════════════════════════╝
+
+error: unexpected argument '-w' found
+
+Usage: domain-scanner-rust.exe [OPTIONS]
+
+For more information, try '--help'.
+error: process didn't exit successfully: `target\debug\domain-scanner-rust.exe -l 3 -s .li -p D -workers 1` (exit code: 2)
