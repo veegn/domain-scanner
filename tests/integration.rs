@@ -1,34 +1,20 @@
 // =============================================================================
 // Domain Scanner - Comprehensive Integration Tests
 // =============================================================================
-// This test file covers all major modules and their interactions:
-//   1. CheckResult type construction and semantics
-//   2. LocalReservedChecker (unit + integration)
-//   3. DohChecker (unit + integration, requires network)
-//   4. WhoisChecker (unit + integration, requires network)
-//   5. CircuitBreaker behavior
-//   6. CheckerRegistry pipeline (full integration)
-//   7. DomainGenerator (all modes: pattern, dictionary, skip, regex)
-//   8. Worker pipeline (end-to-end with registry + channels)
-//   9. AppConfig loading and serialization
-//   10. ScanState persistence
-//   11. DomainChecker trait contract validation
-//   12. Edge cases and error handling
-// =============================================================================
 
-use domain_scanner::checker::{
-    CheckResult, CheckerPriority, CheckerRegistry, DohChecker, DomainChecker,
-    LocalReservedChecker, WhoisChecker,
-};
 use domain_scanner::checker::circuit_breaker::CircuitBreaker;
+use domain_scanner::checker::{
+    CheckResult, CheckerPriority, CheckerRegistry, DohChecker, DomainChecker, LocalReservedChecker,
+    WhoisChecker,
+};
 use domain_scanner::config::AppConfig;
 use domain_scanner::generator;
 use domain_scanner::state::{ScanJobSignature, ScanState};
 use domain_scanner::worker;
 use domain_scanner::{DomainResult, WorkerMessage};
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
@@ -93,7 +79,10 @@ fn test_check_result_clone() {
 async fn test_local_reserved_rfc2606_example() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("example.com").await;
-    assert!(!result.available, "example.com should be reserved (RFC 2606)");
+    assert!(
+        !result.available,
+        "example.com should be reserved (RFC 2606)"
+    );
     assert!(result.signatures.contains(&"RESERVED".to_string()));
 }
 
@@ -108,7 +97,10 @@ async fn test_local_reserved_rfc2606_test() {
 async fn test_local_reserved_rfc2606_invalid() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("invalid.net").await;
-    assert!(!result.available, "invalid.net should be reserved (RFC 2606)");
+    assert!(
+        !result.available,
+        "invalid.net should be reserved (RFC 2606)"
+    );
 }
 
 #[tokio::test]
@@ -136,7 +128,7 @@ async fn test_local_reserved_onion() {
 async fn test_local_reserved_www() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("www.com").await;
-    assert!(!result.available, "www.com should be reserved (commonly blocked)");
+    assert!(!result.available, "www.com should be reserved");
 }
 
 #[tokio::test]
@@ -163,11 +155,10 @@ async fn test_local_reserved_arpa() {
 #[tokio::test]
 async fn test_local_not_reserved_google() {
     let checker = LocalReservedChecker::new();
-    // google.com is registered, but NOT a RFC-reserved word
     let result = checker.check("google.com").await;
     assert!(
         result.available,
-        "google.com should NOT be locally reserved (it's registered, not a reserved word)"
+        "google.com should NOT be locally reserved"
     );
 }
 
@@ -175,14 +166,14 @@ async fn test_local_not_reserved_google() {
 async fn test_local_not_reserved_random() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("randomdomain12345.io").await;
-    assert!(result.available, "random domain should not be locally reserved");
+    assert!(result.available);
 }
 
 #[tokio::test]
 async fn test_local_case_insensitive() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("EXAMPLE.COM").await;
-    assert!(!result.available, "EXAMPLE.COM should be reserved (case insensitive)");
+    assert!(!result.available, "EXAMPLE.COM should be reserved");
 }
 
 #[tokio::test]
@@ -198,7 +189,6 @@ async fn test_local_checker_metadata() {
 async fn test_local_should_stop_pipeline_on_reserved() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("example.com").await;
-    // When reserved, should stop pipeline
     assert!(checker.should_stop_pipeline(&result));
 }
 
@@ -206,7 +196,6 @@ async fn test_local_should_stop_pipeline_on_reserved() {
 async fn test_local_should_not_stop_pipeline_on_available() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("notreserved.com").await;
-    // When available, should continue pipeline
     assert!(!checker.should_stop_pipeline(&result));
 }
 
@@ -218,7 +207,6 @@ async fn test_local_should_not_stop_pipeline_on_available() {
 async fn test_doh_registered_domain() {
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
-    // google.com definitely has DNS records
     if result.error.is_none() {
         assert!(!result.available, "google.com should have DNS records");
         assert!(result.signatures.contains(&"DNS".to_string()));
@@ -236,7 +224,10 @@ async fn test_doh_available_domain() {
             .as_nanos()
     );
     let result = checker.check(&domain).await;
-    assert!(result.available, "random domain should not have DNS records");
+    assert!(
+        result.available,
+        "random domain should not have DNS records"
+    );
 }
 
 #[tokio::test]
@@ -255,10 +246,7 @@ async fn test_doh_should_stop_pipeline_when_registered() {
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
     if !result.available && result.error.is_none() {
-        assert!(
-            checker.should_stop_pipeline(&result),
-            "should stop pipeline when DNS found"
-        );
+        assert!(checker.should_stop_pipeline(&result));
     }
 }
 
@@ -266,10 +254,7 @@ async fn test_doh_should_stop_pipeline_when_registered() {
 async fn test_doh_should_not_stop_pipeline_when_available() {
     let checker = DohChecker::new().await;
     let result = CheckResult::available();
-    assert!(
-        !checker.should_stop_pipeline(&result),
-        "should not stop pipeline when available"
-    );
+    assert!(!checker.should_stop_pipeline(&result));
 }
 
 #[tokio::test]
@@ -278,7 +263,6 @@ async fn test_doh_with_custom_servers() {
     let checker = DohChecker::with_servers(servers).await;
     assert!(!checker.servers.is_empty());
     let result = checker.check("google.com").await;
-    // Should work with custom server
     if result.error.is_none() {
         assert!(!result.available);
     }
@@ -292,7 +276,6 @@ async fn test_doh_round_robin() {
     ];
     let checker = DohChecker::with_servers(servers).await;
 
-    // Make two requests and verify index advances
     let idx1 = checker.current_idx.load(Ordering::Relaxed);
     let _ = checker.check("google.com").await;
     let idx2 = checker.current_idx.load(Ordering::Relaxed);
@@ -308,7 +291,10 @@ async fn test_whois_registered_com() {
     let checker = WhoisChecker::new();
     let result = checker.check("google.com").await;
     if result.error.is_none() {
-        assert!(!result.available, "google.com should be registered via WHOIS");
+        assert!(
+            !result.available,
+            "google.com should be registered via WHOIS"
+        );
         assert!(result.signatures.contains(&"WHOIS".to_string()));
     } else {
         println!(
@@ -330,16 +316,17 @@ async fn test_whois_available_random() {
     );
     let result = checker.check(&domain).await;
     if result.error.is_none() {
-        assert!(result.available, "random domain should be available via WHOIS");
+        assert!(
+            result.available,
+            "random domain should be available via WHOIS"
+        );
     }
 }
 
 #[tokio::test]
 async fn test_whois_unsupported_tld() {
     let checker = WhoisChecker::new();
-    // Use a TLD not in the internal server_map
     let result = checker.check("something.zzzz").await;
-    // Should return available (skip cleanly) since TLD is unknown
     assert!(result.available, "Unknown TLD should be skipped cleanly");
 }
 
@@ -379,7 +366,10 @@ fn test_circuit_breaker_stays_closed_below_threshold() {
     let cb = CircuitBreaker::new(3, 10);
     cb.record_failure();
     cb.record_failure();
-    assert!(cb.allow_request(), "should still be closed with 2/3 failures");
+    assert!(
+        cb.allow_request(),
+        "should still be closed with 2/3 failures"
+    );
 }
 
 #[test]
@@ -388,7 +378,6 @@ fn test_circuit_breaker_trips_at_threshold() {
     cb.record_failure();
     cb.record_failure();
     cb.record_failure();
-    // After 3 failures with a long timeout, circuit should be open
     assert!(
         !cb.allow_request(),
         "should be open after reaching threshold"
@@ -401,21 +390,16 @@ fn test_circuit_breaker_resets_on_success() {
     cb.record_failure();
     cb.record_failure();
     cb.record_success();
-    // After a success, failures reset to 0
     assert!(cb.allow_request());
-    // Even adding one more failure should not trip
     cb.record_failure();
     assert!(cb.allow_request());
 }
 
 #[test]
 fn test_circuit_breaker_half_open_after_timeout() {
-    // Use a very short recovery timeout for testing
-    let cb = CircuitBreaker::new(1, 0); // 0 second recovery
+    let cb = CircuitBreaker::new(1, 1);
     cb.record_failure();
-    // With 0-second recovery, should immediately allow (half-open)
-    // Note: due to timing, this should pass because now > last_failure_time + 0
-    std::thread::sleep(Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(2100));
     assert!(
         cb.allow_request(),
         "should be half-open after recovery timeout"
@@ -439,16 +423,15 @@ fn test_circuit_breaker_multiple_successes_no_effect() {
 async fn test_registry_with_defaults() {
     let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
     let names = registry.checker_names();
-    assert!(names.contains(&"LocalReserved"), "should have LocalReserved");
-    assert!(names.contains(&"DoH"), "should have DoH");
-    assert!(names.contains(&"WHOIS"), "should have WHOIS");
+    assert!(names.contains(&"LocalReserved"));
+    assert!(names.contains(&"DoH"));
+    assert!(names.contains(&"WHOIS"));
 }
 
 #[tokio::test]
 async fn test_registry_checker_order() {
     let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
     let names = registry.checker_names();
-    // LocalReserved (priority 0) should come before DoH (10) which comes before WHOIS (30)
     let local_idx = names.iter().position(|&n| n == "LocalReserved");
     let doh_idx = names.iter().position(|&n| n == "DoH");
     let whois_idx = names.iter().position(|&n| n == "WHOIS");
@@ -459,11 +442,9 @@ async fn test_registry_checker_order() {
 #[tokio::test]
 async fn test_registry_reserved_domain_stops_early() {
     let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
-    // "example.com" is reserved locally - pipeline should stop at LocalReserved
     let result = registry.check("example.com").await;
     assert!(!result.available, "example.com should be registered");
     assert!(result.signatures.contains(&"RESERVED".to_string()));
-    // Should NOT contain DNS/WHOIS signatures since pipeline stopped early
     assert!(
         !result.signatures.contains(&"DNS".to_string()),
         "pipeline should have stopped before DoH"
@@ -491,10 +472,15 @@ async fn test_registry_available_workflow() {
             .as_nanos()
     );
     let result = registry.check(&domain).await;
-    assert!(
-        result.available,
-        "random domain should be available (pipeline)"
-    );
+    // Accept either: available=true, or error (network issues with WHOIS/DoH)
+    // But should NOT be "registered" (with signatures and no error)
+    if !result.available {
+        assert!(
+            result.error.is_some(),
+            "if not available, should be due to an error, not registration. signatures={:?}",
+            result.signatures
+        );
+    }
 }
 
 #[tokio::test]
@@ -516,12 +502,8 @@ async fn test_registry_invalid_domain_no_dot() {
 #[tokio::test]
 async fn test_registry_empty() {
     let registry = CheckerRegistry::new();
-    // Registry with no checkers - should consider domain as available
     let result = registry.check("google.com").await;
-    assert!(
-        result.available,
-        "empty registry should return available (no checkers to say otherwise)"
-    );
+    assert!(result.available, "empty registry should return available");
 }
 
 // =============================================================================
@@ -530,7 +512,7 @@ async fn test_registry_empty() {
 
 #[tokio::test]
 async fn test_generator_letters_length1() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".com".to_string(),
         "D".to_string(),
@@ -538,15 +520,12 @@ async fn test_generator_letters_length1() {
         "".to_string(),
         0,
     );
-
-    assert_eq!(domain_gen.total_count, 26);
-
+    assert_eq!(dg.total_count, 26);
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 26);
     assert_eq!(domains[0], "a.com");
     assert_eq!(domains[25], "z.com");
@@ -554,7 +533,7 @@ async fn test_generator_letters_length1() {
 
 #[tokio::test]
 async fn test_generator_numbers_length2() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         2,
         ".net".to_string(),
         "d".to_string(),
@@ -562,15 +541,12 @@ async fn test_generator_numbers_length2() {
         "".to_string(),
         0,
     );
-
-    assert_eq!(domain_gen.total_count, 100); // 10^2
-
+    assert_eq!(dg.total_count, 100);
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 100);
     assert_eq!(domains[0], "00.net");
     assert_eq!(domains[99], "99.net");
@@ -578,7 +554,7 @@ async fn test_generator_numbers_length2() {
 
 #[tokio::test]
 async fn test_generator_alphanumeric_length1() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".io".to_string(),
         "a".to_string(),
@@ -586,15 +562,12 @@ async fn test_generator_alphanumeric_length1() {
         "".to_string(),
         0,
     );
-
-    assert_eq!(domain_gen.total_count, 36); // 26 letters + 10 digits
-
+    assert_eq!(dg.total_count, 36);
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 36);
     assert_eq!(domains[0], "a.io");
     assert_eq!(domains[25], "z.io");
@@ -604,118 +577,106 @@ async fn test_generator_alphanumeric_length1() {
 
 #[tokio::test]
 async fn test_generator_skip() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".com".to_string(),
         "D".to_string(),
         "".to_string(),
         "".to_string(),
-        5, // Skip first 5 (a, b, c, d, e)
+        5,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
-    assert_eq!(domains.len(), 21); // 26 - 5
+    assert_eq!(domains.len(), 21);
     assert_eq!(domains[0], "f.com");
 }
 
 #[tokio::test]
 async fn test_generator_skip_all() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".com".to_string(),
         "D".to_string(),
         "".to_string(),
         "".to_string(),
-        26, // Skip all
+        26,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 0);
 }
 
 #[tokio::test]
 async fn test_generator_skip_beyond_total() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".com".to_string(),
         "D".to_string(),
         "".to_string(),
         "".to_string(),
-        100, // Skip more than total
+        100,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 0);
 }
 
 #[tokio::test]
 async fn test_generator_with_regex_filter() {
-    let domain_gen = generator::generate_domains(
-        2,
+    let dg = generator::generate_domains(
+        3,
         ".com".to_string(),
         "D".to_string(),
-        "^ab".to_string(), // Only domains starting with "ab"
+        "^ab".to_string(),
         "".to_string(),
         0,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
-    // All results should start with "ab"
     for d in &domains {
         assert!(d.starts_with("ab"), "domain {} should start with 'ab'", d);
     }
-    assert_eq!(domains.len(), 26); // ab + 26 letters = 26 domains (aba, abb, ..., abz)
+    assert_eq!(domains.len(), 26);
 }
 
 #[tokio::test]
 async fn test_generator_with_strict_regex() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         3,
         ".com".to_string(),
         "a".to_string(),
-        "^[a-z]{2}[0-9]$".to_string(), // exactly 2 letters + 1 digit
+        "^[a-z]{2}[0-9]$".to_string(),
         "".to_string(),
         0,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
-    // Verify all match the pattern
     let re = regex::Regex::new("^[a-z]{2}[0-9]$").unwrap();
     for d in &domains {
         let prefix = d.strip_suffix(".com").unwrap();
         assert!(re.is_match(prefix), "prefix {} should match regex", prefix);
     }
-    assert_eq!(domains.len(), 26 * 26 * 10); // 6760 combinations
+    assert_eq!(domains.len(), 26 * 26 * 10);
 }
 
 #[tokio::test]
 async fn test_generator_suffix_variations() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".uk".to_string(),
         "d".to_string(),
@@ -723,13 +684,11 @@ async fn test_generator_suffix_variations() {
         "".to_string(),
         0,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 10);
     for d in &domains {
         assert!(d.ends_with(".uk"));
@@ -738,7 +697,7 @@ async fn test_generator_suffix_variations() {
 
 #[tokio::test]
 async fn test_generator_generated_counter() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".com".to_string(),
         "d".to_string(),
@@ -746,85 +705,59 @@ async fn test_generator_generated_counter() {
         "".to_string(),
         0,
     );
-
-    let generated = domain_gen.generated.clone();
-    let mut rx = domain_gen.domains;
-
-    // Initially 0
+    let generated = dg.generated.clone();
+    let mut rx = dg.domains;
     assert_eq!(generated.load(Ordering::Relaxed), 0);
-
-    // Consume all
     while let Some(_d) = rx.recv().await {}
-
-    // After consuming all, generated count should be 10
     assert_eq!(generated.load(Ordering::Relaxed), 10);
 }
 
 #[tokio::test]
 async fn test_generator_dictionary_mode() {
-    // Create a temp dictionary file
     let dict_path = std::env::temp_dir().join("test_dict_integration.txt");
-    std::fs::write(
-        &dict_path,
-        "hello\nworld\nrust\n\n  \ntest\n",
-    )
-    .unwrap();
-
-    let domain_gen = generator::generate_domains(
-        0, // Ignored in dict mode
+    std::fs::write(&dict_path, "hello\nworld\nrust\n\n  \ntest\n").unwrap();
+    let dg = generator::generate_domains(
+        0,
         ".dev".to_string(),
-        "D".to_string(), // Ignored in dict mode
+        "D".to_string(),
         "".to_string(),
         dict_path.to_str().unwrap().to_string(),
         0,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
-    // Empty lines should be skipped
     assert!(domains.contains(&"hello.dev".to_string()));
     assert!(domains.contains(&"world.dev".to_string()));
     assert!(domains.contains(&"rust.dev".to_string()));
     assert!(domains.contains(&"test.dev".to_string()));
-
-    // Cleanup
     let _ = std::fs::remove_file(&dict_path);
 }
 
 #[tokio::test]
 async fn test_generator_dictionary_with_regex() {
     let dict_path = std::env::temp_dir().join("test_dict_regex.txt");
-    std::fs::write(
-        &dict_path,
-        "apple\nbanana\napricot\nblueberry\navocado\n",
-    )
-    .unwrap();
-
-    let domain_gen = generator::generate_domains(
+    std::fs::write(&dict_path, "apple\nbanana\napricot\nblueberry\navocado\n").unwrap();
+    let dg = generator::generate_domains(
         0,
         ".com".to_string(),
         "D".to_string(),
-        "^a".to_string(), // Only words starting with 'a'
+        "^a".to_string(),
         dict_path.to_str().unwrap().to_string(),
         0,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert!(domains.contains(&"apple.com".to_string()));
     assert!(domains.contains(&"apricot.com".to_string()));
     assert!(domains.contains(&"avocado.com".to_string()));
     assert!(!domains.contains(&"banana.com".to_string()));
     assert!(!domains.contains(&"blueberry.com".to_string()));
-
     let _ = std::fs::remove_file(&dict_path);
 }
 
@@ -832,28 +765,24 @@ async fn test_generator_dictionary_with_regex() {
 async fn test_generator_dictionary_with_skip() {
     let dict_path = std::env::temp_dir().join("test_dict_skip.txt");
     std::fs::write(&dict_path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
-
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         0,
         ".com".to_string(),
         "D".to_string(),
         "".to_string(),
         dict_path.to_str().unwrap().to_string(),
-        2, // Skip first 2 lines
+        2,
     );
-
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert!(!domains.contains(&"one.com".to_string()));
     assert!(!domains.contains(&"two.com".to_string()));
     assert!(domains.contains(&"three.com".to_string()));
     assert!(domains.contains(&"four.com".to_string()));
     assert!(domains.contains(&"five.com".to_string()));
-
     let _ = std::fs::remove_file(&dict_path);
 }
 
@@ -864,32 +793,25 @@ async fn test_generator_dictionary_with_skip() {
 #[tokio::test]
 async fn test_worker_processes_domains() {
     let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
-
     let (job_tx, job_rx) = mpsc::channel(10);
     let (result_tx, mut result_rx) = mpsc::channel(10);
-
     let jobs = Arc::new(Mutex::new(job_rx));
-
-    // Spawn a worker
     let reg_clone = registry.clone();
     tokio::spawn(async move {
         worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
     });
-
-    // Send domains
     job_tx.send("google.com".to_string()).await.unwrap();
-    drop(job_tx); // Close channel so worker exits
-
-    // Collect results
+    drop(job_tx);
     let mut messages = Vec::new();
     while let Some(msg) = result_rx.recv().await {
         messages.push(msg);
     }
-
-    // Should have a Scanning and a Result message for google.com
-    let has_scanning = messages.iter().any(|m| matches!(m, WorkerMessage::Scanning(d) if d == "google.com"));
-    let has_result = messages.iter().any(|m| matches!(m, WorkerMessage::Result(r) if r.domain == "google.com"));
-
+    let has_scanning = messages
+        .iter()
+        .any(|m| matches!(m, WorkerMessage::Scanning(d) if d == "google.com"));
+    let has_result = messages
+        .iter()
+        .any(|m| matches!(m, WorkerMessage::Result(r) if r.domain == "google.com"));
     assert!(has_scanning, "should have a Scanning message");
     assert!(has_result, "should have a Result message");
 }
@@ -897,37 +819,25 @@ async fn test_worker_processes_domains() {
 #[tokio::test]
 async fn test_worker_multiple_domains() {
     let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
-
     let (job_tx, job_rx) = mpsc::channel(10);
     let (result_tx, mut result_rx) = mpsc::channel(100);
-
     let jobs = Arc::new(Mutex::new(job_rx));
-
     let reg_clone = registry.clone();
     tokio::spawn(async move {
         worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
     });
-
-    // Send multiple domains
-    let test_domains = vec![
-        "example.com".to_string(), // Reserved locally
-        "test.org".to_string(),    // Reserved locally
-    ];
-
+    let test_domains = vec!["example.com".to_string(), "test.org".to_string()];
     for d in &test_domains {
         job_tx.send(d.clone()).await.unwrap();
     }
     drop(job_tx);
-
     let mut results: Vec<DomainResult> = Vec::new();
     while let Some(msg) = result_rx.recv().await {
         if let WorkerMessage::Result(r) = msg {
             results.push(r);
         }
     }
-
     assert_eq!(results.len(), 2);
-    // Both should be registered (reserved locally)
     for r in &results {
         assert!(!r.available, "{} should be registered", r.domain);
     }
@@ -936,41 +846,43 @@ async fn test_worker_multiple_domains() {
 #[tokio::test]
 async fn test_worker_multiple_workers_share_jobs() {
     let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
-
     let (job_tx, job_rx) = mpsc::channel(100);
     let (result_tx, mut result_rx) = mpsc::channel(100);
-
     let jobs = Arc::new(Mutex::new(job_rx));
-
-    // Spawn 3 workers
     for id in 1..=3 {
         let jobs_clone = jobs.clone();
         let tx_clone = result_tx.clone();
         let reg_clone = registry.clone();
         tokio::spawn(async move {
-            worker::worker(id, jobs_clone, tx_clone, Duration::from_millis(0), reg_clone).await;
+            worker::worker(
+                id,
+                jobs_clone,
+                tx_clone,
+                Duration::from_millis(0),
+                reg_clone,
+            )
+            .await;
         });
     }
-    drop(result_tx); // Drop the extra sender
-
-    // Send 6 reserved domains (all locally reserved - fast, no network needed)
+    drop(result_tx);
     let reserved_domains = vec![
-        "example.com", "test.org", "invalid.net",
-        "localhost", "www.com", "nic.uk",
+        "example.com",
+        "test.org",
+        "invalid.net",
+        "localhost",
+        "www.com",
+        "nic.uk",
     ];
-
     for d in &reserved_domains {
         job_tx.send(d.to_string()).await.unwrap();
     }
     drop(job_tx);
-
     let mut domain_results: Vec<DomainResult> = Vec::new();
     while let Some(msg) = result_rx.recv().await {
         if let WorkerMessage::Result(r) = msg {
             domain_results.push(r);
         }
     }
-
     assert_eq!(
         domain_results.len(),
         reserved_domains.len(),
@@ -991,20 +903,15 @@ fn test_config_default() {
 
 #[test]
 fn test_config_load_nonexistent_file() {
-    let config = AppConfig::load_from_file("nonexistent_config_file.json");
-    // Should return default config
+    let config = AppConfig::load_from_file("nonexistent_config_file_xyz.json");
     assert!(config.doh_servers.is_empty());
 }
 
 #[test]
 fn test_config_load_valid_file() {
-    let path = std::env::temp_dir().join("test_config_valid.json");
-    let content = r#"{
-        "doh_servers": ["https://dns.google/resolve"],
-        "whois_servers": {"com": "whois.verisign-grs.com"}
-    }"#;
+    let path = std::env::temp_dir().join("test_config_valid_integ.json");
+    let content = r#"{"doh_servers":["https://dns.google/resolve"],"whois_servers":{"com":"whois.verisign-grs.com"}}"#;
     std::fs::write(&path, content).unwrap();
-
     let config = AppConfig::load_from_file(path.to_str().unwrap());
     assert_eq!(config.doh_servers.len(), 1);
     assert_eq!(config.doh_servers[0], "https://dns.google/resolve");
@@ -1012,50 +919,38 @@ fn test_config_load_valid_file() {
         config.whois_servers.get("com").map(|s| s.as_str()),
         Some("whois.verisign-grs.com")
     );
-
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_config_load_invalid_json() {
-    let path = std::env::temp_dir().join("test_config_invalid.json");
+    let path = std::env::temp_dir().join("test_config_invalid_integ.json");
     std::fs::write(&path, "invalid json {{{").unwrap();
-
     let config = AppConfig::load_from_file(path.to_str().unwrap());
-    // Should fallback to default
     assert!(config.doh_servers.is_empty());
-
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_config_save_default_if_not_exists() {
-    let path = std::env::temp_dir().join("test_config_save_default.json");
-    let _ = std::fs::remove_file(&path); // Ensure doesn't exist
-
+    let path = std::env::temp_dir().join("test_config_save_default_integ.json");
+    let _ = std::fs::remove_file(&path);
     AppConfig::save_default_if_not_exists(path.to_str().unwrap());
     assert!(path.exists(), "config file should be created");
-
-    // Load it back
     let config = AppConfig::load_from_file(path.to_str().unwrap());
-    assert!(config.doh_servers.is_empty()); // Default is empty
-
+    assert!(config.doh_servers.is_empty());
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_config_save_does_not_overwrite() {
-    let path = std::env::temp_dir().join("test_config_no_overwrite.json");
-    let custom = r#"{"doh_servers": ["https://custom.server/dns"]}"#;
+    let path = std::env::temp_dir().join("test_config_no_overwrite_integ.json");
+    let custom = r#"{"doh_servers":["https://custom.server/dns"]}"#;
     std::fs::write(&path, custom).unwrap();
-
     AppConfig::save_default_if_not_exists(path.to_str().unwrap());
-
-    // Should still have custom content
     let config = AppConfig::load_from_file(path.to_str().unwrap());
     assert_eq!(config.doh_servers.len(), 1);
     assert_eq!(config.doh_servers[0], "https://custom.server/dns");
-
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1066,10 +961,8 @@ fn test_config_serialization_roundtrip() {
     config
         .whois_servers
         .insert("com".to_string(), "whois.example.com".to_string());
-
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: AppConfig = serde_json::from_str(&json).unwrap();
-
     assert_eq!(deserialized.doh_servers, config.doh_servers);
     assert_eq!(deserialized.whois_servers, config.whois_servers);
 }
@@ -1090,34 +983,23 @@ fn test_scan_state_new() {
 
 #[test]
 fn test_scan_state_save_and_load() {
-    let path = std::env::temp_dir().join("test_scan_state.json");
+    let path = std::env::temp_dir().join("test_scan_state_integ.json");
     let path_str = path.to_str().unwrap();
-
-    let mut state = ScanState::new(
-        4,
-        ".uk".into(),
-        "d".into(),
-        "^[a-z]".into(),
-        "".into(),
-        42,
-    );
-
+    let mut state = ScanState::new(4, ".uk".into(), "d".into(), "^[a-z]".into(), "".into(), 42);
     state.save(path_str).unwrap();
     assert!(path.exists());
-
     let loaded = ScanState::load(path_str).unwrap();
     assert_eq!(loaded.generated_count, 42);
     assert_eq!(loaded.job.length, 4);
     assert_eq!(loaded.job.suffix, ".uk");
     assert_eq!(loaded.job.pattern, "d");
     assert_eq!(loaded.job.regex, "^[a-z]");
-
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_scan_state_load_nonexistent() {
-    let result = ScanState::load("nonexistent_state_file.json");
+    let result = ScanState::load("nonexistent_state_file_xyz.json");
     assert!(result.is_none());
 }
 
@@ -1150,7 +1032,7 @@ fn test_scan_state_job_signature_inequality() {
         dict: "".into(),
     };
     let sig2 = ScanJobSignature {
-        length: 4, // different
+        length: 4,
         suffix: ".com".into(),
         pattern: "D".into(),
         regex: "".into(),
@@ -1161,17 +1043,16 @@ fn test_scan_state_job_signature_inequality() {
 
 #[test]
 fn test_scan_state_timestamp_updates_on_save() {
-    let path = std::env::temp_dir().join("test_state_timestamp.json");
+    let path = std::env::temp_dir().join("test_state_timestamp_integ.json");
     let path_str = path.to_str().unwrap();
-
     let mut state = ScanState::new(1, ".com".into(), "D".into(), "".into(), "".into(), 0);
     let ts1 = state.timestamp;
-
-    // Wait a second and save again
     std::thread::sleep(Duration::from_secs(1));
     state.save(path_str).unwrap();
-    assert!(state.timestamp >= ts1, "timestamp should be updated on save");
-
+    assert!(
+        state.timestamp >= ts1,
+        "timestamp should be updated on save"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1225,18 +1106,21 @@ fn test_domain_result_serialization() {
 #[tokio::test]
 async fn test_registry_domain_with_many_dots() {
     let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
-    // subdomain.example.com - should still parse TLD correctly
     let result = registry.check("subdomain.example.com").await;
-    // "subdomain" is not reserved, so it should pass LocalReserved
-    // The TLD is "com" which is valid
-    assert!(result.error.is_none(), "multi-level domain should not error");
+    assert!(
+        result.error.is_none(),
+        "multi-level domain should not error"
+    );
 }
 
 #[tokio::test]
 async fn test_registry_single_char_domain() {
     let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
     let result = registry.check("a.com").await;
-    assert!(result.error.is_none(), "single char domain should not error");
+    assert!(
+        result.error.is_none(),
+        "single char domain should not error"
+    );
 }
 
 #[tokio::test]
@@ -1255,7 +1139,7 @@ async fn test_checker_priority_ordering() {
 
 #[tokio::test]
 async fn test_generator_length2_letters() {
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         2,
         ".com".to_string(),
         "D".to_string(),
@@ -1263,15 +1147,12 @@ async fn test_generator_length2_letters() {
         "".to_string(),
         0,
     );
-
-    assert_eq!(domain_gen.total_count, 676); // 26^2
-
+    assert_eq!(dg.total_count, 676);
     let mut domains = Vec::new();
-    let mut rx = domain_gen.domains;
+    let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
     }
-
     assert_eq!(domains.len(), 676);
     assert_eq!(domains[0], "aa.com");
     assert_eq!(domains[675], "zz.com");
@@ -1279,11 +1160,8 @@ async fn test_generator_length2_letters() {
 
 #[tokio::test]
 async fn test_full_pipeline_with_generator_and_worker() {
-    // End-to-end: generate domains â†?worker â†?collect results
     let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
-
-    // Generate 10 numeric domains (0-9) with .zzz suffix (unlikely real TLD)
-    let domain_gen = generator::generate_domains(
+    let dg = generator::generate_domains(
         1,
         ".zzzztest".to_string(),
         "d".to_string(),
@@ -1291,16 +1169,12 @@ async fn test_full_pipeline_with_generator_and_worker() {
         "".to_string(),
         0,
     );
-
     let (result_tx, mut result_rx) = mpsc::channel(100);
-    let jobs = Arc::new(Mutex::new(domain_gen.domains));
-
-    // Single worker, no delay
+    let jobs = Arc::new(Mutex::new(dg.domains));
     let reg_clone = registry.clone();
     tokio::spawn(async move {
         worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
     });
-
     let mut scan_count = 0u32;
     let mut result_count = 0u32;
     while let Some(msg) = result_rx.recv().await {
@@ -1309,7 +1183,6 @@ async fn test_full_pipeline_with_generator_and_worker() {
             WorkerMessage::Result(_) => result_count += 1,
         }
     }
-
     assert_eq!(scan_count, 10, "should scan exactly 10 domains");
     assert_eq!(result_count, 10, "should produce 10 results");
 }
