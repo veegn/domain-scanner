@@ -51,7 +51,7 @@ impl CircuitBreaker {
     /// Record a failed request
     /// Increments failure count, potentially tripping the circuit
     pub fn record_failure(&self) {
-        let current = self.failures.fetch_add(1, Ordering::Relaxed);
+        let _current = self.failures.fetch_add(1, Ordering::Relaxed);
         // Update timestamp on every failure so the window extends
         self.last_failure_time
             .store(Self::current_time(), Ordering::Relaxed);

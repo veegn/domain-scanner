@@ -5,13 +5,9 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
-    /// Custom RDAP endpoints (TLD -> URL)
+    /// List of DoH servers for load balancing
     #[serde(default)]
-    pub rdap_endpoints: HashMap<String, String>,
-
-    /// Default DoH URL
-    #[serde(default)]
-    pub doh_url: Option<String>,
+    pub doh_servers: Vec<String>,
 
     /// Whois servers fallback (TLD -> Host:Port) - Future feature
     #[serde(default)]
@@ -21,8 +17,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            rdap_endpoints: HashMap::new(),
-            doh_url: None,
+            doh_servers: Vec::new(),
             whois_servers: HashMap::new(),
         }
     }
@@ -53,7 +48,6 @@ impl AppConfig {
         if !Path::new(path).exists() {
             let default_config = Self::default();
             // Add some examples
-            // default_config.rdap_endpoints.insert("example".to_string(), "https://rdap.example.com/".to_string());
 
             if let Ok(content) = serde_json::to_string_pretty(&default_config) {
                 let _ = fs::write(path, content);

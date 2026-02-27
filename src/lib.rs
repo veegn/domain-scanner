@@ -1,7 +1,7 @@
 pub mod checker;
 pub mod config;
 pub mod generator;
-pub mod reserved;
+
 pub mod state;
 pub mod tui;
 pub mod worker;
@@ -14,4 +14,9 @@ pub struct DomainResult {
     pub available: bool,
     pub error: Option<String>,
     pub signatures: Vec<String>,
+}
+
+pub enum WorkerMessage {
+    Scanning(String),
+    Result(DomainResult),
 }

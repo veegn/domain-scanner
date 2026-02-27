@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 pub async fn worker(
     _id: usize,
     jobs: Arc<Mutex<mpsc::Receiver<String>>>,
-    results: mpsc::Sender<DomainResult>,
+    results: mpsc::Sender<crate::WorkerMessage>,
     delay: Duration,
     registry: Arc<CheckerRegistry>,
 ) {
@@ -21,6 +21,15 @@ pub async fn worker(
 
         match domain_name {
             Some(domain) => {
+                // Notify scanning
+                if results
+                    .send(crate::WorkerMessage::Scanning(domain.clone()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+
                 // Use the registry to check the domain
                 let check_result: CheckResult = registry.check(&domain).await;
 
@@ -31,7 +40,11 @@ pub async fn worker(
                     signatures: check_result.signatures,
                 };
 
-                if results.send(result).await.is_err() {
+                if results
+                    .send(crate::WorkerMessage::Result(result))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
 

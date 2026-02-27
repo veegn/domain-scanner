@@ -1,8 +1,5 @@
 use domain_scanner::checker;
 use domain_scanner::generator;
-// reserved is internal to checker mostly but used in main? No, used in generator?
-// reserved is used in check?
-// Let's check main.rs usages.
 use domain_scanner::worker;
 
 use checker::CheckerRegistry;
@@ -29,7 +26,7 @@ struct Args {
     length: usize,
 
     /// Domain suffix
-    #[arg(short = 's', long, default_value = ".li")]
+    #[arg(short = 's', long, default_value = ".uk")]
     suffix: String,
 
     /// Domain pattern (d: numbers, D: letters, a: alphanumeric)
@@ -52,104 +49,21 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     workers: usize,
 
-    /// Show registered domains in output
-    #[arg(long)]
-    show_registered: bool,
-
     /// Skip performance warnings
     #[arg(long)]
     force: bool,
 
-    /// DoH server URL
-    #[arg(long, default_value = "https://dns.alidns.com/resolve")]
-    doh: String,
+    /// DoH server URLs
+    #[arg(long)]
+    doh: Vec<String>,
 
     /// Path to configuration file
     #[arg(long, default_value = "config.json")]
     config: String,
 }
 
-fn show_motd() {
-    println!(
-        "{}",
-        "\
-╔════════════════════════════════════════════════════════════╗
-║                    Domain Scanner v1.3.4                   ║
-║                                                            ║
-║  A powerful tool for checking domain name availability     ║
-║                                                            ║
-║  Developer: www.ict.run                                    ║
-║  GitHub:    https://github.com/xuemian168/domain-scanner   ║
-║                                                            ║
-║  License:   AGPL-3.0                                       ║
-║  Copyright © 2025                                          ║
-╚════════════════════════════════════════════════════════════╝\
-"
-        .cyan()
-    );
-    println!();
-}
-
-fn show_performance_warning(length: usize, pattern: &str, delay: u64, workers: usize) -> bool {
-    let charset_size: u64 = match pattern {
-        "d" => 10,
-        "D" => 26,
-        "a" => 36,
-        _ => 26,
-    };
-
-    let total_domains = charset_size.pow(length as u32);
-    let estimated_seconds = (total_domains * delay) / (workers as u64 * 1000);
-    let estimated_hours = estimated_seconds as f64 / 3600.0;
-    let estimated_days = estimated_hours / 24.0;
-
-    println!("\n{}", "⚠️  PERFORMANCE WARNING ⚠️".yellow().bold());
-    println!("═══════════════════════════════════════════════════════");
-    println!(
-        "You are about to scan {} domains with the following settings:",
-        total_domains.to_string().red().bold()
-    );
-    println!("• Pattern: {} (charset size: {})", pattern, charset_size);
-    println!("• Length: {} characters", length);
-    println!("• Workers: {}", workers);
-    println!("• Delay: {} ms between queries", delay);
-    println!();
-
-    println!("📊 {}", "Estimated Impact:".cyan().bold());
-    if estimated_days >= 1.0 {
-        println!(
-            "• Scan time: ~{:.1} days ({:.1} hours)",
-            estimated_days, estimated_hours
-        );
-    } else if estimated_hours >= 1.0 {
-        println!(
-            "• Scan time: ~{:.1} hours ({:.0} minutes)",
-            estimated_hours,
-            estimated_hours * 60.0
-        );
-    } else {
-        println!(
-            "• Scan time: ~{:.0} minutes",
-            estimated_seconds as f64 / 60.0
-        );
-    }
-    println!("• Network requests: {} total", total_domains);
-    println!();
-
-    print!("\nDo you want to continue? (y/N): ");
-    io::stdout().flush().unwrap();
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-    let input = input.trim().to_lowercase();
-    input == "y" || input == "yes"
-}
-
 #[tokio::main]
 async fn main() {
-    show_motd();
     let mut args = Args::parse();
 
     // Fix suffix dot
@@ -162,15 +76,6 @@ async fn main() {
         if args.length != 3 || args.pattern != "D" {
             println!("Note: When using dictionary mode, -l and -p parameters are ignored");
         }
-    } else {
-        // Warning
-        if args.length > 5 && !args.force {
-            if !show_performance_warning(args.length, &args.pattern, args.delay, args.workers) {
-                println!("Scan cancelled by user.");
-                std::process::exit(0);
-            }
-            println!();
-        }
     }
 
     // Load config
@@ -178,12 +83,12 @@ async fn main() {
     let mut config = domain_scanner::config::AppConfig::load_from_file(&args.config);
 
     // CLI args override config (DoH)
-    // Note: Since 'doh' has a default value in CLI, it will always be some string.
-    // Ideally we would check if user passed it explicitly, but for now CLI takes precedence.
-    config.doh_url = Some(args.doh.clone());
+    if !args.doh.is_empty() {
+        config.doh_servers = args.doh.clone();
+    }
 
     // Create checker registry with config
-    let registry = Arc::new(CheckerRegistry::with_defaults(config));
+    let registry = Arc::new(CheckerRegistry::with_defaults(config).await);
 
     // Print active checkers
     println!("Active checkers: {:?}", registry.checker_names());
@@ -301,30 +206,86 @@ async fn main() {
             .open(&output_path)
             .expect("Failed to open output file");
 
-        while let Some(result) = rx_results.recv().await {
-            if result.available {
-                let log_entry = format!("{}\n", result.domain);
+        while let Some(msg) = rx_results.recv().await {
+            match msg {
+                domain_scanner::WorkerMessage::Scanning(domain) => {
+                    let mut state = app_consumer.lock().await;
+                    state.scanned_count += 1; // Increment processed count
+                    state.logs.push(domain_scanner::tui::LogEntry {
+                        domain,
+                        status: domain_scanner::tui::DomainStatus::Scanning,
+                        timestamp: std::time::Instant::now(),
+                        signature: None,
+                    });
+                }
+                domain_scanner::WorkerMessage::Result(result) => {
+                    // Update log status
+                    {
+                        let mut state = app_consumer.lock().await;
+                        // Format signature string if present
+                        let signature = if !result.signatures.is_empty() {
+                            Some(result.signatures.join(","))
+                        } else {
+                            None
+                        };
 
-                // Ignore write errors to keep scanning
-                let _ = file.write_all(log_entry.as_bytes());
+                        // Find matching entry - search from end as it's likely recent
+                        if let Some(entry) = state
+                            .logs
+                            .iter_mut()
+                            .rev()
+                            .find(|e| e.domain == result.domain)
+                        {
+                            entry.status = if result.available {
+                                domain_scanner::tui::DomainStatus::Available
+                            } else {
+                                domain_scanner::tui::DomainStatus::Registered
+                            };
+                            entry.timestamp = std::time::Instant::now();
+                            entry.signature = signature.clone();
+                        } else {
+                            // If not found (race condition or whatever), append result
+                            state.logs.push(domain_scanner::tui::LogEntry {
+                                domain: result.domain.clone(),
+                                status: if result.available {
+                                    domain_scanner::tui::DomainStatus::Available
+                                } else {
+                                    domain_scanner::tui::DomainStatus::Registered
+                                },
+                                timestamp: std::time::Instant::now(),
+                                signature: signature.clone(),
+                            });
+                        }
 
-                let mut state = app_consumer.lock().await;
-                state.found_domains.push(result.domain);
-            } else if let Some(err) = result.error {
-                let mut state = app_consumer.lock().await;
-                let err_msg = if err.len() > 50 {
-                    format!("{}...", &err[..47])
-                } else {
-                    err
-                };
-                state.status_message = format!("Error: {} ({})", err_msg, result.domain);
+                        // Add to Found Domains list if available
+                        if result.available {
+                            state.found_domains.push(result.domain.clone());
+                        }
+
+                        if let Some(err) = &result.error {
+                            state.fail_count += 1; // Increment fail count on error
+                            let err_msg = if err.len() > 50 {
+                                format!("{}...", &err[..47])
+                            } else {
+                                err.clone()
+                            };
+                            state.status_message =
+                                format!("Error: {} ({})", err_msg, result.domain);
+                        }
+                    }
+
+                    // File IO for available
+                    if result.available {
+                        let log_entry = format!("{}\n", result.domain);
+                        let _ = file.write_all(log_entry.as_bytes());
+                    }
+                }
             }
         }
     });
 
     // Run TUI Loop
-    let stats_generated = domain_gen.generated.clone();
-    if let Err(e) = domain_scanner::tui::run(app, stats_generated).await {
+    if let Err(e) = domain_scanner::tui::run(app).await {
         eprintln!("TUI Error: {}", e);
     }
 

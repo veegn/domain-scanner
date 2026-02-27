@@ -12,7 +12,6 @@
 //!
 //! - **LocalReservedChecker**: Checks against local reserved domain rules (fastest, no network)
 //! - **DohChecker**: DNS over HTTPS queries to check for DNS records
-//! - **RdapChecker**: RDAP protocol queries for authoritative registration data
 //!
 //! # Adding a New Checker
 //!
@@ -46,7 +45,6 @@
 pub mod circuit_breaker;
 pub mod doh;
 pub mod local;
-pub mod rdap;
 pub mod registry;
 pub mod traits;
 pub mod whois;
@@ -54,7 +52,6 @@ pub mod whois;
 // Re-export main types for convenience
 pub use doh::DohChecker;
 pub use local::LocalReservedChecker;
-pub use rdap::RdapChecker;
 pub use registry::CheckerRegistry;
 pub use traits::{CheckResult, CheckerPriority, DomainChecker};
 pub use whois::WhoisChecker;

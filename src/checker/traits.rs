@@ -10,7 +10,7 @@
 //! 3. Add `pub mod my_checker;` to `src/checker/mod.rs`
 //! 4. Register your checker in `CheckerRegistry` in `src/checker/registry.rs`
 //!
-//! See `rdap.rs` and `doh.rs` for reference implementations.
+//! See `doh.rs` and `whois.rs` for reference implementations.
 
 use async_trait::async_trait;
 use std::fmt::Debug;
@@ -130,10 +130,26 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// `true` if this checker can handle domains with this TLD
     fn supports_tld(&self, tld: &str) -> bool;
 
-    /// Whether this checker can definitively determine availability
+    /// Determine if the checking pipeline should stop after this result.
     ///
-    /// If `true`, a positive result from this checker is considered authoritative.
-    /// If `false`, other checkers may be consulted for confirmation.
+    /// # Arguments
+    /// * `result` - The result returned by this checker's `check` method
+    ///
+    /// # Returns
+    /// `true` if this result is definitive and subsequent checkers should be skipped.
+    fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
+        // Default implementation for backward compatibility logic:
+        // By default, stop only if authoritative AND found registered (available=false).
+        // Checkers should override this to provide specific logic.
+        if !result.available && self.is_authoritative() {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether this checker can definitively determine availability
+    /// (Deprecated: use `should_stop_pipeline` for more control)
     fn is_authoritative(&self) -> bool {
         false
     }

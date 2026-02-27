@@ -25,13 +25,58 @@ impl WhoisChecker {
     pub fn new() -> Self {
         let mut m = HashMap::new();
         // Common WHOIS servers
+        // gTLDs
         m.insert("com", "whois.verisign-grs.com");
         m.insert("net", "whois.verisign-grs.com");
         m.insert("org", "whois.pir.org");
+        m.insert("info", "whois.afilias.net");
+        m.insert("biz", "whois.biz");
+        m.insert("xyz", "whois.nic.xyz");
+        m.insert("top", "whois.nic.top");
+        m.insert("tech", "whois.nic.tech");
+        m.insert("site", "whois.nic.site");
+        m.insert("online", "whois.nic.online");
+        m.insert("store", "whois.nic.store");
+        m.insert("shop", "whois.nic.shop");
+        m.insert("app", "whois.nic.google");
+        m.insert("dev", "whois.nic.google");
+        m.insert("cloud", "whois.nic.cloud");
+        m.insert("club", "whois.nic.club");
+        m.insert("fun", "whois.nic.fun");
+        m.insert("icu", "whois.nic.icu");
+        m.insert("vip", "whois.nic.vip");
+        m.insert("work", "whois.nic.work");
+        m.insert("link", "whois.uniregistry.net");
+        m.insert("click", "whois.uniregistry.net");
+        m.insert("help", "whois.uniregistry.net");
+        m.insert("moe", "whois.nic.moe");
+
+        // ccTLDs
         m.insert("io", "whois.nic.io");
         m.insert("ai", "whois.nic.ai");
         m.insert("cn", "whois.cnnic.cn");
         m.insert("us", "whois.nic.us");
+        m.insert("ca", "whois.cira.ca");
+        m.insert("uk", "whois.nic.uk");
+        m.insert("de", "whois.denic.de");
+        m.insert("fr", "whois.nic.fr");
+        m.insert("it", "whois.nic.it");
+        m.insert("nl", "whois.sidn.nl");
+        m.insert("eu", "whois.eurid.eu");
+        m.insert("au", "whois.auda.org.au");
+        m.insert("co", "whois.nic.co");
+        m.insert("me", "whois.nic.me");
+        m.insert("tv", "whois.nic.tv");
+        m.insert("cc", "whois.nic.cc");
+        m.insert("ru", "whois.tcinet.ru");
+        m.insert("ch", "whois.nic.ch");
+        m.insert("se", "whois.iis.se");
+        m.insert("nu", "whois.iis.nu");
+        m.insert("in", "whois.registry.in");
+        m.insert("br", "whois.registry.br");
+        m.insert("kr", "whois.kr");
+        m.insert("jp", "whois.jprs.jp");
+
         // Add more as needed
 
         Self {
@@ -65,7 +110,7 @@ impl WhoisChecker {
                     return Some(ip);
                 }
             }
-            Err(e) => {
+            Err(_e) => {
                 // Log error if needed: println!("DNS Error for {}: {}", server_host, e);
             }
         }
