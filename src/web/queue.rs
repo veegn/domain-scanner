@@ -2,12 +2,26 @@ use super::models::{StartScanRequest, TaskControl, TaskSignal};
 use crate::checker::CheckerRegistry;
 use crate::generator;
 use crate::worker;
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use sqlx::{Row, sqlite::SqlitePool};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
+use tracing::{debug, error, info, warn};
+
+#[derive(Serialize)]
+struct ScanLogRecord {
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    fields: Map<String, Value>,
+}
 
 /// The single task background worker.
 pub async fn start_task_worker(
@@ -16,7 +30,11 @@ pub async fn start_task_worker(
     task_control: TaskControl,
     registry: Arc<CheckerRegistry>,
 ) {
-    println!("Background Task Worker started. Waiting for tasks...");
+    info!(
+        target: "domain_scanner::queue",
+        context = "worker",
+        "background task worker started"
+    );
 
     loop {
         let next_task = fetch_next_ready_task(&db).await;
@@ -52,24 +70,43 @@ pub async fn start_task_worker(
                 domains,
             };
 
-            println!("Starting Task: {}", scan_id);
-            let _ = add_log(&db, &scan_id, "INFO", "Task picked up by background worker").await;
-            let _ = add_log(
+            info!(
+                target: "domain_scanner::queue",
+                context = "task_start",
+                scan_id = %scan_id,
+                "starting task"
+            );
+            let _ = add_event_log(
                 &db,
                 &scan_id,
                 "INFO",
-                &format!(
-                    "TASK_CONFIG length={} suffix={} pattern={} regex={} source={}",
-                    params.length,
-                    params.suffix,
-                    params.pattern,
-                    params.regex.as_deref().unwrap_or("-"),
-                    if params.domains.is_some() {
-                        "manual-list"
-                    } else {
-                        "generated"
-                    }
-                ),
+                "task.picked",
+                None,
+                Some("Task picked up by background worker".to_string()),
+                vec![],
+            )
+            .await;
+            let _ = add_event_log(
+                &db,
+                &scan_id,
+                "INFO",
+                "task.config",
+                None,
+                None,
+                vec![
+                    ("length", json!(params.length)),
+                    ("suffix", json!(params.suffix)),
+                    ("pattern", json!(params.pattern)),
+                    ("regex", json!(params.regex.as_deref().unwrap_or("-"))),
+                    (
+                        "source",
+                        json!(if params.domains.is_some() {
+                            "manual-list"
+                        } else {
+                            "generated"
+                        }),
+                    ),
+                ],
             )
             .await;
 
@@ -82,12 +119,25 @@ pub async fn start_task_worker(
             .execute(&db)
             .await
             {
-                eprintln!("Task {} failed to mark as running: {}", scan_id, err);
-                let _ = add_log(
+                error!(
+                    target: "domain_scanner::queue",
+                    context = "task_status",
+                    scan_id = %scan_id,
+                    status = "running",
+                    error = %err,
+                    "failed to mark task as running"
+                );
+                let _ = add_event_log(
                     &db,
                     &scan_id,
                     "ERROR",
-                    &format!("Failed to mark task as running: {}", err),
+                    "task.status_update_failed",
+                    None,
+                    Some("Failed to mark task as running".to_string()),
+                    vec![
+                        ("error", json!(err.to_string())),
+                        ("status", json!("running")),
+                    ],
                 )
                 .await;
             }
@@ -103,16 +153,23 @@ pub async fn start_task_worker(
             )
             .await;
 
-            println!("Finished Task: {}", scan_id);
+            info!(
+                target: "domain_scanner::queue",
+                context = "task_finish",
+                scan_id = %scan_id,
+                "task processing loop exited"
+            );
             continue;
         }
 
         let next_retry_at = get_next_retry_not_before(&db).await.unwrap_or(None);
         if let Some(retry_at) = next_retry_at {
             let wait_secs = retry_at.saturating_sub(now_epoch_seconds()).max(1) as u64;
-            println!(
-                "No ready tasks. Background worker sleeping {}s until next retry window.",
-                wait_secs
+            debug!(
+                target: "domain_scanner::queue",
+                context = "scheduler",
+                wait_secs,
+                "no ready tasks; sleeping until next retry window"
             );
             match tokio::time::timeout(Duration::from_secs(wait_secs), rx.recv()).await {
                 Ok(Some(_)) => {}
@@ -143,7 +200,12 @@ async fn fetch_next_ready_task(db: &SqlitePool) -> Option<sqlx::sqlite::SqliteRo
     {
         Ok(row) => row,
         Err(e) => {
-            eprintln!("Background worker failed to query next task: {}", e);
+            error!(
+                target: "domain_scanner::queue",
+                context = "scheduler",
+                error = %e,
+                "failed to query next task"
+            );
             None
         }
     }
@@ -162,14 +224,17 @@ async fn run_scan_logic(
     let counts = get_result_counts(db, scan_id).await.unwrap_or((0, 0));
     let resume_processed = counts.0;
     let resume_found = counts.1;
-    let _ = add_log(
+    let _ = add_event_log(
         db,
         scan_id,
         "INFO",
-        &format!(
-            "RESUME_STATE processed={} found={}",
-            resume_processed, resume_found
-        ),
+        "task.resume",
+        None,
+        None,
+        vec![
+            ("processed", json!(resume_processed)),
+            ("found", json!(resume_found)),
+        ],
     )
     .await;
 
@@ -191,15 +256,24 @@ async fn run_scan_logic(
         tokio::spawn(async move {
             for domain in filtered_domains {
                 if TaskControl::signal(&signal_clone) != TaskSignal::Run {
-                    eprintln!(
-                        "Task {} feeder interrupted while enqueuing manual domains",
-                        scan_id
+                    debug!(
+                        target: "domain_scanner::queue",
+                        context = "feeder",
+                        scan_id = %scan_id,
+                        source = "manual",
+                        "feeder interrupted"
                     );
                     break;
                 }
                 pending_domains_clone.fetch_add(1, Ordering::Relaxed);
                 if tx.send(domain).await.is_err() {
-                    eprintln!("Task {} feeder stopped because job queue closed", scan_id);
+                    debug!(
+                        target: "domain_scanner::queue",
+                        context = "feeder",
+                        scan_id = %scan_id,
+                        source = "manual",
+                        "feeder stopped because job queue closed"
+                    );
                     pending_domains_clone.fetch_sub(1, Ordering::Relaxed);
                     break;
                 }
@@ -218,21 +292,29 @@ async fn run_scan_logic(
             resume_processed,
         ) {
             Ok(generator) => {
-                let _ = add_log(
+                let _ = add_event_log(
                     db,
                     scan_id,
                     "INFO",
-                    &format!(
-                        "Domain generator started. Total domains to check: {}",
-                        generator.total_count
-                    ),
+                    "generator.started",
+                    None,
+                    Some("Domain generator started".to_string()),
+                    vec![("total", json!(generator.total_count))],
                 )
                 .await;
                 generator
             }
             Err(e) => {
-                let err_msg = format!("Failed to generate domains: {}", e);
-                let _ = add_log(db, scan_id, "ERROR", &err_msg).await;
+                let _ = add_event_log(
+                    db,
+                    scan_id,
+                    "ERROR",
+                    "generator.failed",
+                    None,
+                    Some("Failed to generate domains".to_string()),
+                    vec![("error", json!(e.to_string()))],
+                )
+                .await;
                 let _ = sqlx::query(
                     "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                 )
@@ -253,14 +335,23 @@ async fn run_scan_logic(
             let mut generated = domain_gen.domains;
             while let Some(domain) = generated.recv().await {
                 if TaskControl::signal(&signal_clone) != TaskSignal::Run {
-                    eprintln!("Task {} generator feeder interrupted", scan_id);
+                    debug!(
+                        target: "domain_scanner::queue",
+                        context = "feeder",
+                        scan_id = %scan_id,
+                        source = "generator",
+                        "generator feeder interrupted"
+                    );
                     break;
                 }
                 pending_domains_clone.fetch_add(1, Ordering::Relaxed);
                 if tx.send(domain).await.is_err() {
-                    eprintln!(
-                        "Task {} generator feeder stopped because job queue closed",
-                        scan_id
+                    debug!(
+                        target: "domain_scanner::queue",
+                        context = "feeder",
+                        scan_id = %scan_id,
+                        source = "generator",
+                        "generator feeder stopped because job queue closed"
                     );
                     pending_domains_clone.fetch_sub(1, Ordering::Relaxed);
                     break;
@@ -273,12 +364,18 @@ async fn run_scan_logic(
     let mut jobs_tx = Some(jobs_tx);
     let jobs_rx = Arc::new(Mutex::new(jobs_rx));
 
-    let _ = add_log(db, scan_id, "INFO", "Spawning worker threads...").await;
-    let _ = add_log(
+    let _ = add_event_log(
         db,
         scan_id,
         "INFO",
-        &format!("WORKER_POOL size=10 delay_ms=500 total={}", total),
+        "worker.pool",
+        None,
+        Some("Spawning worker threads".to_string()),
+        vec![
+            ("size", json!(10)),
+            ("delay_ms", json!(500)),
+            ("total", json!(total)),
+        ],
     )
     .await;
 
@@ -292,11 +389,14 @@ async fn run_scan_logic(
     .execute(db)
     .await
     {
-        let _ = add_log(
+        let _ = add_event_log(
             db,
             scan_id,
             "ERROR",
-            &format!("Failed to initialize scan counters: {}", e),
+            "storage.counters_init_failed",
+            None,
+            Some("Failed to initialize scan counters".to_string()),
+            vec![("error", json!(e.to_string()))],
         )
         .await;
         task_control.unregister(scan_id);
@@ -344,26 +444,44 @@ async fn run_scan_logic(
             let mut jobs = jobs_rx.lock().await;
             jobs.close();
             jobs_tx.take();
-            let _ = add_log(
+            let _ = add_event_log(
                 db,
                 scan_id,
                 "WARN",
-                "Task signal changed from RUN; closing job queue",
+                "task.signal_changed",
+                None,
+                Some("Task signal changed from RUN; closing job queue".to_string()),
+                vec![(
+                    "signal",
+                    json!(format!("{:?}", TaskControl::signal(&task_signal))),
+                )],
             )
             .await;
         }
 
         match msg {
             crate::WorkerMessage::Scanning(domain) => {
-                let _ = add_log(db, scan_id, "INFO", &format!("SCANNING {}", domain)).await;
+                let _ = add_event_log(
+                    db,
+                    scan_id,
+                    "INFO",
+                    "domain.scanning",
+                    Some(domain.as_str()),
+                    None,
+                    vec![],
+                )
+                .await;
             }
             crate::WorkerMessage::Result(res) => {
                 if !res.trace.is_empty() {
-                    let _ = add_log(
+                    let _ = add_event_log(
                         db,
                         scan_id,
                         "INFO",
-                        &format!("TRACE {} :: {}", res.domain, res.trace.join(" | ")),
+                        "domain.trace",
+                        Some(res.domain.as_str()),
+                        None,
+                        vec![("steps", json!(res.trace))],
                     )
                     .await;
                 }
@@ -386,14 +504,19 @@ async fn run_scan_logic(
                             "continuous-timeout-retry"
                         };
                         let level = if res.rate_limited { "WARN" } else { "INFO" };
-                        let _ = add_log(
+                        let _ = add_event_log(
                             db,
                             scan_id,
                             level,
-                            &format!(
-                                "RETRY {} :: attempt {} in {}s :: {} :: {}",
-                                res.domain, *attempt, delay_secs, policy, reason
-                            ),
+                            "domain.retry",
+                            Some(res.domain.as_str()),
+                            Some(reason),
+                            vec![
+                                ("attempt", json!(*attempt)),
+                                ("delay_secs", json!(delay_secs)),
+                                ("policy", json!(policy)),
+                                ("rate_limited", json!(res.rate_limited)),
+                            ],
                         )
                         .await;
 
@@ -411,16 +534,19 @@ async fn run_scan_logic(
                             continue;
                         }
                     } else {
-                        let _ = add_log(
+                        let _ = add_event_log(
                             db,
                             scan_id,
                             "ERROR",
-                            &format!(
-                                "RETRY_EXHAUSTED {} :: after {} attempts :: {}",
-                                res.domain,
-                                *attempt,
-                                res.error.as_deref().unwrap_or("transient failure")
+                            "domain.retry_exhausted",
+                            Some(res.domain.as_str()),
+                            Some(
+                                res.error
+                                    .as_deref()
+                                    .unwrap_or("transient failure")
+                                    .to_string(),
                             ),
+                            vec![("attempt", json!(*attempt))],
                         )
                         .await;
                     }
@@ -432,25 +558,42 @@ async fn run_scan_logic(
 
                 if res.available {
                     found += 1;
-                    let _ =
-                        add_log(db, scan_id, "INFO", &format!("AVAILABLE {}", res.domain)).await;
+                    let _ = add_event_log(
+                        db,
+                        scan_id,
+                        "INFO",
+                        "domain.available",
+                        Some(res.domain.as_str()),
+                        None,
+                        vec![],
+                    )
+                    .await;
                 } else if let Some(err) = res.error {
-                    let _ = add_log(
+                    let _ = add_event_log(
                         db,
                         scan_id,
                         "WARN",
-                        &format!("ERROR {} :: {}", res.domain, err),
+                        "domain.error",
+                        Some(res.domain.as_str()),
+                        Some(err),
+                        vec![],
                     )
                     .await;
                 } else {
-                    let mut message = format!("REGISTERED {}", res.domain);
-                    if !res.signatures.is_empty() {
-                        message.push_str(&format!(" :: {}", res.signatures.join(",")));
-                    }
+                    let mut fields = vec![("signatures", json!(res.signatures))];
                     if let Some(expiration_date) = &res.expiration_date {
-                        message.push_str(&format!(" :: expires {}", expiration_date));
+                        fields.push(("expiration_date", json!(expiration_date)));
                     }
-                    let _ = add_log(db, scan_id, "INFO", &message).await;
+                    let _ = add_event_log(
+                        db,
+                        scan_id,
+                        "INFO",
+                        "domain.registered",
+                        Some(res.domain.as_str()),
+                        None,
+                        fields,
+                    )
+                    .await;
                 }
 
                 if let Err(err) = sqlx::query(
@@ -465,15 +608,22 @@ async fn run_scan_logic(
                 .execute(db)
                 .await
                 {
-                    eprintln!(
-                        "Task {} failed to persist result for {}: {}",
-                        scan_id, res.domain, err
+                    error!(
+                        target: "domain_scanner::queue",
+                        context = "storage",
+                        scan_id = %scan_id,
+                        domain = %res.domain,
+                        error = %err,
+                        "failed to persist result"
                     );
-                    let _ = add_log(
+                    let _ = add_event_log(
                         db,
                         scan_id,
                         "ERROR",
-                        &format!("Failed to persist result for {}: {}", res.domain, err),
+                        "storage.result_persist_failed",
+                        Some(res.domain.as_str()),
+                        Some("Failed to persist result".to_string()),
+                        vec![("error", json!(err.to_string()))],
                     )
                     .await;
                 }
@@ -489,18 +639,27 @@ async fn run_scan_logic(
                             .execute(db)
                             .await
                     {
-                        eprintln!(
-                            "Task {} failed to persist counters processed={} found={}: {}",
-                            scan_id, processed, found, err
+                        error!(
+                            target: "domain_scanner::queue",
+                            context = "storage",
+                            scan_id = %scan_id,
+                            processed,
+                            found,
+                            error = %err,
+                            "failed to persist counters"
                         );
-                        let _ = add_log(
+                        let _ = add_event_log(
                             db,
                             scan_id,
                             "ERROR",
-                            &format!(
-                                "Failed to persist counters processed={} found={}: {}",
-                                processed, found, err
-                            ),
+                            "storage.counters_persist_failed",
+                            None,
+                            Some("Failed to persist counters".to_string()),
+                            vec![
+                                ("processed", json!(processed)),
+                                ("found", json!(found)),
+                                ("error", json!(err.to_string())),
+                            ],
                         )
                         .await;
                     }
@@ -518,14 +677,14 @@ async fn run_scan_logic(
 
     match TaskControl::signal(&task_signal) {
         TaskSignal::Cancel => {
-            let _ = add_log(
+            let _ = add_event_log(
                 db,
                 scan_id,
                 "WARN",
-                &format!(
-                    "Scan cancelled after {} domains processed. {} available found.",
-                    processed, found
-                ),
+                "task.cancelled",
+                None,
+                Some("Scan cancelled".to_string()),
+                vec![("processed", json!(processed)), ("found", json!(found))],
             )
             .await;
             // Soft-delete: mark as 'cancelled' to preserve results and logs.
@@ -539,16 +698,26 @@ async fn run_scan_logic(
             .execute(db)
             .await
             {
-                eprintln!("Task {} failed to mark cancelled: {}", scan_id, err);
+                error!(
+                    target: "domain_scanner::queue",
+                    context = "task_status",
+                    scan_id = %scan_id,
+                    status = "cancelled",
+                    error = %err,
+                    "failed to mark task cancelled"
+                );
             }
         }
         TaskSignal::Pause => {}
         TaskSignal::Run => {
-            let _ = add_log(
+            let _ = add_event_log(
                 db,
                 scan_id,
                 "INFO",
-                &format!("SUMMARY processed={} available={}", processed, found),
+                "task.summary",
+                None,
+                Some("Scan completed".to_string()),
+                vec![("processed", json!(processed)), ("available", json!(found))],
             )
             .await;
             if let Err(err) = sqlx::query(
@@ -562,12 +731,22 @@ async fn run_scan_logic(
             .execute(db)
             .await
             {
-                eprintln!("Task {} failed to mark finished: {}", scan_id, err);
-                let _ = add_log(
+                error!(
+                    target: "domain_scanner::queue",
+                    context = "task_status",
+                    scan_id = %scan_id,
+                    status = "finished",
+                    error = %err,
+                    "failed to mark task finished"
+                );
+                let _ = add_event_log(
                     db,
                     scan_id,
                     "ERROR",
-                    &format!("Failed to mark task finished: {}", err),
+                    "task.status_update_failed",
+                    None,
+                    Some("Failed to mark task finished".to_string()),
+                    vec![("error", json!(err.to_string())), ("status", json!("finished"))],
                 )
                 .await;
             }
@@ -590,13 +769,48 @@ async fn add_log(
         .execute(db)
         .await
         .map_err(|err| {
-            eprintln!(
-                "Task {} failed to write scan log level={} message={}: {}",
-                scan_id, level, message, err
+            warn!(
+                target: "domain_scanner::queue",
+                context = "scan_log",
+                scan_id = %scan_id,
+                level,
+                error = %err,
+                "failed to write scan log"
             );
             err
         })?;
     Ok(())
+}
+
+async fn add_event_log(
+    db: &SqlitePool,
+    scan_id: &str,
+    level: &str,
+    event: &str,
+    domain: Option<&str>,
+    message: Option<String>,
+    fields: Vec<(&str, Value)>,
+) -> Result<(), sqlx::Error> {
+    let mut field_map = Map::new();
+    for (key, value) in fields {
+        field_map.insert(key.to_string(), value);
+    }
+
+    let payload = ScanLogRecord {
+        event: event.to_string(),
+        domain: domain.map(ToOwned::to_owned),
+        message,
+        fields: field_map,
+    };
+
+    let serialized = serde_json::to_string(&payload).unwrap_or_else(|err| {
+        format!(
+            r#"{{"event":"log.serialization_failed","message":"{}","fields":{{"source_event":"{}"}}}}"#,
+            err, event
+        )
+    });
+
+    add_log(db, scan_id, level, &serialized).await
 }
 
 async fn get_result_counts(db: &SqlitePool, scan_id: &str) -> Result<(i64, i64), sqlx::Error> {

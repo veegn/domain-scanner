@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
 pub async fn worker(
     id: usize,
@@ -14,10 +15,14 @@ pub async fn worker(
     registry: Arc<CheckerRegistry>,
     stop_signal: Arc<AtomicU8>,
 ) {
-    println!("Worker {} started", id);
     loop {
         if stop_signal.load(Ordering::Relaxed) != 0 {
-            println!("Worker {} stopping due to task signal", id);
+            debug!(
+                target: "domain_scanner::worker",
+                context = "lifecycle",
+                worker_id = id,
+                "worker stopping due to task signal"
+            );
             break;
         }
 
@@ -35,9 +40,11 @@ pub async fn worker(
                     .await
                     .is_err()
                 {
-                    eprintln!(
-                        "Worker {} failed to publish scanning event because result channel closed",
-                        id
+                    warn!(
+                        target: "domain_scanner::worker",
+                        context = "publish",
+                        worker_id = id,
+                        "failed to publish scanning event because result channel closed"
                     );
                     break;
                 }
@@ -62,17 +69,21 @@ pub async fn worker(
                     .await
                     .is_err()
                 {
-                    eprintln!(
-                        "Worker {} failed to publish result because result channel closed",
-                        id
+                    warn!(
+                        target: "domain_scanner::worker",
+                        context = "publish",
+                        worker_id = id,
+                        "failed to publish result because result channel closed"
                     );
                     break;
                 }
 
                 if stop_signal.load(Ordering::Relaxed) != 0 {
-                    println!(
-                        "Worker {} observed stop signal after processing a domain",
-                        id
+                    debug!(
+                        target: "domain_scanner::worker",
+                        context = "lifecycle",
+                        worker_id = id,
+                        "worker observed stop signal after processing a domain"
                     );
                     break;
                 }
@@ -80,10 +91,14 @@ pub async fn worker(
                 tokio::time::sleep(delay).await;
             }
             None => {
-                println!("Worker {} exiting because job queue is closed", id);
+                debug!(
+                    target: "domain_scanner::worker",
+                    context = "lifecycle",
+                    worker_id = id,
+                    "worker exiting because job queue is closed"
+                );
                 break;
             }
         }
     }
-    println!("Worker {} exited", id);
 }

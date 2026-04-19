@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
@@ -23,6 +24,33 @@ pub struct AppConfig {
     /// RDAP bootstrap URL. Leave empty to disable RDAP or set to the IANA endpoint.
     #[serde(default)]
     pub rdap_bootstrap_url: Option<String>,
+
+    /// Logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LoggingConfig {
+    /// Whether to keep logging to stdout/stderr.
+    #[serde(default = "default_true")]
+    pub console_enabled: bool,
+
+    /// Whether to persist logs to files.
+    #[serde(default = "default_true")]
+    pub file_enabled: bool,
+
+    /// Directory where log files are written.
+    #[serde(default = "default_log_dir")]
+    pub directory: PathBuf,
+
+    /// File name prefix, final file name is prefix-YYYY-MM-DD.log.
+    #[serde(default = "default_log_prefix")]
+    pub file_prefix: String,
+
+    /// Number of log files to keep. Older files are deleted on startup.
+    #[serde(default = "default_log_retention")]
+    pub max_files: usize,
 }
 
 impl Default for AppConfig {
@@ -32,6 +60,19 @@ impl Default for AppConfig {
             whois_servers: HashMap::new(),
             rdap_servers: HashMap::new(),
             rdap_bootstrap_url: None,
+            logging: LoggingConfig::default(),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            console_enabled: true,
+            file_enabled: true,
+            directory: default_log_dir(),
+            file_prefix: default_log_prefix(),
+            max_files: default_log_retention(),
         }
     }
 }
@@ -46,12 +87,24 @@ impl AppConfig {
             Ok(content) => match serde_json::from_str::<Self>(&content) {
                 Ok(config) => config,
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse config file {}: {}", path, e);
+                    warn!(
+                        target: "domain_scanner::config",
+                        context = "config_load",
+                        path,
+                        error = %e,
+                        "failed to parse config file, using defaults"
+                    );
                     Self::default()
                 }
             },
             Err(e) => {
-                eprintln!("Warning: Failed to read config file {}: {}", path, e);
+                warn!(
+                    target: "domain_scanner::config",
+                    context = "config_load",
+                    path,
+                    error = %e,
+                    "failed to read config file, using defaults"
+                );
                 Self::default()
             }
         }
@@ -64,4 +117,20 @@ impl AppConfig {
             }
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_log_dir() -> PathBuf {
+    PathBuf::from("logs")
+}
+
+fn default_log_prefix() -> String {
+    "domain-scanner".to_string()
+}
+
+fn default_log_retention() -> usize {
+    14
 }

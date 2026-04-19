@@ -1,4 +1,4 @@
--- Domain Scanner â€?default seed data
+-- Domain Scanner ï¿½?default seed data
 -- Executed once on first startup when tables are empty.
 -- Safe to re-run: all inserts use INSERT OR IGNORE.
 

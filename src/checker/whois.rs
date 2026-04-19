@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
+use tracing::{debug, warn};
 
 use super::circuit_breaker::CircuitBreaker;
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
@@ -142,10 +143,12 @@ impl WhoisChecker {
             };
 
             if let Some(delay) = sleep_for {
-                println!(
-                    "WHOIS throttling server {} for {}ms before next request",
+                debug!(
+                    target: "domain_scanner::checker::whois",
+                    context = "throttle",
                     server,
-                    delay.as_millis()
+                    delay_ms = delay.as_millis() as u64,
+                    "waiting for WHOIS throttle window"
                 );
                 tokio::time::sleep(delay).await;
             } else {
@@ -173,11 +176,14 @@ impl WhoisChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after = Duration::from_secs(30).max(guard.min_interval);
         guard.next_allowed_at = Instant::now() + retry_after;
-        eprintln!(
-            "WHOIS timeout backoff updated for {}: min_interval={}ms retry_after={}s",
+        warn!(
+            target: "domain_scanner::checker::whois",
+            context = "backoff",
             server,
-            guard.min_interval.as_millis(),
-            retry_after.as_secs()
+            reason = "timeout",
+            min_interval_ms = guard.min_interval.as_millis() as u64,
+            retry_after_secs = retry_after.as_secs(),
+            "WHOIS timeout backoff updated"
         );
         retry_after
     }
@@ -199,11 +205,14 @@ impl WhoisChecker {
             .retry_after
             .unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
         guard.next_allowed_at = Instant::now() + retry_after;
-        eprintln!(
-            "WHOIS rate limit backoff updated for {}: min_interval={}ms retry_after={}s",
+        warn!(
+            target: "domain_scanner::checker::whois",
+            context = "backoff",
             server,
-            guard.min_interval.as_millis(),
-            retry_after.as_secs()
+            reason = "rate_limit",
+            min_interval_ms = guard.min_interval.as_millis() as u64,
+            retry_after_secs = retry_after.as_secs(),
+            "WHOIS rate-limit backoff updated"
         );
         retry_after
     }
@@ -229,7 +238,12 @@ impl WhoisChecker {
             }
             Err(_) => {}
         }
-        eprintln!("WHOIS failed to resolve server host {}", server_host);
+        warn!(
+            target: "domain_scanner::checker::whois",
+            context = "dns",
+            server_host,
+            "failed to resolve WHOIS server host"
+        );
         None
     }
 
@@ -335,7 +349,6 @@ impl DomainChecker for WhoisChecker {
 
     async fn check(&self, domain: &str) -> CheckResult {
         if !self.cb.allow_request() {
-            eprintln!("WHOIS circuit breaker open for domain {}", domain);
             return CheckResult::rate_limited_with_retry("WHOIS circuit breaker open", Some(60))
                 .with_trace("WHOIS: circuit breaker open");
         }
@@ -351,10 +364,6 @@ impl DomainChecker for WhoisChecker {
         let server = if let Some(s) = self.server_map.get(&suffix) {
             s.as_str()
         } else {
-            println!(
-                "WHOIS skipped unsupported suffix {} for domain {}",
-                suffix, domain
-            );
             return CheckResult::available().with_trace(format!("WHOIS: no server for {}", suffix));
         };
 
@@ -364,9 +373,13 @@ impl DomainChecker for WhoisChecker {
                     self.cb.record_failure();
                     let hint = self.sniff_rate_limit_hint(&response);
                     let retry_after = self.record_rate_limit(server, hint).await;
-                    eprintln!(
-                        "WHOIS detected rate limit for domain {} via server {}",
-                        domain, server
+                    warn!(
+                        target: "domain_scanner::checker::whois",
+                        context = "query",
+                        domain,
+                        server,
+                        retry_after_secs = retry_after.as_secs(),
+                        "WHOIS detected rate limit"
                     );
                     return CheckResult::rate_limited_with_retry(
                         format!("WHOIS rate limit exceeded on {}", server),
@@ -379,14 +392,9 @@ impl DomainChecker for WhoisChecker {
                 self.record_success(server).await;
 
                 if self.is_available(&response) {
-                    println!("WHOIS marked domain {} as available via {}", domain, server);
                     CheckResult::available().with_trace(format!("WHOIS: available via {}", server))
                 } else {
                     let expiry = self.extract_expiry(&response);
-                    println!(
-                        "WHOIS marked domain {} as registered via {}",
-                        domain, server
-                    );
                     CheckResult::registered_with_expiry(vec!["WHOIS".to_string()], expiry)
                         .with_trace(format!("WHOIS: registered via {}", server))
                 }
@@ -395,9 +403,14 @@ impl DomainChecker for WhoisChecker {
                 self.cb.record_failure();
                 if is_timeout_error(&e) {
                     let retry_after = self.record_timeout(server).await;
-                    eprintln!(
-                        "WHOIS timeout for domain {} via server {}: {}",
-                        domain, server, e
+                    warn!(
+                        target: "domain_scanner::checker::whois",
+                        context = "query",
+                        domain,
+                        server,
+                        error = %e,
+                        retry_after_secs = retry_after.as_secs(),
+                        "WHOIS timeout"
                     );
                     CheckResult::retryable_error(
                         format!("WHOIS timeout on {}: {}", server, e),
@@ -405,9 +418,13 @@ impl DomainChecker for WhoisChecker {
                     )
                     .with_trace(format!("WHOIS: timeout via {}", server))
                 } else {
-                    eprintln!(
-                        "WHOIS terminal error for domain {} via server {}: {}",
-                        domain, server, e
+                    debug!(
+                        target: "domain_scanner::checker::whois",
+                        context = "query",
+                        domain,
+                        server,
+                        error = %e,
+                        "WHOIS terminal error"
                     );
                     CheckResult::error(format!("WHOIS: {}", e))
                         .with_trace(format!("WHOIS: error via {}", server))

@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
@@ -76,17 +77,25 @@ impl RdapChecker {
         if let Some(url) = bootstrap_url.filter(|url| !url.trim().is_empty()) {
             match fetch_bootstrap_map_with_cache(&url, cache_dir.as_deref()).await {
                 Ok(bootstrap_endpoints) => {
-                    println!(
-                        "RDAP bootstrap loaded from {} with {} suffix mappings",
-                        url,
-                        bootstrap_endpoints.len()
+                    info!(
+                        target: "domain_scanner::checker::rdap",
+                        context = "bootstrap",
+                        source = %url,
+                        mappings = bootstrap_endpoints.len(),
+                        "RDAP bootstrap loaded"
                     );
                     for (suffix, endpoint) in bootstrap_endpoints {
                         endpoint_map.entry(suffix).or_insert(endpoint);
                     }
                 }
                 Err(err) => {
-                    eprintln!("Warning: Failed to load RDAP bootstrap {}: {}", url, err);
+                    warn!(
+                        target: "domain_scanner::checker::rdap",
+                        context = "bootstrap",
+                        source = %url,
+                        error = %err,
+                        "failed to load RDAP bootstrap"
+                    );
                 }
             }
         }
@@ -261,17 +270,31 @@ async fn fetch_bootstrap_map_with_cache(
     let cache_path = cache_file_path(url, cache_dir)?;
     if let Some(cache) = read_cache_file(&cache_path) {
         if cache.source_url == url && is_cache_fresh(cache.fetched_at_epoch_secs) {
-            println!("RDAP bootstrap cache hit: {:?}", cache_path);
+            debug!(
+                target: "domain_scanner::checker::rdap",
+                context = "bootstrap_cache",
+                path = %cache_path.display(),
+                "RDAP bootstrap cache hit"
+            );
             return Ok(cache.endpoint_map);
         }
-        println!("RDAP bootstrap cache stale: {:?}", cache_path);
+        debug!(
+            target: "domain_scanner::checker::rdap",
+            context = "bootstrap_cache",
+            path = %cache_path.display(),
+            "RDAP bootstrap cache stale"
+        );
     }
 
     match fetch_bootstrap_map(url).await {
         Ok(endpoint_map) => {
-            println!(
-                "RDAP bootstrap refreshed from remote {} into cache {:?}",
-                url, cache_path
+            info!(
+                target: "domain_scanner::checker::rdap",
+                context = "bootstrap_cache",
+                source = %url,
+                path = %cache_path.display(),
+                mappings = endpoint_map.len(),
+                "RDAP bootstrap cache refreshed"
             );
             write_cache_file(
                 &cache_path,
@@ -286,16 +309,22 @@ async fn fetch_bootstrap_map_with_cache(
         Err(fetch_err) => {
             if let Some(cache) = read_cache_file(&cache_path) {
                 if cache.source_url == url {
-                    eprintln!(
-                        "Warning: Failed to refresh RDAP bootstrap {}; using cached data: {}",
-                        url, fetch_err
+                    warn!(
+                        target: "domain_scanner::checker::rdap",
+                        context = "bootstrap_cache",
+                        source = %url,
+                        error = %fetch_err,
+                        "failed to refresh RDAP bootstrap; using cached data"
                     );
                     return Ok(cache.endpoint_map);
                 }
             }
-            eprintln!(
-                "Warning: RDAP bootstrap unavailable and no cache fallback for {}: {}",
-                url, fetch_err
+            warn!(
+                target: "domain_scanner::checker::rdap",
+                context = "bootstrap_cache",
+                source = %url,
+                error = %fetch_err,
+                "RDAP bootstrap unavailable and no cache fallback"
             );
             Err(fetch_err)
         }
@@ -330,9 +359,12 @@ fn write_cache_file(path: &Path, cache: &BootstrapCacheFile) {
         return;
     };
     if let Err(err) = fs::create_dir_all(parent) {
-        eprintln!(
-            "Warning: Failed to create RDAP cache dir {:?}: {}",
-            parent, err
+        warn!(
+            target: "domain_scanner::checker::rdap",
+            context = "bootstrap_cache",
+            path = %parent.display(),
+            error = %err,
+            "failed to create RDAP cache directory"
         );
         return;
     }
@@ -340,16 +372,25 @@ fn write_cache_file(path: &Path, cache: &BootstrapCacheFile) {
     let serialized = match serde_json::to_vec(cache) {
         Ok(serialized) => serialized,
         Err(err) => {
-            eprintln!(
-                "Warning: Failed to serialize RDAP cache {:?}: {}",
-                path, err
+            warn!(
+                target: "domain_scanner::checker::rdap",
+                context = "bootstrap_cache",
+                path = %path.display(),
+                error = %err,
+                "failed to serialize RDAP cache"
             );
             return;
         }
     };
 
     if let Err(err) = fs::write(path, serialized) {
-        eprintln!("Warning: Failed to write RDAP cache {:?}: {}", path, err);
+        warn!(
+            target: "domain_scanner::checker::rdap",
+            context = "bootstrap_cache",
+            path = %path.display(),
+            error = %err,
+            "failed to write RDAP cache"
+        );
     }
 }
 

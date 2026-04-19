@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
@@ -71,8 +72,6 @@ impl DohChecker {
         // Latency check
         let mut healthy_servers = Vec::new();
         let mut slow_servers = Vec::new();
-        println!("Performing DoH server latency check...");
-
         for server in &servers {
             let start = Instant::now();
             let test_url = format!("{}?name=apple.com.&type=A", server);
@@ -88,44 +87,53 @@ impl DohChecker {
                     let latency_ms = elapsed.as_millis();
                     if resp.status().is_success() {
                         if latency_ms < 250 {
-                            println!("  \x1b[32m[OK]\x1b[0m {} ({}ms)", server, latency_ms);
                             healthy_servers.push(server.clone());
                         } else {
-                            println!(
-                                "  \x1b[33m[SLOW]\x1b[0m {} ({}ms > 100ms)",
-                                server, latency_ms
-                            );
                             slow_servers.push(server.clone());
                         }
-                    } else {
-                        println!(
-                            "  \x1b[31m[FAIL]\x1b[0m {} (Status: {})",
+                    } else if resp.status().is_server_error() {
+                        warn!(
+                            target: "domain_scanner::checker::doh",
+                            context = "startup",
                             server,
-                            resp.status()
+                            status = %resp.status(),
+                            "DoH latency probe failed"
                         );
                     }
                 }
-                Err(e) => {
-                    println!("  \x1b[31m[ERR]\x1b[0m {} ({})", server, e);
-                }
+                Err(e) => debug!(
+                    target: "domain_scanner::checker::doh",
+                    context = "startup",
+                    server,
+                    error = %e,
+                    "DoH latency probe request error"
+                ),
             }
         }
 
         let final_servers = if !healthy_servers.is_empty() {
-            println!(
-                "Selected {} healthy DoH servers (<250ms).",
-                healthy_servers.len()
+            info!(
+                target: "domain_scanner::checker::doh",
+                context = "startup",
+                selected = healthy_servers.len(),
+                slow_fallback = slow_servers.len(),
+                "selected healthy DoH servers"
             );
             healthy_servers
         } else if !slow_servers.is_empty() {
-            println!(
-                "\x1b[33mWarning: No fast servers found. Using {} slow servers.\x1b[0m",
-                slow_servers.len()
+            warn!(
+                target: "domain_scanner::checker::doh",
+                context = "startup",
+                selected = slow_servers.len(),
+                "no fast DoH servers found; using slow fallback"
             );
             slow_servers
         } else {
-            println!(
-                "\x1b[31mError: All DoH servers failed. Using all provided servers as fallback.\x1b[0m"
+            warn!(
+                target: "domain_scanner::checker::doh",
+                context = "startup",
+                fallback = servers.len(),
+                "all DoH probes failed; using original server list"
             );
             servers
         };
@@ -150,13 +158,17 @@ impl DomainChecker for DohChecker {
 
     async fn check(&self, domain: &str) -> CheckResult {
         if !self.cb.allow_request() {
-            eprintln!("DoH circuit breaker open for domain {}", domain);
             return CheckResult::rate_limited("DoH circuit breaker open")
                 .with_trace("DoH: circuit breaker open");
         }
 
         if self.servers.is_empty() {
-            eprintln!("DoH has no available servers for domain {}", domain);
+            warn!(
+                target: "domain_scanner::checker::doh",
+                context = "runtime",
+                domain,
+                "no DoH servers available"
+            );
             return CheckResult::error("No DoH servers available")
                 .with_trace("DoH: no servers available");
         }
@@ -176,9 +188,13 @@ impl DomainChecker for DohChecker {
             Ok(r) => r,
             Err(e) => {
                 self.cb.record_failure();
-                eprintln!(
-                    "DoH request error for domain {} via server {}: {}",
-                    domain, server, e
+                debug!(
+                    target: "domain_scanner::checker::doh",
+                    context = "request",
+                    domain,
+                    server,
+                    error = %e,
+                    "DoH request failed"
                 );
                 return CheckResult::error(format!("DoH request failed: {}", e))
                     .with_trace(format!("DoH: request error via {}", server));
@@ -188,16 +204,24 @@ impl DomainChecker for DohChecker {
         if !resp.status().is_success() {
             if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 self.cb.record_failure();
-                eprintln!("DoH rate limit for domain {} via server {}", domain, server);
+                warn!(
+                    target: "domain_scanner::checker::doh",
+                    context = "request",
+                    domain,
+                    server,
+                    "DoH rate limited"
+                );
                 return CheckResult::rate_limited("DoH rate limit exceeded (HTTP 429)")
                     .with_trace(format!("DoH: HTTP 429 via {}", server));
             }
             self.cb.record_failure();
-            eprintln!(
-                "DoH non-success HTTP for domain {} via server {}: {}",
+            debug!(
+                target: "domain_scanner::checker::doh",
+                context = "request",
                 domain,
                 server,
-                resp.status()
+                status = %resp.status(),
+                "DoH returned non-success HTTP"
             );
             // Non-429 HTTP errors (5xx, 403, 502...) mean we cannot determine availability.
             // Return error so the pipeline falls through to RDAP/WHOIS for confirmation.
@@ -210,9 +234,13 @@ impl DomainChecker for DohChecker {
         let result: DohResponse = match resp.json().await {
             Ok(r) => r,
             Err(err) => {
-                eprintln!(
-                    "DoH failed to parse response for domain {} via server {}: {}",
-                    domain, server, err
+                debug!(
+                    target: "domain_scanner::checker::doh",
+                    context = "response",
+                    domain,
+                    server,
+                    error = %err,
+                    "DoH response parse failed"
                 );
                 return CheckResult::available()
                     .with_trace(format!("DoH: parse failed via {}", server));
@@ -221,19 +249,11 @@ impl DomainChecker for DohChecker {
 
         if let Some(answers) = result.answer {
             if !answers.is_empty() {
-                println!(
-                    "DoH found NS records for domain {} via server {}",
-                    domain, server
-                );
                 return CheckResult::registered(vec!["DNS".to_string()])
                     .with_trace(format!("DoH: NS records found via {}", server));
             }
         }
 
-        println!(
-            "DoH found no NS records for domain {} via server {}",
-            domain, server
-        );
         CheckResult::available().with_trace(format!("DoH: no NS records via {}", server))
     }
 
@@ -269,7 +289,12 @@ mod tests {
         if result.available {
             // If marked available, check if it was an error
             if let Some(e) = result.error {
-                eprintln!("DoH Check failed with error: {}", e);
+                debug!(
+                    target: "domain_scanner::checker::doh",
+                    context = "test",
+                    error = %e,
+                    "DoH check failed in live test"
+                );
             }
         } else {
             assert!(result.signatures.contains(&"DNS".to_string()));

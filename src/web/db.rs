@@ -1,5 +1,6 @@
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
+use tracing::{info, warn};
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 
@@ -133,12 +134,23 @@ pub async fn seed_defaults(pool: &SqlitePool) {
         return;
     }
 
-    println!("Seeding default TLDs / WHOIS servers into database...");
+    info!(
+        target: "domain_scanner::db",
+        context = "seed",
+        tld_seed_needed = tld_count == 0,
+        whois_seed_needed = whois_count == 0,
+        "seeding default catalog data"
+    );
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            eprintln!("Warning: Could not begin seed transaction: {}", e);
+            warn!(
+                target: "domain_scanner::db",
+                context = "seed",
+                error = %e,
+                "could not begin seed transaction"
+            );
             return;
         }
     };
@@ -168,13 +180,28 @@ pub async fn seed_defaults(pool: &SqlitePool) {
 
         if let Err(e) = sqlx::query(&stmt).execute(&mut *tx).await {
             let seed_type = if seeds_tlds { "TLD" } else { "WHOIS" };
-            eprintln!("Warning: {} seed statement failed: {}", seed_type, e);
+            warn!(
+                target: "domain_scanner::db",
+                context = "seed",
+                seed_type,
+                error = %e,
+                "seed statement failed"
+            );
         }
     }
 
     match tx.commit().await {
-        Ok(_) => println!("Database seeded successfully."),
-        Err(e) => eprintln!("Warning: Seed commit failed: {}", e),
+        Ok(_) => info!(
+            target: "domain_scanner::db",
+            context = "seed",
+            "database seed completed"
+        ),
+        Err(e) => warn!(
+            target: "domain_scanner::db",
+            context = "seed",
+            error = %e,
+            "seed commit failed"
+        ),
     }
 }
 

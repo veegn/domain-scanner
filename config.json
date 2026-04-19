@@ -2,5 +2,12 @@
   "doh_servers": [],
   "whois_servers": {},
   "rdap_servers": {},
-  "rdap_bootstrap_url": "https://data.iana.org/rdap/dns.json"
+  "rdap_bootstrap_url": "https://data.iana.org/rdap/dns.json",
+  "logging": {
+    "console_enabled": true,
+    "file_enabled": true,
+    "directory": "logs",
+    "file_prefix": "domain-scanner",
+    "max_files": 14
+  }
 }

@@ -11,6 +11,7 @@ use super::rdap::RdapChecker;
 use super::traits::{CheckResult, DomainChecker};
 use super::whois::WhoisChecker;
 use crate::config::AppConfig;
+use tracing::{debug, error, info, warn};
 
 /// Registry that manages multiple domain checkers.
 ///
@@ -31,10 +32,10 @@ impl CheckerRegistry {
     /// Create a registry with the default set of checkers.
     ///
     /// Default checkers (in priority order):
-    /// 1. `LocalReservedChecker` â€?fast local reserved-name check (no network)
-    /// 2. `DohChecker`           â€?DNS-over-HTTPS
-    /// 3. `RdapChecker`          â€?RDAP protocol
-    /// 4. `WhoisChecker`         â€?legacy WHOIS fallback
+    /// 1. `LocalReservedChecker` ï¿½?fast local reserved-name check (no network)
+    /// 2. `DohChecker`           ï¿½?DNS-over-HTTPS
+    /// 3. `RdapChecker`          ï¿½?RDAP protocol
+    /// 4. `WhoisChecker`         ï¿½?legacy WHOIS fallback
     ///
     /// `whois_servers` is loaded from the database (merged with config.json overrides)
     /// by the caller before this function is invoked.
@@ -58,9 +59,11 @@ impl CheckerRegistry {
         registry.add_checker(Arc::new(WhoisChecker::with_servers(whois_servers)));
 
         registry.sort_by_priority();
-        println!(
-            "Checker registry order: {}",
-            registry.checker_names().join(" -> ")
+        info!(
+            target: "domain_scanner::checker::registry",
+            context = "startup",
+            order = %registry.checker_names().join(" -> "),
+            "checker registry order ready"
         );
         registry
     }
@@ -87,7 +90,12 @@ impl CheckerRegistry {
     /// result (managed by `should_stop_pipeline`), subsequent checkers are skipped.
     pub async fn check(&self, domain: &str) -> CheckResult {
         if domain.matches('.').count() < 1 {
-            eprintln!("Registry rejected invalid domain format: {}", domain);
+            warn!(
+                target: "domain_scanner::checker::registry",
+                context = "validation",
+                domain,
+                "rejected invalid domain format"
+            );
             return CheckResult::error("Invalid domain format");
         }
 
@@ -100,11 +108,6 @@ impl CheckerRegistry {
 
         for checker in &self.checkers {
             if !checker.supports_domain(domain) {
-                println!(
-                    "Registry skipped checker {} for domain {} (unsupported suffix)",
-                    checker.name(),
-                    domain
-                );
                 trace_log.push(format!("{}: skipped unsupported suffix", checker.name()));
                 continue;
             }
@@ -113,11 +116,13 @@ impl CheckerRegistry {
             trace_log.extend(result.trace.clone());
 
             if result.rate_limited {
-                eprintln!(
-                    "Registry stopping on rate limit from checker {} for domain {}: {}",
-                    checker.name(),
+                warn!(
+                    target: "domain_scanner::checker::registry",
+                    context = "pipeline",
+                    checker = checker.name(),
                     domain,
-                    result.error.as_deref().unwrap_or("rate limited")
+                    reason = result.error.as_deref().unwrap_or("rate limited"),
+                    "stopping pipeline on rate limit"
                 );
                 let mut result = result;
                 result.trace = trace_log;
@@ -125,12 +130,14 @@ impl CheckerRegistry {
             }
 
             if let Some(err) = &result.error {
-                eprintln!(
-                    "Registry checker {} returned error for {}: {}{}",
-                    checker.name(),
+                debug!(
+                    target: "domain_scanner::checker::registry",
+                    context = "pipeline",
+                    checker = checker.name(),
                     domain,
-                    err,
-                    if result.retryable { " (retryable)" } else { "" }
+                    error = %err,
+                    retryable = result.retryable,
+                    "checker returned error"
                 );
                 last_error = Some(err.clone());
                 if result.retryable {
@@ -139,17 +146,6 @@ impl CheckerRegistry {
                 continue; // Try next checker on error
             }
 
-            println!(
-                "Registry checker {} returned available={} signatures={} for {}",
-                checker.name(),
-                result.available,
-                if result.signatures.is_empty() {
-                    "-".to_string()
-                } else {
-                    result.signatures.join(",")
-                },
-                domain
-            );
             all_signatures.extend(result.signatures.clone());
 
             if !result.available {
@@ -157,11 +153,6 @@ impl CheckerRegistry {
             }
 
             if checker.should_stop_pipeline(&result) {
-                println!(
-                    "Registry stopping after checker {} for domain {}",
-                    checker.name(),
-                    domain
-                );
                 authoritative_result = Some(result);
                 break;
             }
@@ -185,13 +176,18 @@ impl CheckerRegistry {
             result.trace = trace_log;
             result
         } else if let Some(retryable) = last_retryable {
-            println!("Registry returning retryable result for {}", domain);
             let mut result = retryable;
             result.trace = trace_log;
             result
         } else if let Some(err) = last_error {
             if all_signatures.is_empty() {
-                eprintln!("Registry returning terminal error for {}: {}", domain, err);
+                error!(
+                    target: "domain_scanner::checker::registry",
+                    context = "pipeline",
+                    domain,
+                    error = %err,
+                    "returning terminal error"
+                );
                 let mut result = CheckResult::error(err);
                 result.trace = trace_log;
                 result
