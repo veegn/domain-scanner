@@ -2,8 +2,7 @@ pub mod checker;
 pub mod config;
 pub mod generator;
 
-pub mod state;
-pub mod tui;
+pub mod web;
 pub mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,11 @@ pub struct DomainResult {
     pub available: bool,
     pub error: Option<String>,
     pub signatures: Vec<String>,
+    pub expiration_date: Option<String>,
+    pub rate_limited: bool,
+    pub retryable: bool,
+    pub retry_after_secs: Option<u64>,
+    pub trace: Vec<String>,
 }
 
 pub enum WorkerMessage {

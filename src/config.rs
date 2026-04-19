@@ -5,13 +5,24 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
-    /// List of DoH servers for load balancing
+    /// DoH server URLs for DNS-over-HTTPS lookups (load-balanced round-robin).
+    /// Leave empty to use built-in defaults (AliDNS, DNSPod, Google, Cloudflare).
     #[serde(default)]
     pub doh_servers: Vec<String>,
 
-    /// Whois servers fallback (TLD -> Host:Port) - Future feature
+    /// WHOIS server overrides (TLD -> host or host:port).
+    /// Merged on top of seeded defaults; entries here take precedence.
+    /// Example: {"com": "whois.my-proxy.example.com"}
     #[serde(default)]
     pub whois_servers: HashMap<String, String>,
+
+    /// RDAP base URL overrides (suffix -> base URL).
+    #[serde(default)]
+    pub rdap_servers: HashMap<String, String>,
+
+    /// RDAP bootstrap URL. Leave empty to disable RDAP or set to the IANA endpoint.
+    #[serde(default)]
+    pub rdap_bootstrap_url: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -19,6 +30,8 @@ impl Default for AppConfig {
         Self {
             doh_servers: Vec::new(),
             whois_servers: HashMap::new(),
+            rdap_servers: HashMap::new(),
+            rdap_bootstrap_url: None,
         }
     }
 }
@@ -30,7 +43,7 @@ impl AppConfig {
         }
 
         match fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str(&content) {
+            Ok(content) => match serde_json::from_str::<Self>(&content) {
                 Ok(config) => config,
                 Err(e) => {
                     eprintln!("Warning: Failed to parse config file {}: {}", path, e);
@@ -46,10 +59,7 @@ impl AppConfig {
 
     pub fn save_default_if_not_exists(path: &str) {
         if !Path::new(path).exists() {
-            let default_config = Self::default();
-            // Add some examples
-
-            if let Ok(content) = serde_json::to_string_pretty(&default_config) {
+            if let Ok(content) = serde_json::to_string_pretty(&Self::default()) {
                 let _ = fs::write(path, content);
             }
         }

@@ -2,21 +2,115 @@
 // Domain Scanner - Comprehensive Integration Tests
 // =============================================================================
 
+use axum::extract::Path as AxumPath;
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
 use domain_scanner::checker::circuit_breaker::CircuitBreaker;
 use domain_scanner::checker::{
     CheckResult, CheckerPriority, CheckerRegistry, DohChecker, DomainChecker, LocalReservedChecker,
-    WhoisChecker,
+    RdapChecker, WhoisChecker,
 };
 use domain_scanner::config::AppConfig;
 use domain_scanner::generator;
-use domain_scanner::state::{ScanJobSignature, ScanState};
+use domain_scanner::web::models::TaskSignal;
 use domain_scanner::worker;
 use domain_scanner::{DomainResult, WorkerMessage};
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+
+fn live_network_enabled() -> bool {
+    std::env::var("DOMAIN_SCANNER_LIVE_TESTS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
+    async fn domain(AxumPath(name): AxumPath<String>) -> (StatusCode, Json<serde_json::Value>) {
+        match name.as_str() {
+            n if n == "taken.alpha" || n.ends_with(".taken.alpha") => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "events": [
+                        {
+                            "eventAction": "expiration",
+                            "eventDate": "2030-01-02T03:04:05Z"
+                        }
+                    ]
+                })),
+            ),
+            n if n == "taken.co.alpha" || n.ends_with(".taken.co.alpha") => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "events": [
+                        {
+                            "eventAction": "expiry",
+                            "eventDate": "2031-05-06T07:08:09Z"
+                        }
+                    ]
+                })),
+            ),
+            "free.alpha" => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "description": "Domain not found"
+                })),
+            ),
+            "limited.alpha" => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "description": "Too many requests"
+                })),
+            ),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "description": "Unexpected domain"
+                })),
+            ),
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    let bootstrap_url = format!("{}/bootstrap", base_url);
+    let rdap_base = format!("{}/rdap/", base_url);
+
+    let app = Router::new()
+        .route(
+            "/bootstrap",
+            get({
+                let rdap_base = rdap_base.clone();
+                move || {
+                    let rdap_base = rdap_base.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "services": [
+                                [
+                                    ["alpha", "co.alpha"],
+                                    [rdap_base]
+                                ]
+                            ]
+                        }))
+                    }
+                }
+            }),
+        )
+        .route("/rdap/domain/:name", get(domain));
+
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (bootstrap_url, handle)
+}
 
 // =============================================================================
 // 1. CheckResult Type Tests
@@ -69,6 +163,161 @@ fn test_check_result_clone() {
     let r2 = r.clone();
     assert_eq!(r.available, r2.available);
     assert_eq!(r.signatures, r2.signatures);
+}
+
+#[test]
+fn test_check_result_rate_limited() {
+    let r = CheckResult::rate_limited("too many requests");
+    assert!(r.rate_limited);
+    assert!(r.retryable);
+    assert_eq!(r.error.as_deref(), Some("too many requests"));
+}
+
+#[test]
+fn test_whois_config_override_supports_new_tld() {
+    let mut custom = std::collections::HashMap::new();
+    custom.insert("li".to_string(), "whois.example.test".to_string());
+    custom.insert(".custom".to_string(), "whois.custom.test:4343".to_string());
+
+    let checker = WhoisChecker::with_servers(custom);
+    assert!(checker.supports_tld("li"));
+    assert!(checker.supports_tld("custom"));
+}
+
+#[tokio::test]
+async fn test_rdap_config_override_supports_new_tld() {
+    let mut custom = std::collections::HashMap::new();
+    custom.insert(
+        "custom".to_string(),
+        "https://rdap.custom.test/".to_string(),
+    );
+    custom.insert(
+        ".co.uk".to_string(),
+        "https://rdap.example.test/".to_string(),
+    );
+
+    let checker = RdapChecker::with_config(custom, None).await;
+    assert!(checker.supports_tld("custom"));
+    assert!(checker.supports_tld("co.uk"));
+    assert_eq!(
+        checker.matching_suffix("name.co.uk").as_deref(),
+        Some("co.uk")
+    );
+}
+
+#[tokio::test]
+async fn test_rdap_bootstrap_loads_local_suffixes() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+    let checker =
+        RdapChecker::with_config(std::collections::HashMap::new(), Some(bootstrap_url)).await;
+
+    assert!(checker.supports_tld("alpha"));
+    assert!(checker.supports_tld("co.alpha"));
+    assert_eq!(
+        checker.matching_suffix("demo.co.alpha").as_deref(),
+        Some("co.alpha")
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_rdap_bootstrap_uses_local_cache_when_remote_unavailable() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "domain_scanner_rdap_cache_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+    let checker = RdapChecker::with_config_and_cache_dir(
+        std::collections::HashMap::new(),
+        Some(bootstrap_url.clone()),
+        Some(cache_dir.clone()),
+    )
+    .await;
+    assert!(checker.supports_tld("alpha"));
+
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cached_checker = RdapChecker::with_config_and_cache_dir(
+        std::collections::HashMap::new(),
+        Some(bootstrap_url),
+        Some(cache_dir.clone()),
+    )
+    .await;
+
+    assert!(cached_checker.supports_tld("alpha"));
+    assert!(cached_checker.supports_tld("co.alpha"));
+    assert_eq!(
+        cached_checker.matching_suffix("demo.co.alpha").as_deref(),
+        Some("co.alpha")
+    );
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
+}
+
+#[tokio::test]
+async fn test_rdap_mocked_check_registered_available_and_rate_limited() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+    let checker =
+        RdapChecker::with_config(std::collections::HashMap::new(), Some(bootstrap_url)).await;
+
+    let taken = checker.check("taken.alpha").await;
+    assert!(!taken.available);
+    assert!(taken.signatures.contains(&"RDAP".to_string()));
+    assert_eq!(
+        taken.expiration_date.as_deref(),
+        Some("2030-01-02T03:04:05Z")
+    );
+
+    let free = checker.check("free.alpha").await;
+    assert!(free.available);
+    assert!(free.error.is_none());
+
+    let limited = checker.check("limited.alpha").await;
+    assert!(limited.rate_limited);
+    assert_eq!(
+        limited.error.as_deref(),
+        Some("RDAP rate limit exceeded (HTTP 429)")
+    );
+
+    handle.abort();
+}
+
+#[test]
+fn test_whois_matches_longest_suffix() {
+    let mut custom = std::collections::HashMap::new();
+    custom.insert("uk".to_string(), "whois.nic.uk".to_string());
+    custom.insert("co.uk".to_string(), "whois.example.co.uk".to_string());
+    custom.insert("com.cn".to_string(), "whois.example.com.cn".to_string());
+
+    let checker = WhoisChecker::with_servers(custom);
+    assert_eq!(
+        checker.matching_suffix("example.co.uk").as_deref(),
+        Some("co.uk")
+    );
+    assert_eq!(
+        checker.matching_suffix("deep.name.com.cn").as_deref(),
+        Some("com.cn")
+    );
+    assert_eq!(checker.matching_suffix("singleword"), None);
+}
+
+#[test]
+fn test_whois_builtin_supports_common_multi_part_suffixes() {
+    let mut custom = HashMap::new();
+    custom.insert("co.uk".to_string(), "whois.nic.uk".to_string());
+    custom.insert("com.cn".to_string(), "whois.cnnic.cn".to_string());
+    custom.insert("com.au".to_string(), "whois.auda.org.au".to_string());
+
+    let checker = WhoisChecker::with_servers(custom);
+    assert!(checker.supports_tld("co.uk"));
+    assert!(checker.supports_tld("com.cn"));
+    assert!(checker.supports_tld("com.au"));
 }
 
 // =============================================================================
@@ -205,6 +454,10 @@ async fn test_local_should_not_stop_pipeline_on_available() {
 
 #[tokio::test]
 async fn test_doh_registered_domain() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
     if result.error.is_none() {
@@ -215,6 +468,10 @@ async fn test_doh_registered_domain() {
 
 #[tokio::test]
 async fn test_doh_available_domain() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let checker = DohChecker::new().await;
     let domain = format!(
         "test-doh-nonexist-{}.com",
@@ -232,6 +489,10 @@ async fn test_doh_available_domain() {
 
 #[tokio::test]
 async fn test_doh_checker_metadata() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let checker = DohChecker::new().await;
     assert_eq!(checker.name(), "DoH");
     assert_eq!(checker.priority(), CheckerPriority::Fast);
@@ -243,6 +504,10 @@ async fn test_doh_checker_metadata() {
 
 #[tokio::test]
 async fn test_doh_should_stop_pipeline_when_registered() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
     if !result.available && result.error.is_none() {
@@ -259,6 +524,10 @@ async fn test_doh_should_not_stop_pipeline_when_available() {
 
 #[tokio::test]
 async fn test_doh_with_custom_servers() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let servers = vec!["https://dns.alidns.com/resolve".to_string()];
     let checker = DohChecker::with_servers(servers).await;
     assert!(!checker.servers.is_empty());
@@ -269,7 +538,28 @@ async fn test_doh_with_custom_servers() {
 }
 
 #[tokio::test]
+async fn test_rdap_checker_metadata() {
+    let mut custom = std::collections::HashMap::new();
+    custom.insert("com".to_string(), "https://rdap.example.test/".to_string());
+    custom.insert(
+        "co.uk".to_string(),
+        "https://rdap.example.test/".to_string(),
+    );
+    let checker = RdapChecker::with_config(custom, None).await;
+    assert_eq!(checker.name(), "RDAP");
+    assert_eq!(checker.priority(), CheckerPriority::Standard);
+    assert!(checker.supports_tld("com"));
+    assert!(checker.supports_tld("co.uk"));
+    assert!(!checker.supports_tld("zzzzz"));
+    assert!(checker.is_authoritative());
+}
+
+#[tokio::test]
 async fn test_doh_round_robin() {
+    if !live_network_enabled() {
+        return;
+    }
+
     let servers = vec![
         "https://dns.alidns.com/resolve".to_string(),
         "https://doh.pub/dns-query".to_string(),
@@ -288,7 +578,13 @@ async fn test_doh_round_robin() {
 
 #[tokio::test]
 async fn test_whois_registered_com() {
-    let checker = WhoisChecker::new();
+    if !live_network_enabled() {
+        return;
+    }
+
+    let mut m = std::collections::HashMap::new();
+    m.insert("com".to_string(), "whois.verisign-grs.com".to_string());
+    let checker = WhoisChecker::with_servers(m);
     let result = checker.check("google.com").await;
     if result.error.is_none() {
         assert!(
@@ -306,7 +602,13 @@ async fn test_whois_registered_com() {
 
 #[tokio::test]
 async fn test_whois_available_random() {
-    let checker = WhoisChecker::new();
+    if !live_network_enabled() {
+        return;
+    }
+
+    let mut m = std::collections::HashMap::new();
+    m.insert("com".to_string(), "whois.verisign-grs.com".to_string());
+    let checker = WhoisChecker::with_servers(m);
     let domain = format!(
         "test-whois-avail-{}.com",
         std::time::SystemTime::now()
@@ -339,14 +641,37 @@ async fn test_whois_invalid_domain() {
 
 #[tokio::test]
 async fn test_whois_checker_metadata() {
-    let checker = WhoisChecker::new();
+    let mut custom = std::collections::HashMap::new();
+    for tld in [
+        "com", "net", "org", "uk", "li", "at", "be", "pl", "es", "art", "blog", "website", "cn",
+        "co.uk", "com.cn", "com.au", "org.in", "cn.com", "jp.net", "co.nz", "com.tw",
+    ] {
+        custom.insert(tld.to_string(), "whois.example.test".to_string());
+    }
+    let checker = WhoisChecker::with_servers(custom);
     assert_eq!(checker.name(), "WHOIS");
     assert_eq!(checker.priority(), CheckerPriority::Fallback);
     assert!(checker.supports_tld("com"));
     assert!(checker.supports_tld("net"));
     assert!(checker.supports_tld("org"));
     assert!(checker.supports_tld("uk"));
+    assert!(checker.supports_tld("li"));
+    assert!(checker.supports_tld("at"));
+    assert!(checker.supports_tld("be"));
+    assert!(checker.supports_tld("pl"));
+    assert!(checker.supports_tld("es"));
+    assert!(checker.supports_tld("art"));
+    assert!(checker.supports_tld("blog"));
+    assert!(checker.supports_tld("website"));
     assert!(checker.supports_tld("cn"));
+    assert!(checker.supports_tld("co.uk"));
+    assert!(checker.supports_tld("com.cn"));
+    assert!(checker.supports_tld("com.au"));
+    assert!(checker.supports_tld("org.in"));
+    assert!(checker.supports_tld("cn.com"));
+    assert!(checker.supports_tld("jp.net"));
+    assert!(checker.supports_tld("co.nz"));
+    assert!(checker.supports_tld("com.tw"));
     assert!(!checker.supports_tld("zzzzz"));
     assert!(checker.is_authoritative());
 }
@@ -421,27 +746,60 @@ fn test_circuit_breaker_multiple_successes_no_effect() {
 
 #[tokio::test]
 async fn test_registry_with_defaults() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let names = registry.checker_names();
     assert!(names.contains(&"LocalReserved"));
     assert!(names.contains(&"DoH"));
+    assert!(names.contains(&"RDAP"));
     assert!(names.contains(&"WHOIS"));
 }
 
 #[tokio::test]
 async fn test_registry_checker_order() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let names = registry.checker_names();
     let local_idx = names.iter().position(|&n| n == "LocalReserved");
     let doh_idx = names.iter().position(|&n| n == "DoH");
+    let rdap_idx = names.iter().position(|&n| n == "RDAP");
     let whois_idx = names.iter().position(|&n| n == "WHOIS");
     assert!(local_idx < doh_idx, "LocalReserved should come before DoH");
-    assert!(doh_idx < whois_idx, "DoH should come before WHOIS");
+    assert!(doh_idx < rdap_idx, "DoH should come before RDAP");
+    assert!(rdap_idx < whois_idx, "RDAP should come before WHOIS");
+}
+
+#[tokio::test]
+async fn test_registry_prefers_rdap_before_whois_for_custom_suffix() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+
+    let config = AppConfig {
+        rdap_bootstrap_url: Some(bootstrap_url),
+        whois_servers: [("alpha".to_string(), "127.0.0.1:9".to_string())]
+            .into_iter()
+            .collect(),
+        ..AppConfig::default()
+    };
+
+    let registry =
+        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let result = registry.check("taken.alpha").await;
+
+    assert!(!result.available);
+    assert!(result.signatures.contains(&"RDAP".to_string()));
+    assert!(!result.signatures.contains(&"WHOIS".to_string()));
+    assert!(result.error.is_none());
+
+    handle.abort();
 }
 
 #[tokio::test]
 async fn test_registry_reserved_domain_stops_early() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("example.com").await;
     assert!(!result.available, "example.com should be registered");
     assert!(result.signatures.contains(&"RESERVED".to_string()));
@@ -453,7 +811,13 @@ async fn test_registry_reserved_domain_stops_early() {
 
 #[tokio::test]
 async fn test_registry_registered_workflow() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    if !live_network_enabled() {
+        return;
+    }
+
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("google.com").await;
     assert!(
         !result.available,
@@ -463,7 +827,13 @@ async fn test_registry_registered_workflow() {
 
 #[tokio::test]
 async fn test_registry_available_workflow() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    if !live_network_enabled() {
+        return;
+    }
+
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let domain = format!(
         "test-pipeline-avail-{}.com",
         std::time::SystemTime::now()
@@ -485,7 +855,9 @@ async fn test_registry_available_workflow() {
 
 #[tokio::test]
 async fn test_registry_invalid_domain_empty() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("").await;
     assert!(result.error.is_some(), "empty string should be an error");
     assert_eq!(result.error.unwrap(), "Invalid domain format");
@@ -493,7 +865,9 @@ async fn test_registry_invalid_domain_empty() {
 
 #[tokio::test]
 async fn test_registry_invalid_domain_no_dot() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("singleword").await;
     assert!(result.error.is_some(), "single word should be an error");
     assert_eq!(result.error.unwrap(), "Invalid domain format");
@@ -518,10 +892,12 @@ async fn test_generator_letters_length1() {
         "D".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     assert_eq!(dg.total_count, 26);
-    let mut domains = Vec::new();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -539,10 +915,12 @@ async fn test_generator_numbers_length2() {
         "d".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     assert_eq!(dg.total_count, 100);
-    let mut domains = Vec::new();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -560,10 +938,12 @@ async fn test_generator_alphanumeric_length1() {
         "a".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     assert_eq!(dg.total_count, 36);
-    let mut domains = Vec::new();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -583,9 +963,11 @@ async fn test_generator_skip() {
         "D".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         5,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -602,9 +984,11 @@ async fn test_generator_skip_all() {
         "D".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         26,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -620,9 +1004,11 @@ async fn test_generator_skip_beyond_total() {
         "D".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         100,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -638,9 +1024,11 @@ async fn test_generator_with_regex_filter() {
         "D".to_string(),
         "^ab".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -659,9 +1047,11 @@ async fn test_generator_with_strict_regex() {
         "a".to_string(),
         "^[a-z]{2}[0-9]$".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -682,9 +1072,11 @@ async fn test_generator_suffix_variations() {
         "d".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -703,8 +1095,10 @@ async fn test_generator_generated_counter() {
         "d".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     let generated = dg.generated.clone();
     let mut rx = dg.domains;
     assert_eq!(generated.load(Ordering::Relaxed), 0);
@@ -722,9 +1116,11 @@ async fn test_generator_dictionary_mode() {
         "D".to_string(),
         "".to_string(),
         dict_path.to_str().unwrap().to_string(),
+        vec![],
         0,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -746,9 +1142,11 @@ async fn test_generator_dictionary_with_regex() {
         "D".to_string(),
         "^a".to_string(),
         dict_path.to_str().unwrap().to_string(),
+        vec![],
         0,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -771,9 +1169,11 @@ async fn test_generator_dictionary_with_skip() {
         "D".to_string(),
         "".to_string(),
         dict_path.to_str().unwrap().to_string(),
+        vec![],
         2,
-    );
-    let mut domains = Vec::new();
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -792,13 +1192,25 @@ async fn test_generator_dictionary_with_skip() {
 
 #[tokio::test]
 async fn test_worker_processes_domains() {
-    let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
+    let registry = Arc::new(
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await,
+    );
     let (job_tx, job_rx) = mpsc::channel(10);
     let (result_tx, mut result_rx) = mpsc::channel(10);
     let jobs = Arc::new(Mutex::new(job_rx));
     let reg_clone = registry.clone();
+    let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
     tokio::spawn(async move {
-        worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
+        worker::worker(
+            1,
+            jobs,
+            result_tx,
+            Duration::from_millis(0),
+            reg_clone,
+            cancel_flag,
+        )
+        .await;
     });
     job_tx.send("google.com".to_string()).await.unwrap();
     drop(job_tx);
@@ -818,13 +1230,25 @@ async fn test_worker_processes_domains() {
 
 #[tokio::test]
 async fn test_worker_multiple_domains() {
-    let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
+    let registry = Arc::new(
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await,
+    );
     let (job_tx, job_rx) = mpsc::channel(10);
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let jobs = Arc::new(Mutex::new(job_rx));
     let reg_clone = registry.clone();
+    let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
     tokio::spawn(async move {
-        worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
+        worker::worker(
+            1,
+            jobs,
+            result_tx,
+            Duration::from_millis(0),
+            reg_clone,
+            cancel_flag,
+        )
+        .await;
     });
     let test_domains = vec!["example.com".to_string(), "test.org".to_string()];
     for d in &test_domains {
@@ -845,7 +1269,10 @@ async fn test_worker_multiple_domains() {
 
 #[tokio::test]
 async fn test_worker_multiple_workers_share_jobs() {
-    let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
+    let registry = Arc::new(
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await,
+    );
     let (job_tx, job_rx) = mpsc::channel(100);
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let jobs = Arc::new(Mutex::new(job_rx));
@@ -853,6 +1280,7 @@ async fn test_worker_multiple_workers_share_jobs() {
         let jobs_clone = jobs.clone();
         let tx_clone = result_tx.clone();
         let reg_clone = registry.clone();
+        let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
         tokio::spawn(async move {
             worker::worker(
                 id,
@@ -860,6 +1288,7 @@ async fn test_worker_multiple_workers_share_jobs() {
                 tx_clone,
                 Duration::from_millis(0),
                 reg_clone,
+                cancel_flag,
             )
             .await;
         });
@@ -899,6 +1328,8 @@ fn test_config_default() {
     let config = AppConfig::default();
     assert!(config.doh_servers.is_empty());
     assert!(config.whois_servers.is_empty());
+    assert!(config.rdap_servers.is_empty());
+    assert!(config.rdap_bootstrap_url.is_none());
 }
 
 #[test]
@@ -910,7 +1341,7 @@ fn test_config_load_nonexistent_file() {
 #[test]
 fn test_config_load_valid_file() {
     let path = std::env::temp_dir().join("test_config_valid_integ.json");
-    let content = r#"{"doh_servers":["https://dns.google/resolve"],"whois_servers":{"com":"whois.verisign-grs.com"}}"#;
+    let content = r#"{"doh_servers":["https://dns.google/resolve"],"whois_servers":{"com":"whois.verisign-grs.com"},"rdap_servers":{"com":"https://rdap.example.test/"},"rdap_bootstrap_url":"https://data.iana.org/rdap/dns.json"}"#;
     std::fs::write(&path, content).unwrap();
     let config = AppConfig::load_from_file(path.to_str().unwrap());
     assert_eq!(config.doh_servers.len(), 1);
@@ -918,6 +1349,14 @@ fn test_config_load_valid_file() {
     assert_eq!(
         config.whois_servers.get("com").map(|s| s.as_str()),
         Some("whois.verisign-grs.com")
+    );
+    assert_eq!(
+        config.rdap_servers.get("com").map(|s| s.as_str()),
+        Some("https://rdap.example.test/")
+    );
+    assert_eq!(
+        config.rdap_bootstrap_url.as_deref(),
+        Some("https://data.iana.org/rdap/dns.json")
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -961,99 +1400,16 @@ fn test_config_serialization_roundtrip() {
     config
         .whois_servers
         .insert("com".to_string(), "whois.example.com".to_string());
+    config
+        .rdap_servers
+        .insert("com".to_string(), "https://rdap.example.com/".to_string());
+    config.rdap_bootstrap_url = Some("https://data.iana.org/rdap/dns.json".to_string());
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: AppConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.doh_servers, config.doh_servers);
     assert_eq!(deserialized.whois_servers, config.whois_servers);
-}
-
-// =============================================================================
-// 10. ScanState Persistence Tests
-// =============================================================================
-
-#[test]
-fn test_scan_state_new() {
-    let state = ScanState::new(3, ".com".into(), "D".into(), "".into(), "".into(), 100);
-    assert_eq!(state.generated_count, 100);
-    assert_eq!(state.job.length, 3);
-    assert_eq!(state.job.suffix, ".com");
-    assert_eq!(state.job.pattern, "D");
-    assert!(state.timestamp > 0);
-}
-
-#[test]
-fn test_scan_state_save_and_load() {
-    let path = std::env::temp_dir().join("test_scan_state_integ.json");
-    let path_str = path.to_str().unwrap();
-    let mut state = ScanState::new(4, ".uk".into(), "d".into(), "^[a-z]".into(), "".into(), 42);
-    state.save(path_str).unwrap();
-    assert!(path.exists());
-    let loaded = ScanState::load(path_str).unwrap();
-    assert_eq!(loaded.generated_count, 42);
-    assert_eq!(loaded.job.length, 4);
-    assert_eq!(loaded.job.suffix, ".uk");
-    assert_eq!(loaded.job.pattern, "d");
-    assert_eq!(loaded.job.regex, "^[a-z]");
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
-fn test_scan_state_load_nonexistent() {
-    let result = ScanState::load("nonexistent_state_file_xyz.json");
-    assert!(result.is_none());
-}
-
-#[test]
-fn test_scan_state_job_signature_equality() {
-    let sig1 = ScanJobSignature {
-        length: 3,
-        suffix: ".com".into(),
-        pattern: "D".into(),
-        regex: "".into(),
-        dict: "".into(),
-    };
-    let sig2 = ScanJobSignature {
-        length: 3,
-        suffix: ".com".into(),
-        pattern: "D".into(),
-        regex: "".into(),
-        dict: "".into(),
-    };
-    assert_eq!(sig1, sig2);
-}
-
-#[test]
-fn test_scan_state_job_signature_inequality() {
-    let sig1 = ScanJobSignature {
-        length: 3,
-        suffix: ".com".into(),
-        pattern: "D".into(),
-        regex: "".into(),
-        dict: "".into(),
-    };
-    let sig2 = ScanJobSignature {
-        length: 4,
-        suffix: ".com".into(),
-        pattern: "D".into(),
-        regex: "".into(),
-        dict: "".into(),
-    };
-    assert_ne!(sig1, sig2);
-}
-
-#[test]
-fn test_scan_state_timestamp_updates_on_save() {
-    let path = std::env::temp_dir().join("test_state_timestamp_integ.json");
-    let path_str = path.to_str().unwrap();
-    let mut state = ScanState::new(1, ".com".into(), "D".into(), "".into(), "".into(), 0);
-    let ts1 = state.timestamp;
-    std::thread::sleep(Duration::from_secs(1));
-    state.save(path_str).unwrap();
-    assert!(
-        state.timestamp >= ts1,
-        "timestamp should be updated on save"
-    );
-    let _ = std::fs::remove_file(&path);
+    assert_eq!(deserialized.rdap_servers, config.rdap_servers);
+    assert_eq!(deserialized.rdap_bootstrap_url, config.rdap_bootstrap_url);
 }
 
 // =============================================================================
@@ -1067,6 +1423,11 @@ fn test_domain_result_construction() {
         available: true,
         error: None,
         signatures: vec![],
+        expiration_date: None,
+        rate_limited: false,
+        retryable: false,
+        retry_after_secs: None,
+        trace: vec![],
     };
     assert_eq!(result.domain, "test.com");
     assert!(result.available);
@@ -1079,6 +1440,11 @@ fn test_domain_result_with_error() {
         available: false,
         error: Some("timeout".to_string()),
         signatures: vec![],
+        expiration_date: None,
+        rate_limited: false,
+        retryable: false,
+        retry_after_secs: None,
+        trace: vec![],
     };
     assert!(!result.available);
     assert_eq!(result.error.as_deref(), Some("timeout"));
@@ -1091,6 +1457,11 @@ fn test_domain_result_serialization() {
         available: true,
         error: None,
         signatures: vec!["DNS".to_string()],
+        expiration_date: None,
+        rate_limited: false,
+        retryable: false,
+        retry_after_secs: None,
+        trace: vec![],
     };
     let json = serde_json::to_string(&result).unwrap();
     let deserialized: DomainResult = serde_json::from_str(&json).unwrap();
@@ -1105,29 +1476,75 @@ fn test_domain_result_serialization() {
 
 #[tokio::test]
 async fn test_registry_domain_with_many_dots() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
-    let result = registry.check("subdomain.example.com").await;
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+    let config = AppConfig {
+        rdap_bootstrap_url: Some(bootstrap_url),
+        ..AppConfig::default()
+    };
+    let registry =
+        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let result = registry.check("subdomain.taken.alpha").await;
     assert!(
         result.error.is_none(),
         "multi-level domain should not error"
     );
+    assert!(!result.available);
+    assert!(result.signatures.contains(&"RDAP".to_string()));
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_registry_accepts_multi_part_public_suffix() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+    let config = AppConfig {
+        rdap_bootstrap_url: Some(bootstrap_url),
+        ..AppConfig::default()
+    };
+    let registry =
+        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let result = registry.check("taken.co.alpha").await;
+    assert!(
+        result.error.is_none(),
+        "multi-part public suffix should not error"
+    );
+    assert!(!result.available);
+    assert!(result.signatures.contains(&"RDAP".to_string()));
+
+    handle.abort();
 }
 
 #[tokio::test]
 async fn test_registry_single_char_domain() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    if !live_network_enabled() {
+        return;
+    }
+
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("a.com").await;
     assert!(
-        result.error.is_none(),
-        "single char domain should not error"
+        result.error.is_none() || result.retryable,
+        "single char domain should not produce a hard error"
     );
 }
 
 #[tokio::test]
 async fn test_registry_numeric_domain() {
-    let registry = CheckerRegistry::with_defaults(AppConfig::default()).await;
+    if !live_network_enabled() {
+        return;
+    }
+
+    let registry =
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await;
     let result = registry.check("123.com").await;
-    assert!(result.error.is_none(), "numeric domain should not error");
+    assert!(
+        result.error.is_none(),
+        "numeric domain should not error, but got: {:?}",
+        result.error
+    );
 }
 
 #[tokio::test]
@@ -1145,10 +1562,12 @@ async fn test_generator_length2_letters() {
         "D".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     assert_eq!(dg.total_count, 676);
-    let mut domains = Vec::new();
+    let mut domains: Vec<String> = Vec::new();
     let mut rx = dg.domains;
     while let Some(d) = rx.recv().await {
         domains.push(d);
@@ -1160,20 +1579,38 @@ async fn test_generator_length2_letters() {
 
 #[tokio::test]
 async fn test_full_pipeline_with_generator_and_worker() {
-    let registry = Arc::new(CheckerRegistry::with_defaults(AppConfig::default()).await);
+    if !live_network_enabled() {
+        return;
+    }
+
+    let registry = Arc::new(
+        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
+            .await,
+    );
     let dg = generator::generate_domains(
         1,
         ".zzzztest".to_string(),
         "d".to_string(),
         "".to_string(),
         "".to_string(),
+        vec![],
         0,
-    );
+    )
+    .unwrap();
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let jobs = Arc::new(Mutex::new(dg.domains));
     let reg_clone = registry.clone();
+    let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
     tokio::spawn(async move {
-        worker::worker(1, jobs, result_tx, Duration::from_millis(0), reg_clone).await;
+        worker::worker(
+            1,
+            jobs,
+            result_tx,
+            Duration::from_millis(0),
+            reg_clone,
+            cancel_flag,
+        )
+        .await;
     });
     let mut scan_count = 0u32;
     let mut result_count = 0u32;

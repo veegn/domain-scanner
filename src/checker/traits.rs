@@ -24,6 +24,16 @@ pub struct CheckResult {
     pub signatures: Vec<String>,
     /// Error message if the check failed
     pub error: Option<String>,
+    /// Expiration date if the domain is registered
+    pub expiration_date: Option<String>,
+    /// Whether the checker hit a rate limit and the scan should be retried later
+    pub rate_limited: bool,
+    /// Whether this error is transient and the same domain should be retried later
+    pub retryable: bool,
+    /// Suggested delay before retrying the same domain
+    pub retry_after_secs: Option<u64>,
+    /// Pipeline trace collected from the contributing checkers
+    pub trace: Vec<String>,
 }
 
 impl CheckResult {
@@ -33,6 +43,11 @@ impl CheckResult {
             available: true,
             signatures: vec![],
             error: None,
+            expiration_date: None,
+            rate_limited: false,
+            retryable: false,
+            retry_after_secs: None,
+            trace: vec![],
         }
     }
 
@@ -42,6 +57,25 @@ impl CheckResult {
             available: false,
             signatures,
             error: None,
+            expiration_date: None,
+            rate_limited: false,
+            retryable: false,
+            retry_after_secs: None,
+            trace: vec![],
+        }
+    }
+
+    /// Create a new result with expiration date
+    pub fn registered_with_expiry(signatures: Vec<String>, expiry: Option<String>) -> Self {
+        Self {
+            available: false,
+            signatures,
+            error: None,
+            expiration_date: expiry,
+            rate_limited: false,
+            retryable: false,
+            retry_after_secs: None,
+            trace: vec![],
         }
     }
 
@@ -51,7 +85,47 @@ impl CheckResult {
             available: false,
             signatures: vec![],
             error: Some(msg.into()),
+            expiration_date: None,
+            rate_limited: false,
+            retryable: false,
+            retry_after_secs: None,
+            trace: vec![],
         }
+    }
+
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self::rate_limited_with_retry(msg, None)
+    }
+
+    pub fn rate_limited_with_retry(msg: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
+        Self {
+            available: false,
+            signatures: vec![],
+            error: Some(msg.into()),
+            expiration_date: None,
+            rate_limited: true,
+            retryable: true,
+            retry_after_secs,
+            trace: vec![],
+        }
+    }
+
+    pub fn retryable_error(msg: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
+        Self {
+            available: false,
+            signatures: vec![],
+            error: Some(msg.into()),
+            expiration_date: None,
+            rate_limited: false,
+            retryable: true,
+            retry_after_secs,
+            trace: vec![],
+        }
+    }
+
+    pub fn with_trace(mut self, entry: impl Into<String>) -> Self {
+        self.trace.push(entry.into());
+        self
     }
 }
 
@@ -130,6 +204,18 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// `true` if this checker can handle domains with this TLD
     fn supports_tld(&self, tld: &str) -> bool;
 
+    /// Resolve the longest supported suffix for a domain.
+    fn matching_suffix(&self, domain: &str) -> Option<String> {
+        domain_suffix_candidates(domain)
+            .into_iter()
+            .find(|suffix| self.supports_tld(suffix))
+    }
+
+    /// Check whether this checker supports the domain's effective suffix.
+    fn supports_domain(&self, domain: &str) -> bool {
+        self.matching_suffix(domain).is_some()
+    }
+
     /// Determine if the checking pipeline should stop after this result.
     ///
     /// # Arguments
@@ -153,4 +239,22 @@ pub trait DomainChecker: Send + Sync + Debug {
     fn is_authoritative(&self) -> bool {
         false
     }
+}
+
+pub fn domain_suffix_candidates(domain: &str) -> Vec<String> {
+    let labels: Vec<&str> = domain
+        .split('.')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .collect();
+
+    if labels.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut suffixes = Vec::with_capacity(labels.len() - 1);
+    for idx in 1..labels.len() {
+        suffixes.push(labels[idx..].join(".").to_ascii_lowercase());
+    }
+    suffixes
 }

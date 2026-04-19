@@ -150,12 +150,15 @@ impl DomainChecker for DohChecker {
 
     async fn check(&self, domain: &str) -> CheckResult {
         if !self.cb.allow_request() {
-            // Circuit is open, skip DoH check
-            return CheckResult::available();
+            eprintln!("DoH circuit breaker open for domain {}", domain);
+            return CheckResult::rate_limited("DoH circuit breaker open")
+                .with_trace("DoH: circuit breaker open");
         }
 
         if self.servers.is_empty() {
-            return CheckResult::error("No DoH servers available");
+            eprintln!("DoH has no available servers for domain {}", domain);
+            return CheckResult::error("No DoH servers available")
+                .with_trace("DoH: no servers available");
         }
 
         // Round Robin selection
@@ -173,30 +176,65 @@ impl DomainChecker for DohChecker {
             Ok(r) => r,
             Err(e) => {
                 self.cb.record_failure();
-                return CheckResult::error(format!("DoH request failed: {}", e));
+                eprintln!(
+                    "DoH request error for domain {} via server {}: {}",
+                    domain, server, e
+                );
+                return CheckResult::error(format!("DoH request failed: {}", e))
+                    .with_trace(format!("DoH: request error via {}", server));
             }
         };
 
         if !resp.status().is_success() {
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.cb.record_failure();
+                eprintln!("DoH rate limit for domain {} via server {}", domain, server);
+                return CheckResult::rate_limited("DoH rate limit exceeded (HTTP 429)")
+                    .with_trace(format!("DoH: HTTP 429 via {}", server));
+            }
             self.cb.record_failure();
-            // If DoH fails, we can't determine status - don't treat as error
-            return CheckResult::available(); // Assume available, let other checkers confirm
+            eprintln!(
+                "DoH non-success HTTP for domain {} via server {}: {}",
+                domain,
+                server,
+                resp.status()
+            );
+            // Non-429 HTTP errors (5xx, 403, 502...) mean we cannot determine availability.
+            // Return error so the pipeline falls through to RDAP/WHOIS for confirmation.
+            return CheckResult::error(format!("DoH returned HTTP {}", resp.status()))
+                .with_trace(format!("DoH: HTTP {} via {}", resp.status(), server));
         }
 
         self.cb.record_success();
 
         let result: DohResponse = match resp.json().await {
             Ok(r) => r,
-            Err(_) => return CheckResult::available(),
+            Err(err) => {
+                eprintln!(
+                    "DoH failed to parse response for domain {} via server {}: {}",
+                    domain, server, err
+                );
+                return CheckResult::available()
+                    .with_trace(format!("DoH: parse failed via {}", server));
+            }
         };
 
         if let Some(answers) = result.answer {
             if !answers.is_empty() {
-                return CheckResult::registered(vec!["DNS".to_string()]);
+                println!(
+                    "DoH found NS records for domain {} via server {}",
+                    domain, server
+                );
+                return CheckResult::registered(vec!["DNS".to_string()])
+                    .with_trace(format!("DoH: NS records found via {}", server));
             }
         }
 
-        CheckResult::available()
+        println!(
+            "DoH found no NS records for domain {} via server {}",
+            domain, server
+        );
+        CheckResult::available().with_trace(format!("DoH: no NS records via {}", server))
     }
 
     fn supports_tld(&self, _tld: &str) -> bool {

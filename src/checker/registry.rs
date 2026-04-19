@@ -2,15 +2,17 @@
 //!
 //! Manages a collection of domain checkers and orchestrates domain checking.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::doh::DohChecker;
 use super::local::LocalReservedChecker;
+use super::rdap::RdapChecker;
 use super::traits::{CheckResult, DomainChecker};
 use super::whois::WhoisChecker;
 use crate::config::AppConfig;
 
-/// Registry that manages multiple domain checkers
+/// Registry that manages multiple domain checkers.
 ///
 /// The registry runs checkers in priority order and combines their results.
 #[derive(Debug)]
@@ -19,144 +21,193 @@ pub struct CheckerRegistry {
 }
 
 impl CheckerRegistry {
-    /// Create a new empty registry
+    /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
             checkers: Vec::new(),
         }
     }
 
-    /// Create a registry with the default set of checkers
+    /// Create a registry with the default set of checkers.
     ///
     /// Default checkers (in priority order):
-    /// 1. LocalReservedChecker - checks local reserved rules
-    /// 2. DohChecker - DNS over HTTPS check
-    pub async fn with_defaults(config: AppConfig) -> Self {
+    /// 1. `LocalReservedChecker` â€?fast local reserved-name check (no network)
+    /// 2. `DohChecker`           â€?DNS-over-HTTPS
+    /// 3. `RdapChecker`          â€?RDAP protocol
+    /// 4. `WhoisChecker`         â€?legacy WHOIS fallback
+    ///
+    /// `whois_servers` is loaded from the database (merged with config.json overrides)
+    /// by the caller before this function is invoked.
+    pub async fn with_defaults(config: AppConfig, whois_servers: HashMap<String, String>) -> Self {
         let mut registry = Self::new();
 
-        // Add local reserved checker (highest priority)
         registry.add_checker(Arc::new(LocalReservedChecker::new()));
 
-        // Add DoH checker
-        // Use doh_servers from config
-        let servers = config.doh_servers.clone();
-
-        let doh_checker = DohChecker::with_servers(servers).await;
+        let doh_checker = DohChecker::with_servers(config.doh_servers.clone()).await;
         registry.add_checker(Arc::new(doh_checker));
 
-        // Add Whois checker (fallback)
-        registry.add_checker(Arc::new(WhoisChecker::new()));
+        registry.add_checker(Arc::new(
+            RdapChecker::with_config(
+                config.rdap_servers.clone(),
+                config.rdap_bootstrap_url.clone(),
+            )
+            .await,
+        ));
 
-        // Sort by priority
+        // WHOIS server map comes from DB defaults + config.json overrides (caller merges).
+        registry.add_checker(Arc::new(WhoisChecker::with_servers(whois_servers)));
+
         registry.sort_by_priority();
-
+        println!(
+            "Checker registry order: {}",
+            registry.checker_names().join(" -> ")
+        );
         registry
     }
 
-    /// Add a checker to the registry
+    pub fn clone_for_runtime(&self) -> Self {
+        Self {
+            checkers: self.checkers.clone(),
+        }
+    }
+
+    /// Add a checker to the registry.
     pub fn add_checker(&mut self, checker: Arc<dyn DomainChecker>) {
         self.checkers.push(checker);
     }
 
-    /// Sort checkers by priority (lowest priority value = checked first)
+    /// Sort checkers by priority (lowest value = checked first).
     pub fn sort_by_priority(&mut self) {
         self.checkers.sort_by_key(|c| c.priority());
     }
 
-    /// Check a domain using all registered checkers
+    /// Check a domain using all registered checkers.
     ///
     /// Checkers are run in priority order. If a checker returns a definitive
     /// result (managed by `should_stop_pipeline`), subsequent checkers are skipped.
-    ///
-    /// # Arguments
-    /// * `domain` - The domain to check
-    ///
-    /// # Returns
-    /// Combined result from all checkers
     pub async fn check(&self, domain: &str) -> CheckResult {
-        let parts: Vec<&str> = domain.split('.').collect();
-        let tld = if parts.len() > 1 {
-            *parts.last().unwrap()
-        } else {
+        if domain.matches('.').count() < 1 {
+            eprintln!("Registry rejected invalid domain format: {}", domain);
             return CheckResult::error("Invalid domain format");
-        };
+        }
 
         let mut all_signatures = Vec::new();
         let mut available = true;
         let mut last_error: Option<String> = None;
+        let mut last_retryable: Option<CheckResult> = None;
         let mut authoritative_result: Option<CheckResult> = None;
+        let mut trace_log = Vec::new();
 
         for checker in &self.checkers {
-            // Skip checkers that don't support this TLD
-            if !checker.supports_tld(tld) {
+            if !checker.supports_domain(domain) {
+                println!(
+                    "Registry skipped checker {} for domain {} (unsupported suffix)",
+                    checker.name(),
+                    domain
+                );
+                trace_log.push(format!("{}: skipped unsupported suffix", checker.name()));
                 continue;
             }
 
             let result = checker.check(domain).await;
+            trace_log.extend(result.trace.clone());
 
-            // Collect error (don't stop pipeline just for error usually, unless we want strict fail)
-            if let Some(err) = &result.error {
-                last_error = Some(err.clone());
-                // If it's an error, we usually try the next checker (fallback)
-                // UNLESS the checker says we should stop even on error?
-                // For now, continue to next checker on error
-                continue;
+            if result.rate_limited {
+                eprintln!(
+                    "Registry stopping on rate limit from checker {} for domain {}: {}",
+                    checker.name(),
+                    domain,
+                    result.error.as_deref().unwrap_or("rate limited")
+                );
+                let mut result = result;
+                result.trace = trace_log;
+                return result;
             }
 
-            // If we have a valid result (no error)
+            if let Some(err) = &result.error {
+                eprintln!(
+                    "Registry checker {} returned error for {}: {}{}",
+                    checker.name(),
+                    domain,
+                    err,
+                    if result.retryable { " (retryable)" } else { "" }
+                );
+                last_error = Some(err.clone());
+                if result.retryable {
+                    last_retryable = Some(result.clone());
+                }
+                continue; // Try next checker on error
+            }
+
+            println!(
+                "Registry checker {} returned available={} signatures={} for {}",
+                checker.name(),
+                result.available,
+                if result.signatures.is_empty() {
+                    "-".to_string()
+                } else {
+                    result.signatures.join(",")
+                },
+                domain
+            );
             all_signatures.extend(result.signatures.clone());
 
             if !result.available {
-                available = false; // Mark as found/registered
-
-            // If this is authoritative for "Registered", we can stop.
-            } else {
-                // It says available.
+                available = false;
             }
 
-            // Check if we should stop the pipeline based on this result
             if checker.should_stop_pipeline(&result) {
+                println!(
+                    "Registry stopping after checker {} for domain {}",
+                    checker.name(),
+                    domain
+                );
                 authoritative_result = Some(result);
                 break;
             }
         }
 
         if let Some(final_res) = authoritative_result {
-            // If we broke early because of an authoritative result
             if final_res.available {
-                return CheckResult::available();
+                let mut result = CheckResult::available();
+                result.trace = trace_log;
+                return result;
             } else {
-                // return accumulated signatures or just this one?
-                // Usually accumulated signatures are better if we had multiple checks (e.g. Local + DoH)
-                // But if we stopped at Local, we only have Local.
-                // If we stopped at DoH, we have Local + DoH.
-                // We should merge signatures.
                 let mut res = CheckResult::registered(all_signatures);
-                res.error = last_error;
+                res.error = None;
+                res.trace = trace_log;
                 return res;
             }
         }
 
-        // If we went through all checkers (or only non-authoritative ones)
         if !available {
-            CheckResult::registered(all_signatures)
+            let mut result = CheckResult::registered(all_signatures);
+            result.trace = trace_log;
+            result
+        } else if let Some(retryable) = last_retryable {
+            println!("Registry returning retryable result for {}", domain);
+            let mut result = retryable;
+            result.trace = trace_log;
+            result
         } else if let Some(err) = last_error {
-            // All checkers failed with errors
             if all_signatures.is_empty() {
-                CheckResult::error(err)
+                eprintln!("Registry returning terminal error for {}: {}", domain, err);
+                let mut result = CheckResult::error(err);
+                result.trace = trace_log;
+                result
             } else {
-                // Some succeeded, some failed - return what we have (likely available if we got here)
-                // But wait, if available remained true, and we had signatures?
-                // If signatures exist, available should be false.
-                CheckResult::available()
+                let mut result = CheckResult::available();
+                result.trace = trace_log;
+                result
             }
         } else {
-            // No errors, available remained true
-            CheckResult::available()
+            let mut result = CheckResult::available();
+            result.trace = trace_log;
+            result
         }
     }
 
-    /// Get the list of registered checker names
+    /// Get the list of registered checker names.
     pub fn checker_names(&self) -> Vec<&'static str> {
         self.checkers.iter().map(|c| c.name()).collect()
     }

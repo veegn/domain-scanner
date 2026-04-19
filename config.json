@@ -1,5 +1,6 @@
 {
-  "rdap_endpoints": {},
-  "doh_url": null,
-  "whois_servers": {}
+  "doh_servers": [],
+  "whois_servers": {},
+  "rdap_servers": {},
+  "rdap_bootstrap_url": "https://data.iana.org/rdap/dns.json"
 }

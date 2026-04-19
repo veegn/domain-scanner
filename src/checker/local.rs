@@ -81,8 +81,9 @@ impl DomainChecker for LocalReservedChecker {
     async fn check(&self, domain: &str) -> CheckResult {
         if is_reserved_domain(domain) {
             CheckResult::registered(vec!["RESERVED".to_string()])
+                .with_trace("LocalReserved: reserved keyword matched")
         } else {
-            CheckResult::available()
+            CheckResult::available().with_trace("LocalReserved: passed")
         }
     }
 

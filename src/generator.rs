@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
@@ -17,8 +18,9 @@ pub fn generate_domains(
     pattern: String,
     regex_filter: String,
     dict_file: String,
+    priority_words_input: Vec<String>,
     skip_count: i64,
-) -> DomainGenerator {
+) -> Result<DomainGenerator, String> {
     let letters = "abcdefghijklmnopqrstuvwxyz";
     let numbers = "0123456789";
 
@@ -26,8 +28,7 @@ pub fn generate_domains(
         match Regex::new(&regex_filter) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Invalid regex pattern: {}", e);
-                std::process::exit(1);
+                return Err(format!("Invalid regex pattern: {}", e));
             }
         }
     } else {
@@ -40,45 +41,80 @@ pub fn generate_domains(
     let generated_clone = generated.clone();
 
     let mut total_estimated = 0;
+    let mut priority_set_raw = HashSet::new();
+    let mut priority_lines = Vec::new();
+
+    // 1. Process priority words
+    for word in priority_words_input {
+        let word = word.trim().to_string();
+        if word.is_empty() {
+            continue;
+        }
+        if let Some(ref r) = regex {
+            if !r.is_match(&word) {
+                continue;
+            }
+        }
+        if priority_set_raw.insert(word.clone()) {
+            priority_lines.push(word);
+        }
+    }
+
+    let priority_set_len = priority_set_raw.len();
+    let priority_set = Arc::new(priority_set_raw);
 
     if !dict_file.is_empty() {
         // Dictionary mode
-        let file = File::open(&dict_file).unwrap_or_else(|e| {
-            eprintln!("Error reading dictionary file: {}", e);
-            std::process::exit(1);
-        });
+        let file =
+            File::open(&dict_file).map_err(|e| format!("Error reading dictionary file: {}", e))?;
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
-        total_estimated = lines.len();
+        total_estimated = count_filtered_dictionary_entries(&lines, regex.as_ref(), &priority_set);
 
         let tx = tx.clone();
         let suffix = suffix.clone();
+        let priority_set_clone = priority_set.clone();
         tokio::spawn(async move {
-            // simple check to avoid skip overflow
             let skip = if skip_count < 0 {
                 0
             } else {
                 skip_count as usize
             };
+            let mut current_idx = 0;
 
-            for word in lines.into_iter().skip(skip) {
+            // Priority Phase
+            for word in priority_lines {
+                if current_idx >= skip {
+                    let domain = format!("{}{}", word, suffix);
+                    if tx.send(domain).await.is_err() {
+                        return;
+                    }
+                    generated_clone.fetch_add(1, Ordering::Relaxed);
+                }
+                current_idx += 1;
+            }
+
+            // Regular Phase
+            for word in lines {
                 let word = word.trim();
-                if word.is_empty() {
+                if word.is_empty() || priority_set_clone.contains(word) {
                     continue;
                 }
 
-                // Regex check on the word/prefix
                 if let Some(ref r) = regex {
                     if !r.is_match(word) {
                         continue;
                     }
                 }
 
-                let domain = format!("{}{}", word, suffix);
-                if tx.send(domain).await.is_err() {
-                    break;
+                if current_idx >= skip {
+                    let domain = format!("{}{}", word, suffix);
+                    if tx.send(domain).await.is_err() {
+                        break;
+                    }
+                    generated_clone.fetch_add(1, Ordering::Relaxed);
                 }
-                generated_clone.fetch_add(1, Ordering::Relaxed);
+                current_idx += 1;
             }
         });
     } else {
@@ -88,21 +124,44 @@ pub fn generate_domains(
             "D" => letters.to_string(),
             "a" => format!("{}{}", letters, numbers),
             _ => {
-                eprintln!(
+                return Err(
                     "Invalid pattern. Use -d for numbers, -D for letters, -a for alphanumeric"
+                        .to_string(),
                 );
-                std::process::exit(1);
             }
         };
 
         let charset_len = charset.len();
         if charset_len > 0 && length > 0 {
-            total_estimated = charset_len.pow(length as u32);
+            total_estimated =
+                count_matching_combinations(&charset, length, regex.as_ref(), &priority_set)
+                    + priority_set_len;
 
             let tx = tx.clone();
             let suffix = suffix.clone();
+            let priority_set_clone = priority_set.clone();
 
             tokio::spawn(async move {
+                let skip = if skip_count < 0 {
+                    0
+                } else {
+                    skip_count as usize
+                };
+                let mut current_idx = 0;
+
+                // Priority Phase
+                for word in priority_lines {
+                    if current_idx >= skip {
+                        let domain = format!("{}{}", word, suffix);
+                        if tx.send(domain).await.is_err() {
+                            return;
+                        }
+                        generated_clone.fetch_add(1, Ordering::Relaxed);
+                    }
+                    current_idx += 1;
+                }
+
+                // Regular Phase
                 generate_combinations_iterative(
                     tx,
                     charset,
@@ -110,18 +169,19 @@ pub fn generate_domains(
                     suffix,
                     regex,
                     generated_clone,
-                    skip_count,
+                    priority_set_clone,
+                    skip,
                 )
                 .await;
             });
         }
     }
 
-    DomainGenerator {
+    Ok(DomainGenerator {
         domains: rx,
-        total_count: total_estimated,
+        total_count: total_estimated.max(priority_set_len),
         generated,
-    }
+    })
 }
 
 async fn generate_combinations_iterative(
@@ -131,36 +191,28 @@ async fn generate_combinations_iterative(
     suffix: String,
     regex: Option<Regex>,
     generated: Arc<AtomicI64>,
-    skip_count: i64,
+    priority_set: Arc<HashSet<String>>,
+    skip: usize,
 ) {
     let charset_chars: Vec<char> = charset.chars().collect();
     let charset_size = charset_chars.len();
 
     let total = charset_size.pow(length as u32);
-    // Ensure we don't start beyond total
-    let start_index = if skip_count < 0 {
-        0
-    } else {
-        skip_count as usize
-    };
-    let start_index = std::cmp::min(start_index, total);
 
-    for counter in start_index..total {
+    let mut actual_idx = priority_set.len();
+
+    for counter in 0..total {
         let mut current = String::with_capacity(length);
         let mut temp = counter;
-
-        // Build string from counter (base conversion)
-        // Original Go logic:
-        // for i := 0; i < length; i++ {
-        //     current = string(charset[temp%charsetSize]) + current
-        //     temp /= charsetSize
-        // }
-        // Wait, the Go logic prepends.
 
         for _ in 0..length {
             let idx = temp % charset_size;
             current.insert(0, charset_chars[idx]);
             temp /= charset_size;
+        }
+
+        if priority_set.contains(&current) {
+            continue;
         }
 
         // Regex check
@@ -170,12 +222,75 @@ async fn generate_combinations_iterative(
             }
         }
 
-        let domain = format!("{}{}", current, suffix);
-        if tx.send(domain).await.is_err() {
-            break;
+        if actual_idx >= skip {
+            let domain = format!("{}{}", current, suffix);
+            if tx.send(domain).await.is_err() {
+                break;
+            }
+            generated.fetch_add(1, Ordering::Relaxed);
         }
-        generated.fetch_add(1, Ordering::Relaxed);
+        actual_idx += 1;
     }
+}
+
+fn count_filtered_dictionary_entries(
+    lines: &[String],
+    regex: Option<&Regex>,
+    priority_set: &HashSet<String>,
+) -> usize {
+    let mut count = priority_set.len();
+    for word in lines {
+        let word = word.trim();
+        if word.is_empty() || priority_set.contains(word) {
+            continue;
+        }
+
+        if regex.is_some_and(|r| !r.is_match(word)) {
+            continue;
+        }
+
+        count += 1;
+    }
+
+    count
+}
+
+fn count_matching_combinations(
+    charset: &str,
+    length: usize,
+    regex: Option<&Regex>,
+    priority_set: &HashSet<String>,
+) -> usize {
+    let charset_chars: Vec<char> = charset.chars().collect();
+    let charset_size = charset_chars.len();
+    let total = charset_size.pow(length as u32);
+    let mut count = 0;
+
+    for counter in 0..total {
+        let current = build_combination(counter, &charset_chars, length);
+        if priority_set.contains(&current) {
+            continue;
+        }
+
+        if regex.is_some_and(|r| !r.is_match(&current)) {
+            continue;
+        }
+
+        count += 1;
+    }
+
+    count
+}
+
+fn build_combination(mut counter: usize, charset_chars: &[char], length: usize) -> String {
+    let charset_size = charset_chars.len();
+    let mut current = String::with_capacity(length);
+    for _ in 0..length {
+        let idx = counter % charset_size;
+        current.insert(0, charset_chars[idx]);
+        counter /= charset_size;
+    }
+    current
 }
 
 #[cfg(test)]
@@ -196,8 +311,10 @@ mod tests {
             "a".to_string(),
             "".to_string(),
             "".to_string(),
+            vec![],
             0,
-        );
+        )
+        .unwrap();
 
         let mut full_list = Vec::new();
         let mut rx = gen_full.domains;
@@ -217,8 +334,10 @@ mod tests {
             "a".to_string(),
             "".to_string(),
             "".to_string(),
+            vec![],
             2, // Skip 'a.com', 'b.com', start at 'c.com'
-        );
+        )
+        .unwrap();
 
         let mut skip_list = Vec::new();
         let mut rx = gen_skip.domains;
