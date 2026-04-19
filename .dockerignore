@@ -1,0 +1,10 @@
+target/
+logs/
+*.db
+*.db-journal
+*.log
+.git/
+.idea/
+.vscode/
+.antigravity/
+.gemini/
