@@ -404,15 +404,16 @@ async fn run_scan_logic(
     }
 
     let (tx_results, mut rx_results) = mpsc::channel(100);
+    let worker_throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(500)));
 
     for id in 1..=10 {
         let jobs = jobs_rx.clone();
         let tx = tx_results.clone();
-        let delay = Duration::from_millis(500);
+        let throttle = worker_throttle.clone();
         let reg = registry.clone();
         let signal_clone = task_signal.clone();
         tokio::spawn(async move {
-            worker::worker(id, jobs, tx, delay, reg, signal_clone).await;
+            worker::worker(id, jobs, tx, throttle, reg, signal_clone).await;
         });
     }
     drop(tx_results);
@@ -492,6 +493,28 @@ async fn run_scan_logic(
                     let max_attempts = if res.rate_limited { 6 } else { 12 };
                     let should_retry = *attempt <= max_attempts;
                     if should_retry {
+                        if res.rate_limited && is_whois_rate_limited(&res) {
+                            let new_delay = worker_throttle.slow_down_by_percent(20);
+                            let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
+                            let _ = add_event_log(
+                                db,
+                                scan_id,
+                                "WARN",
+                                "task.throttle_adjusted",
+                                Some(res.domain.as_str()),
+                                Some(
+                                    "WHOIS rate limit detected; pausing task and reducing scan speed"
+                                        .to_string(),
+                                ),
+                                vec![
+                                    ("pause_secs", json!(60)),
+                                    ("delay_ms", json!(new_delay.as_millis() as u64)),
+                                    ("paused_until_epoch_ms", json!(paused_until)),
+                                ],
+                            )
+                            .await;
+                        }
+
                         let delay_secs =
                             compute_domain_retry_delay_secs(res.retry_after_secs, *attempt);
                         let reason = res
@@ -853,4 +876,13 @@ fn compute_domain_retry_delay_secs(server_suggested_secs: Option<u64>, attempt: 
         .unwrap_or(exponential)
         .max(exponential)
         .min(15 * 60)
+}
+
+fn is_whois_rate_limited(res: &crate::DomainResult) -> bool {
+    res.trace.iter().any(|step| step.starts_with("WHOIS: "))
+        || res
+            .error
+            .as_deref()
+            .map(|err| err.to_ascii_uppercase().contains("WHOIS"))
+            .unwrap_or(false)
 }
