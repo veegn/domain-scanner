@@ -1,5 +1,6 @@
 # --- Stage 1: Build ---
-FROM rust:1.80-alpine AS builder
+# Use the latest rust:alpine to support Rust Edition 2024
+FROM rust:alpine AS builder
 
 # Install build dependencies for C-based crates (sqlite, etc.)
 RUN apk add --no-cache musl-dev pkgconfig
