@@ -294,7 +294,14 @@
          * API Interaction Layer
          */
         const API = {
-            async fetchJson(url, options = {}) {
+            // Auto-detect base path for subdirectory deployment
+            get base() {
+                const path = window.location.pathname;
+                return path.endsWith('/') ? path : path.substring(0, path.lastIndexOf('/') + 1);
+            },
+
+            async fetchJson(path, options = {}) {
+                const url = this.base + path.replace(/^\//, '');
                 const resp = await fetch(url, options);
                 if (!resp.ok) {
                     const errorMsg = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -305,7 +312,7 @@
 
             async loadRecentScans() {
                 try {
-                    const scans = await this.fetchJson('/api/scans');
+                    const scans = await this.fetchJson('api/scans');
                     UI.renderScanList(scans);
                     if (!State.currentId && scans.length > 0) {
                         Handlers.selectScan(scans[0].id);
@@ -316,7 +323,8 @@
             async deleteScan(id) {
                 if (!confirm("Confirm complete data destruction for this operation?")) return;
                 try {
-                    const resp = await fetch(`/api/scan/${id}`, { method: 'DELETE' });
+                    const url = this.base + `api/scan/${id}`;
+                    const resp = await fetch(url, { method: 'DELETE' });
                     if (resp.status === 202) {
                         API.updateStatus();
                     } else if (resp.ok) {
@@ -334,7 +342,7 @@
             async updateStatus() {
                 if (!State.currentId) return;
                 try {
-                    const data = await this.fetchJson(`/api/scan/${State.currentId}`);
+                    const data = await this.fetchJson(`api/scan/${State.currentId}`);
                     UI.syncStatusPanel(data);
                     if (data.status === 'running') this.loadResults();
                 } catch (e) { console.error('Status sync failed:', e); }
@@ -343,7 +351,7 @@
             async loadResults() {
                 if (!State.currentId) return;
                 try {
-                    State.currentResults = await this.fetchJson(`/api/scan/${State.currentId}/results`);
+                    State.currentResults = await this.fetchJson(`api/scan/${State.currentId}/results`);
                     UI.renderResults();
                 } catch (e) { console.error('Data pull failed:', e); }
             },
@@ -351,7 +359,7 @@
             async loadLogs() {
                 if (!State.currentId) return;
                 try {
-                    const logs = await this.fetchJson(`/api/scan/${State.currentId}/logs`);
+                    const logs = await this.fetchJson(`api/scan/${State.currentId}/logs`);
                     if (logs.length === 0 || logs[0].id === State.lastLogId) return;
                     State.lastLogId = logs[0].id;
                     UI.renderLogStream(logs.reverse());
@@ -586,7 +594,7 @@
                 }
 
                 try {
-                    const newId = await API.fetchJson('/api/scan', {
+                    const newId = await API.fetchJson('api/scan', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({
@@ -605,7 +613,7 @@
             async rescanTask() {
                 if (State.currentResults.length === 0) return;
                 try {
-                    const newId = await API.fetchJson('/api/scan', {
+                    const newId = await API.fetchJson('api/scan', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ domains: State.currentResults.map(r => r.domain) })
@@ -616,7 +624,7 @@
 
             async reorderScan(id, direction) {
                 try {
-                    await API.fetchJson(`/api/scan/${id}/reorder`, {
+                    await API.fetchJson(`api/scan/${id}/reorder`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ direction })
