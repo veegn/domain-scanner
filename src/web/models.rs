@@ -178,6 +178,14 @@ pub struct ScanStatus {
     pub total: i64,
     pub processed: i64,
     pub found: i64,
+    /// Number of domains currently deferred for batch replay retry.
+    /// Only non-zero while a scan is running and has retryable failures.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub deferred: i64,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

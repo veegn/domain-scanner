@@ -15,6 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
+const MAX_EXCEPTION_REPLAY_ROUNDS: u32 = 3;
+
 #[derive(Serialize)]
 struct ScanLogRecord {
     event: String,
@@ -439,13 +441,46 @@ async fn run_scan_logic(
     let mut processed = resume_processed;
     let mut found = resume_found;
     let mut last_persisted = processed;
-    let mut retry_attempts: HashMap<String, u32> = HashMap::new();
+    let mut deferred_retries: HashMap<String, crate::DomainResult> = HashMap::new();
+    let mut replay_round = 0_u32;
     streams.notify_scans();
-    publish_scan_status(&streams, scan_id, "running", total, processed, found).await;
+    publish_scan_status(&streams, scan_id, "running", total, processed, found, 0).await;
 
     loop {
         if feeder_done.load(Ordering::Relaxed) && pending_domains.load(Ordering::Relaxed) == 0 {
-            jobs_tx.take();
+            if !deferred_retries.is_empty() && replay_round < MAX_EXCEPTION_REPLAY_ROUNDS {
+                replay_round += 1;
+                let replay_count = deferred_retries.len();
+                let domains: Vec<String> = deferred_retries.keys().cloned().collect();
+                deferred_retries.clear();
+
+                let _ = add_event_log(
+                    db,
+                    &streams,
+                    scan_id,
+                    "WARN",
+                    "task.exception_replay_scheduled",
+                    None,
+                    Some("Scheduling deferred exception replay".to_string()),
+                    vec![
+                        ("round", json!(replay_round)),
+                        ("domains", json!(replay_count)),
+                    ],
+                )
+                .await;
+
+                if let Some(sender) = jobs_tx.as_ref() {
+                    for domain in domains {
+                        pending_domains.fetch_add(1, Ordering::Relaxed);
+                        if sender.send(domain).await.is_err() {
+                            pending_domains.fetch_sub(1, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                jobs_tx.take();
+            }
         }
 
         let msg = match tokio::time::timeout(Duration::from_millis(100), rx_results.recv()).await {
@@ -454,6 +489,7 @@ async fn run_scan_logic(
             Err(_) => {
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
+                    && deferred_retries.is_empty()
                 {
                     jobs_tx.take();
                 }
@@ -510,120 +546,74 @@ async fn run_scan_logic(
                     .await;
                 }
 
+                pending_domains.fetch_sub(1, Ordering::Relaxed);
+
                 if res.retryable {
-                    let attempt = retry_attempts.entry(res.domain.clone()).or_insert(0);
-                    *attempt += 1;
-                    let max_attempts = if res.rate_limited { 6 } else { 12 };
-                    let should_retry = *attempt <= max_attempts;
-                    if should_retry {
-                        if res.rate_limited && is_whois_rate_limited(&res) {
-                            let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
-                            let remaining_workers = worker_throttle.reduce_workers();
-                            let new_delay = if remaining_workers.is_none() {
-                                Some(worker_throttle.slow_down_by_percent(20))
-                            } else {
-                                None
-                            };
-                            let _ = add_event_log(
-                                db,
-                                &streams,
-                                scan_id,
-                                "WARN",
-                                "task.throttle_adjusted",
-                                Some(res.domain.as_str()),
-                                Some(match remaining_workers {
-                                    Some(_) => {
-                                        "WHOIS rate limit detected; pausing task and reducing worker concurrency"
-                                            .to_string()
-                                    }
-                                    None => {
-                                        "WHOIS rate limit detected; pausing task and reducing scan speed"
-                                            .to_string()
-                                    }
-                                }),
-                                {
-                                    let mut fields = vec![
-                                        ("pause_secs", json!(60)),
-                                        ("paused_until_epoch_ms", json!(paused_until)),
-                                        (
-                                            "active_workers",
-                                            json!(worker_throttle.current_workers()),
-                                        ),
-                                    ];
-                                    if let Some(delay) = new_delay {
-                                        fields.push(("delay_ms", json!(delay.as_millis() as u64)));
-                                    }
-                                    fields
-                                },
-                            )
-                            .await;
-                        }
-
-                        let delay_secs =
-                            compute_domain_retry_delay_secs(res.retry_after_secs, *attempt);
-                        let reason = res
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "transient failure".to_string());
-                        let policy = if res.rate_limited {
-                            "dynamic-rate-limit"
+                    if res.rate_limited && is_whois_rate_limited(&res) {
+                        let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
+                        let remaining_workers = worker_throttle.reduce_workers();
+                        let new_delay = if remaining_workers.is_none() {
+                            Some(worker_throttle.slow_down_by_percent(20))
                         } else {
-                            "continuous-timeout-retry"
+                            None
                         };
-                        let level = if res.rate_limited { "WARN" } else { "INFO" };
                         let _ = add_event_log(
                             db,
                             &streams,
                             scan_id,
-                            level,
-                            "domain.retry",
+                            "WARN",
+                            "task.throttle_adjusted",
                             Some(res.domain.as_str()),
-                            Some(reason),
-                            vec![
-                                ("attempt", json!(*attempt)),
-                                ("delay_secs", json!(delay_secs)),
-                                ("policy", json!(policy)),
-                                ("rate_limited", json!(res.rate_limited)),
-                            ],
-                        )
-                        .await;
-
-                        if let Some(sender) = jobs_tx.as_ref() {
-                            let sender = sender.clone();
-                            let signal_clone = task_signal.clone();
-                            let domain = res.domain.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                                if TaskControl::signal(&signal_clone) != TaskSignal::Run {
-                                    return;
+                            Some(match remaining_workers {
+                                Some(_) => {
+                                    "WHOIS rate limit detected; pausing task and reducing worker concurrency"
+                                        .to_string()
                                 }
-                                let _ = sender.send(domain).await;
-                            });
-                            continue;
-                        }
-                    } else {
-                        let _ = add_event_log(
-                            db,
-                            &streams,
-                            scan_id,
-                            "ERROR",
-                            "domain.retry_exhausted",
-                            Some(res.domain.as_str()),
-                            Some(
-                                res.error
-                                    .as_deref()
-                                    .unwrap_or("transient failure")
-                                    .to_string(),
-                            ),
-                            vec![("attempt", json!(*attempt))],
+                                None => {
+                                    "WHOIS rate limit detected; pausing task and reducing scan speed"
+                                        .to_string()
+                                }
+                            }),
+                            {
+                                let mut fields = vec![
+                                    ("pause_secs", json!(60)),
+                                    ("paused_until_epoch_ms", json!(paused_until)),
+                                    ("active_workers", json!(worker_throttle.current_workers())),
+                                ];
+                                if let Some(delay) = new_delay {
+                                    fields.push(("delay_ms", json!(delay.as_millis() as u64)));
+                                }
+                                fields
+                            },
                         )
                         .await;
                     }
+
+                    let reason = res
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "transient failure".to_string());
+                    let _ = add_event_log(
+                        db,
+                        &streams,
+                        scan_id,
+                        if res.rate_limited { "WARN" } else { "INFO" },
+                        "domain.deferred_retry_recorded",
+                        Some(res.domain.as_str()),
+                        Some(reason),
+                        vec![
+                            ("replay_round", json!(replay_round + 1)),
+                            ("rate_limited", json!(res.rate_limited)),
+                            ("retry_after_secs", json!(res.retry_after_secs.unwrap_or(0))),
+                        ],
+                    )
+                    .await;
+
+                    deferred_retries.insert(res.domain.clone(), res);
+                    continue;
                 }
 
-                pending_domains.fetch_sub(1, Ordering::Relaxed);
                 processed += 1;
-                retry_attempts.remove(&res.domain);
 
                 if res.available {
                     found += 1;
@@ -751,15 +741,66 @@ async fn run_scan_logic(
                     last_persisted = processed;
                 }
 
-                publish_scan_status(&streams, scan_id, "running", total, processed, found).await;
+                publish_scan_status(&streams, scan_id, "running", total, processed, found, deferred_retries.len() as i64).await;
 
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
+                    && deferred_retries.is_empty()
                 {
                     jobs_tx.take();
                 }
             }
         }
+    }
+
+    if !deferred_retries.is_empty() {
+        for (_, res) in deferred_retries.drain() {
+            processed += 1;
+            let _ = add_event_log(
+                db,
+                &streams,
+                scan_id,
+                "ERROR",
+                "domain.retry_exhausted",
+                Some(res.domain.as_str()),
+                Some(
+                    res.error
+                        .as_deref()
+                        .unwrap_or("transient failure")
+                        .to_string(),
+                ),
+                vec![("replay_rounds", json!(MAX_EXCEPTION_REPLAY_ROUNDS))],
+            )
+            .await;
+
+            match sqlx::query_as::<_, ScanResultEvent>(
+                "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures)
+                 VALUES (?, ?, 0, NULL, '')
+                 RETURNING rowid as event_id, domain, available, expiration_date, signatures",
+            )
+            .bind(scan_id)
+            .bind(&res.domain)
+            .fetch_one(db)
+            .await
+            {
+                Ok(row) => {
+                    streams
+                        .publish_scan(scan_id, ScanStreamMessage::Result(row))
+                        .await;
+                }
+                Err(err) => {
+                    error!(
+                        target: "domain_scanner::queue",
+                        context = "storage",
+                        scan_id = %scan_id,
+                        domain = %res.domain,
+                        error = %err,
+                        "failed to persist exhausted exception result"
+                    );
+                }
+            }
+        }
+        publish_scan_status(&streams, scan_id, "running", total, processed, found, 0).await;
     }
 
     match TaskControl::signal(&task_signal) {
@@ -795,7 +836,7 @@ async fn run_scan_logic(
                     "failed to mark task cancelled"
                 );
             }
-            publish_scan_status(&streams, scan_id, "cancelled", total, processed, found).await;
+            publish_scan_status(&streams, scan_id, "cancelled", total, processed, found, 0).await;
             streams.notify_scans();
             streams
                 .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))
@@ -846,7 +887,7 @@ async fn run_scan_logic(
                 )
                 .await;
             }
-            publish_scan_status(&streams, scan_id, "finished", total, processed, found).await;
+            publish_scan_status(&streams, scan_id, "finished", total, processed, found, 0).await;
             streams.notify_scans();
             streams
                 .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))
@@ -931,6 +972,7 @@ async fn publish_scan_status(
     total: i64,
     processed: i64,
     found: i64,
+    deferred: i64,
 ) {
     // NOTE: notify_scans() is intentionally NOT called here.
     // It should only be invoked on real state transitions (running, cancelled, finished)
@@ -944,6 +986,7 @@ async fn publish_scan_status(
                 total,
                 processed,
                 found,
+                deferred,
             }),
         )
         .await;
@@ -981,14 +1024,6 @@ fn now_epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn compute_domain_retry_delay_secs(server_suggested_secs: Option<u64>, attempt: u32) -> u64 {
-    let exponential = 15u64.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
-    server_suggested_secs
-        .unwrap_or(exponential)
-        .max(exponential)
-        .min(15 * 60)
 }
 
 fn is_whois_rate_limited(res: &crate::DomainResult) -> bool {

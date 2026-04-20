@@ -148,6 +148,7 @@ async fn get_scan_status(
             total,
             processed,
             found,
+            deferred: 0,
         })
         .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -583,7 +584,7 @@ async fn delete_scan(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-        // Query status and real counters together to avoid a second round-trip when
+    // Query status and real counters together to avoid a second round-trip when
     // pushing the `cancelling` Status event.
     let row = match sqlx::query_as::<_, (String, i64, i64, i64)>(
         "SELECT status, total, processed, found FROM scans WHERE id = ?",
@@ -625,6 +626,7 @@ async fn delete_scan(
                             total,
                             processed,
                             found,
+                            deferred: 0,
                         }),
                     )
                     .await;
