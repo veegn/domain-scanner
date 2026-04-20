@@ -78,13 +78,22 @@ async fn main() {
     // 6. Setup Task Queue (single background worker)
     let (tx, rx) = mpsc::channel::<()>(100);
     let task_control = web::models::TaskControl::default();
+    let streams = web::models::StreamHub::default();
 
     // 7. Start background task worker
     let worker_db = db.clone();
     let worker_task_control = task_control.clone();
     let worker_registry = registry.clone();
+    let worker_streams = streams.clone();
     tokio::spawn(async move {
-        web::start_task_worker(worker_db, rx, worker_task_control, worker_registry).await;
+        web::start_task_worker(
+            worker_db,
+            rx,
+            worker_task_control,
+            worker_registry,
+            worker_streams,
+        )
+        .await;
     });
 
     // 8. Setup web state
@@ -92,6 +101,7 @@ async fn main() {
         db,
         task_tx: tx,
         task_control,
+        streams,
     });
 
     // 9. Resume unfinished tasks from previous run

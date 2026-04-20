@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 const MAX_GENERATED_LENGTH: usize = 8;
 const MAX_GENERATED_CANDIDATES: u128 = 2_000_000;
@@ -19,6 +19,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub task_tx: mpsc::Sender<()>, // Wake up signal
     pub task_control: TaskControl,
+    pub streams: StreamHub,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -170,13 +171,120 @@ impl StartScanRequest {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanStatus {
     pub id: String,
     pub status: String,
     pub total: i64,
     pub processed: i64,
     pub found: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ScanSummary {
+    pub id: String,
+    pub status: String,
+    pub length: i64,
+    pub suffix: String,
+    pub pattern: String,
+    pub regex: Option<String>,
+    pub has_domains: bool,
+    pub total: i64,
+    pub processed: i64,
+    pub found: i64,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ScanLogEvent {
+    pub id: i64,
+    pub message: String,
+    pub level: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ScanResultEvent {
+    pub event_id: i64,
+    pub domain: String,
+    pub available: bool,
+    pub expiration_date: Option<String>,
+    pub signatures: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanStreamMessage {
+    Status(ScanStatus),
+    Log(ScanLogEvent),
+    Result(ScanResultEvent),
+    Deleted(String),
+    Complete(String),
+}
+
+#[derive(Clone)]
+pub struct StreamHub {
+    scans_tx: broadcast::Sender<u64>,
+    scans_version: Arc<AtomicU64>,
+    scan_channels: Arc<AsyncMutex<HashMap<String, broadcast::Sender<ScanStreamMessage>>>>,
+}
+
+impl Default for StreamHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamHub {
+    pub fn new() -> Self {
+        let (scans_tx, _) = broadcast::channel(128);
+        Self {
+            scans_tx,
+            scans_version: Arc::new(AtomicU64::new(0)),
+            scan_channels: Arc::new(AsyncMutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn notify_scans(&self) -> u64 {
+        let version = self.scans_version.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.scans_tx.send(version);
+        version
+    }
+
+    pub fn current_scans_version(&self) -> u64 {
+        self.scans_version.load(Ordering::Relaxed)
+    }
+
+    pub fn subscribe_scans(&self) -> broadcast::Receiver<u64> {
+        self.scans_tx.subscribe()
+    }
+
+    pub async fn subscribe_scan(&self, scan_id: &str) -> broadcast::Receiver<ScanStreamMessage> {
+        self.scan_sender(scan_id).await.subscribe()
+    }
+
+    pub async fn publish_scan(&self, scan_id: &str, message: ScanStreamMessage) {
+        let sender = self.scan_sender(scan_id).await;
+        let _ = sender.send(message);
+    }
+
+    async fn scan_sender(&self, scan_id: &str) -> broadcast::Sender<ScanStreamMessage> {
+        let mut channels = self.scan_channels.lock().await;
+        channels
+            .entry(scan_id.to_string())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(512);
+                tx
+            })
+            .clone()
+    }
+
+    /// Remove the broadcast channel for a scan after it completes or is deleted.
+    /// Must be called after the final `Complete` or `Deleted` message is published
+    /// so that all live subscribers receive that message before the entry is dropped.
+    pub async fn cleanup_scan(&self, scan_id: &str) {
+        let mut channels = self.scan_channels.lock().await;
+        channels.remove(scan_id);
+    }
 }
 
 #[derive(Deserialize)]

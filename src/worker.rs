@@ -1,23 +1,25 @@
 use crate::DomainResult;
 use crate::checker::{CheckResult, CheckerRegistry};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorkerThrottle {
     delay_ms: AtomicU64,
     pause_until_epoch_ms: AtomicU64,
+    max_active_workers: AtomicUsize,
 }
 
 impl WorkerThrottle {
-    pub fn new(initial_delay: Duration) -> Self {
+    pub fn new(initial_delay: Duration, initial_workers: usize) -> Self {
         Self {
             delay_ms: AtomicU64::new(initial_delay.as_millis() as u64),
             pause_until_epoch_ms: AtomicU64::new(0),
+            max_active_workers: AtomicUsize::new(initial_workers.max(1)),
         }
     }
 
@@ -58,15 +60,49 @@ impl WorkerThrottle {
         }
     }
 
-    pub async fn wait_if_paused(&self) {
+    pub fn reduce_workers(&self) -> Option<usize> {
+        let mut current = self.max_active_workers.load(Ordering::Relaxed).max(1);
         loop {
+            if current <= 1 {
+                return None;
+            }
+
+            let next = current - 1;
+            match self.max_active_workers.compare_exchange(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(next),
+                Err(actual) => current = actual.max(1),
+            }
+        }
+    }
+
+    pub fn current_workers(&self) -> usize {
+        self.max_active_workers.load(Ordering::Relaxed).max(1)
+    }
+
+    pub async fn wait_until_ready(&self, worker_id: usize, stop_signal: &AtomicU8) -> bool {
+        loop {
+            if stop_signal.load(Ordering::Relaxed) != 0 {
+                return false;
+            }
+
+            let max_workers = self.max_active_workers.load(Ordering::Relaxed).max(1);
+            if worker_id > max_workers {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+
             let pause_until = self.pause_until_epoch_ms.load(Ordering::Relaxed);
             let now = now_epoch_millis();
             if pause_until <= now {
-                return;
+                return true;
             }
 
-            let sleep_ms = pause_until.saturating_sub(now).min(1_000);
+            let sleep_ms = pause_until.saturating_sub(now).min(250);
             tokio::time::sleep(Duration::from_millis(sleep_ms.max(1))).await;
         }
     }
@@ -98,7 +134,15 @@ pub async fn worker(
             break;
         }
 
-        throttle.wait_if_paused().await;
+        if !throttle.wait_until_ready(id, &stop_signal).await {
+            debug!(
+                target: "domain_scanner::worker",
+                context = "lifecycle",
+                worker_id = id,
+                "worker exiting while waiting on throttle"
+            );
+            break;
+        }
 
         // Lock the receiver just long enough to get a job
         let domain_name = {

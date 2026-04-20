@@ -1,4 +1,7 @@
-use super::models::{StartScanRequest, TaskControl, TaskSignal};
+use super::models::{
+    ScanLogEvent, ScanResultEvent, ScanStatus, ScanStreamMessage, StartScanRequest, StreamHub,
+    TaskControl, TaskSignal,
+};
 use crate::checker::CheckerRegistry;
 use crate::generator;
 use crate::worker;
@@ -29,6 +32,7 @@ pub async fn start_task_worker(
     mut rx: mpsc::Receiver<()>,
     task_control: TaskControl,
     registry: Arc<CheckerRegistry>,
+    streams: StreamHub,
 ) {
     info!(
         target: "domain_scanner::queue",
@@ -78,6 +82,7 @@ pub async fn start_task_worker(
             );
             let _ = add_event_log(
                 &db,
+                &streams,
                 &scan_id,
                 "INFO",
                 "task.picked",
@@ -88,6 +93,7 @@ pub async fn start_task_worker(
             .await;
             let _ = add_event_log(
                 &db,
+                &streams,
                 &scan_id,
                 "INFO",
                 "task.config",
@@ -129,6 +135,7 @@ pub async fn start_task_worker(
                 );
                 let _ = add_event_log(
                     &db,
+                    &streams,
                     &scan_id,
                     "ERROR",
                     "task.status_update_failed",
@@ -150,6 +157,7 @@ pub async fn start_task_worker(
                 found,
                 registry.clone(),
                 task_control.clone(),
+                streams.clone(),
             )
             .await;
 
@@ -219,6 +227,7 @@ async fn run_scan_logic(
     _initial_found: i64,
     registry: Arc<CheckerRegistry>,
     task_control: TaskControl,
+    streams: StreamHub,
 ) {
     let task_signal = task_control.register(scan_id);
     let counts = get_result_counts(db, scan_id).await.unwrap_or((0, 0));
@@ -226,6 +235,7 @@ async fn run_scan_logic(
     let resume_found = counts.1;
     let _ = add_event_log(
         db,
+        &streams,
         scan_id,
         "INFO",
         "task.resume",
@@ -294,6 +304,7 @@ async fn run_scan_logic(
             Ok(generator) => {
                 let _ = add_event_log(
                     db,
+                    &streams,
                     scan_id,
                     "INFO",
                     "generator.started",
@@ -307,6 +318,7 @@ async fn run_scan_logic(
             Err(e) => {
                 let _ = add_event_log(
                     db,
+                    &streams,
                     scan_id,
                     "ERROR",
                     "generator.failed",
@@ -366,6 +378,7 @@ async fn run_scan_logic(
 
     let _ = add_event_log(
         db,
+        &streams,
         scan_id,
         "INFO",
         "worker.pool",
@@ -391,6 +404,7 @@ async fn run_scan_logic(
     {
         let _ = add_event_log(
             db,
+            &streams,
             scan_id,
             "ERROR",
             "storage.counters_init_failed",
@@ -403,10 +417,14 @@ async fn run_scan_logic(
         return;
     }
 
+    let worker_count = 10usize;
     let (tx_results, mut rx_results) = mpsc::channel(100);
-    let worker_throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(500)));
+    let worker_throttle = Arc::new(worker::WorkerThrottle::new(
+        Duration::from_millis(500),
+        worker_count,
+    ));
 
-    for id in 1..=10 {
+    for id in 1..=worker_count {
         let jobs = jobs_rx.clone();
         let tx = tx_results.clone();
         let throttle = worker_throttle.clone();
@@ -422,6 +440,8 @@ async fn run_scan_logic(
     let mut found = resume_found;
     let mut last_persisted = processed;
     let mut retry_attempts: HashMap<String, u32> = HashMap::new();
+    streams.notify_scans();
+    publish_scan_status(&streams, scan_id, "running", total, processed, found).await;
 
     loop {
         if feeder_done.load(Ordering::Relaxed) && pending_domains.load(Ordering::Relaxed) == 0 {
@@ -447,6 +467,7 @@ async fn run_scan_logic(
             jobs_tx.take();
             let _ = add_event_log(
                 db,
+                &streams,
                 scan_id,
                 "WARN",
                 "task.signal_changed",
@@ -464,6 +485,7 @@ async fn run_scan_logic(
             crate::WorkerMessage::Scanning(domain) => {
                 let _ = add_event_log(
                     db,
+                    &streams,
                     scan_id,
                     "INFO",
                     "domain.scanning",
@@ -477,6 +499,7 @@ async fn run_scan_logic(
                 if !res.trace.is_empty() {
                     let _ = add_event_log(
                         db,
+                        &streams,
                         scan_id,
                         "INFO",
                         "domain.trace",
@@ -494,23 +517,44 @@ async fn run_scan_logic(
                     let should_retry = *attempt <= max_attempts;
                     if should_retry {
                         if res.rate_limited && is_whois_rate_limited(&res) {
-                            let new_delay = worker_throttle.slow_down_by_percent(20);
                             let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
+                            let remaining_workers = worker_throttle.reduce_workers();
+                            let new_delay = if remaining_workers.is_none() {
+                                Some(worker_throttle.slow_down_by_percent(20))
+                            } else {
+                                None
+                            };
                             let _ = add_event_log(
                                 db,
+                                &streams,
                                 scan_id,
                                 "WARN",
                                 "task.throttle_adjusted",
                                 Some(res.domain.as_str()),
-                                Some(
-                                    "WHOIS rate limit detected; pausing task and reducing scan speed"
-                                        .to_string(),
-                                ),
-                                vec![
-                                    ("pause_secs", json!(60)),
-                                    ("delay_ms", json!(new_delay.as_millis() as u64)),
-                                    ("paused_until_epoch_ms", json!(paused_until)),
-                                ],
+                                Some(match remaining_workers {
+                                    Some(_) => {
+                                        "WHOIS rate limit detected; pausing task and reducing worker concurrency"
+                                            .to_string()
+                                    }
+                                    None => {
+                                        "WHOIS rate limit detected; pausing task and reducing scan speed"
+                                            .to_string()
+                                    }
+                                }),
+                                {
+                                    let mut fields = vec![
+                                        ("pause_secs", json!(60)),
+                                        ("paused_until_epoch_ms", json!(paused_until)),
+                                        (
+                                            "active_workers",
+                                            json!(worker_throttle.current_workers()),
+                                        ),
+                                    ];
+                                    if let Some(delay) = new_delay {
+                                        fields.push(("delay_ms", json!(delay.as_millis() as u64)));
+                                    }
+                                    fields
+                                },
                             )
                             .await;
                         }
@@ -529,6 +573,7 @@ async fn run_scan_logic(
                         let level = if res.rate_limited { "WARN" } else { "INFO" };
                         let _ = add_event_log(
                             db,
+                            &streams,
                             scan_id,
                             level,
                             "domain.retry",
@@ -559,6 +604,7 @@ async fn run_scan_logic(
                     } else {
                         let _ = add_event_log(
                             db,
+                            &streams,
                             scan_id,
                             "ERROR",
                             "domain.retry_exhausted",
@@ -583,6 +629,7 @@ async fn run_scan_logic(
                     found += 1;
                     let _ = add_event_log(
                         db,
+                        &streams,
                         scan_id,
                         "INFO",
                         "domain.available",
@@ -594,6 +641,7 @@ async fn run_scan_logic(
                 } else if let Some(err) = res.error {
                     let _ = add_event_log(
                         db,
+                        &streams,
                         scan_id,
                         "WARN",
                         "domain.error",
@@ -609,6 +657,7 @@ async fn run_scan_logic(
                     }
                     let _ = add_event_log(
                         db,
+                        &streams,
                         scan_id,
                         "INFO",
                         "domain.registered",
@@ -619,18 +668,21 @@ async fn run_scan_logic(
                     .await;
                 }
 
-                if let Err(err) = sqlx::query(
+                let result_signatures = res.signatures.join(",");
+                let inserted_result = sqlx::query_as::<_, ScanResultEvent>(
                     "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures)
-                     VALUES (?, ?, ?, ?, ?)",
+                     VALUES (?, ?, ?, ?, ?)
+                     RETURNING rowid as event_id, domain, available, expiration_date, signatures",
                 )
                 .bind(scan_id)
                 .bind(&res.domain)
                 .bind(res.available)
-                .bind(res.expiration_date)
-                .bind(res.signatures.join(","))
-                .execute(db)
-                .await
-                {
+                .bind(&res.expiration_date)
+                .bind(&result_signatures)
+                .fetch_one(db)
+                .await;
+
+                if let Err(err) = inserted_result.as_ref() {
                     error!(
                         target: "domain_scanner::queue",
                         context = "storage",
@@ -641,6 +693,7 @@ async fn run_scan_logic(
                     );
                     let _ = add_event_log(
                         db,
+                        &streams,
                         scan_id,
                         "ERROR",
                         "storage.result_persist_failed",
@@ -649,6 +702,14 @@ async fn run_scan_logic(
                         vec![("error", json!(err.to_string()))],
                     )
                     .await;
+                }
+
+                if res.available {
+                    if let Ok(result_event) = inserted_result {
+                        streams
+                            .publish_scan(scan_id, ScanStreamMessage::Result(result_event))
+                            .await;
+                    }
                 }
 
                 if processed - last_persisted >= 10
@@ -673,6 +734,7 @@ async fn run_scan_logic(
                         );
                         let _ = add_event_log(
                             db,
+                            &streams,
                             scan_id,
                             "ERROR",
                             "storage.counters_persist_failed",
@@ -689,6 +751,8 @@ async fn run_scan_logic(
                     last_persisted = processed;
                 }
 
+                publish_scan_status(&streams, scan_id, "running", total, processed, found).await;
+
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
                 {
@@ -702,6 +766,7 @@ async fn run_scan_logic(
         TaskSignal::Cancel => {
             let _ = add_event_log(
                 db,
+                &streams,
                 scan_id,
                 "WARN",
                 "task.cancelled",
@@ -730,11 +795,18 @@ async fn run_scan_logic(
                     "failed to mark task cancelled"
                 );
             }
+            publish_scan_status(&streams, scan_id, "cancelled", total, processed, found).await;
+            streams.notify_scans();
+            streams
+                .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))
+                .await;
+            streams.cleanup_scan(scan_id).await;
         }
         TaskSignal::Pause => {}
         TaskSignal::Run => {
             let _ = add_event_log(
                 db,
+                &streams,
                 scan_id,
                 "INFO",
                 "task.summary",
@@ -764,6 +836,7 @@ async fn run_scan_logic(
                 );
                 let _ = add_event_log(
                     db,
+                    &streams,
                     scan_id,
                     "ERROR",
                     "task.status_update_failed",
@@ -773,6 +846,12 @@ async fn run_scan_logic(
                 )
                 .await;
             }
+            publish_scan_status(&streams, scan_id, "finished", total, processed, found).await;
+            streams.notify_scans();
+            streams
+                .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))
+                .await;
+            streams.cleanup_scan(scan_id).await;
         }
     }
 
@@ -781,32 +860,41 @@ async fn run_scan_logic(
 
 async fn add_log(
     db: &SqlitePool,
+    streams: &StreamHub,
     scan_id: &str,
     level: &str,
     message: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO scan_logs (scan_id, level, message) VALUES (?, ?, ?)")
-        .bind(scan_id)
-        .bind(level)
-        .bind(message)
-        .execute(db)
-        .await
-        .map_err(|err| {
-            warn!(
-                target: "domain_scanner::queue",
-                context = "scan_log",
-                scan_id = %scan_id,
-                level,
-                error = %err,
-                "failed to write scan log"
-            );
-            err
-        })?;
+    let inserted = sqlx::query_as::<_, ScanLogEvent>(
+        "INSERT INTO scan_logs (scan_id, level, message)
+         VALUES (?, ?, ?)
+         RETURNING id, message, level, created_at",
+    )
+    .bind(scan_id)
+    .bind(level)
+    .bind(message)
+    .fetch_one(db)
+    .await
+    .map_err(|err| {
+        warn!(
+            target: "domain_scanner::queue",
+            context = "scan_log",
+            scan_id = %scan_id,
+            level,
+            error = %err,
+            "failed to write scan log"
+        );
+        err
+    })?;
+    streams
+        .publish_scan(scan_id, ScanStreamMessage::Log(inserted))
+        .await;
     Ok(())
 }
 
 async fn add_event_log(
     db: &SqlitePool,
+    streams: &StreamHub,
     scan_id: &str,
     level: &str,
     event: &str,
@@ -833,7 +921,32 @@ async fn add_event_log(
         )
     });
 
-    add_log(db, scan_id, level, &serialized).await
+    add_log(db, streams, scan_id, level, &serialized).await
+}
+
+async fn publish_scan_status(
+    streams: &StreamHub,
+    scan_id: &str,
+    status: &str,
+    total: i64,
+    processed: i64,
+    found: i64,
+) {
+    // NOTE: notify_scans() is intentionally NOT called here.
+    // It should only be invoked on real state transitions (running, cancelled, finished)
+    // by the caller, not on every per-domain progress update.
+    streams
+        .publish_scan(
+            scan_id,
+            ScanStreamMessage::Status(ScanStatus {
+                id: scan_id.to_string(),
+                status: status.to_string(),
+                total,
+                processed,
+                found,
+            }),
+        )
+        .await;
 }
 
 async fn get_result_counts(db: &SqlitePool, scan_id: &str) -> Result<(i64, i64), sqlx::Error> {

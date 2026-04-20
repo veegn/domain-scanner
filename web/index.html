@@ -276,17 +276,19 @@
             currentId: null,
             pollInterval: null,
             listPollInterval: null,
+            scanStream: null,
+            scansStream: null,
             currentResults: [],
             selectedDomains: new Set(),
             sortDirection: 'asc',
             searchTimeout: null,
             lastLogId: 0,
             isConsoleCollapsed: false,
+            currentStatus: null,
+            lastFoundCount: 0,
             config: {
                 maxConsoleDomains: 10,
-                maxSystemLines: 2,
-                pollRate: 1500,
-                listPollRate: 5000
+                maxSystemLines: 2
             }
         };
 
@@ -320,15 +322,44 @@
                 } catch (e) { console.error('API Error (loadRecentScans):', e); }
             },
 
+            openScansStream() {
+                this.closeScansStream();
+                const url = this.base + 'api/scans/stream';
+                const stream = new EventSource(url);
+                State.scansStream = stream;
+
+                stream.addEventListener('scans', (event) => {
+                    const scans = JSON.parse(event.data);
+                    UI.renderScanList(scans);
+                    if (!State.currentId && scans.length > 0) {
+                        Handlers.selectScan(scans[0].id);
+                    }
+                });
+
+                stream.addEventListener('error', () => {
+                    if (stream.readyState === EventSource.CLOSED) {
+                        this.closeScansStream();
+                    }
+                });
+            },
+
+            closeScansStream() {
+                if (State.scansStream) {
+                    State.scansStream.close();
+                    State.scansStream = null;
+                }
+            },
+
             async deleteScan(id) {
                 if (!confirm("Confirm complete data destruction for this operation?")) return;
                 try {
                     const url = this.base + `api/scan/${id}`;
                     const resp = await fetch(url, { method: 'DELETE' });
                     if (resp.status === 202) {
-                        API.updateStatus();
+                        this.loadRecentScans();
                     } else if (resp.ok) {
                         if (State.currentId === id) {
+                            this.closeScanStream();
                             State.currentId = null;
                             document.getElementById('statusArea').classList.add('hidden');
                             State.currentResults = [];
@@ -339,15 +370,6 @@
                 } catch (e) { alert(e.message); }
             },
 
-            async updateStatus() {
-                if (!State.currentId) return;
-                try {
-                    const data = await this.fetchJson(`api/scan/${State.currentId}`);
-                    UI.syncStatusPanel(data);
-                    if (data.status === 'running') this.loadResults();
-                } catch (e) { console.error('Status sync failed:', e); }
-            },
-
             async loadResults() {
                 if (!State.currentId) return;
                 try {
@@ -356,14 +378,87 @@
                 } catch (e) { console.error('Data pull failed:', e); }
             },
 
-            async loadLogs() {
-                if (!State.currentId) return;
-                try {
-                    const logs = await this.fetchJson(`api/scan/${State.currentId}/logs`);
-                    if (logs.length === 0 || logs[0].id === State.lastLogId) return;
-                    State.lastLogId = logs[0].id;
-                    UI.renderLogStream(logs.reverse());
-                } catch (e) { console.error('Stream failure:', e); }
+            openScanStream(id) {
+                this.closeScanStream();
+                const url = this.base + `api/scan/${id}/stream`;
+                const stream = new EventSource(url);
+                const statusRows = [];
+                State.scanStream = stream;
+                State.lastLogId = 0;
+                State.currentStatus = null;
+                State.lastFoundCount = 0;
+                State.currentResults = [];
+                UI.renderResults();
+
+                const renderWindow = () => UI.renderLogStream(statusRows);
+
+                stream.addEventListener('status', (event) => {
+                    const data = JSON.parse(event.data);
+                    State.currentStatus = data.status;
+                    State.lastFoundCount = data.found;
+                    UI.syncStatusPanel(data);
+                });
+
+                stream.addEventListener('log', (event) => {
+                    const log = JSON.parse(event.data);
+                    if (log.id <= State.lastLogId) return;
+                    State.lastLogId = log.id;
+                    statusRows.push(log);
+                    if (statusRows.length > 250) statusRows.splice(0, statusRows.length - 250);
+                    renderWindow();
+                });
+
+                stream.addEventListener('result', (event) => {
+                    const result = JSON.parse(event.data);
+                    if (State.currentResults.some(item => item.domain === result.domain)) return;
+                    State.currentResults.push(result);
+                    UI.renderResults();
+                });
+
+                stream.addEventListener('result_batch', (event) => {
+                    const results = JSON.parse(event.data);
+                    let changed = false;
+                    const seen = new Set(State.currentResults.map(item => item.domain));
+
+                    for (const result of results) {
+                        if (seen.has(result.domain)) continue;
+                        seen.add(result.domain);
+                        State.currentResults.push(result);
+                        changed = true;
+                    }
+
+                    if (changed) UI.renderResults();
+                });
+
+                stream.addEventListener('deleted', () => {
+                    this.closeScanStream();
+                    if (State.currentId === id) {
+                        State.currentId = null;
+                        document.getElementById('statusArea').classList.add('hidden');
+                        State.currentResults = [];
+                        UI.renderResults();
+                    }
+                });
+
+                stream.addEventListener('complete', () => {
+                    // Explicitly close so the browser does not auto-reconnect.
+                    // The server has no more events to send for a finished/cancelled scan.
+                    this.closeScanStream();
+                    this.loadRecentScans();
+                });
+
+                stream.addEventListener('error', () => {
+                    if (stream.readyState === EventSource.CLOSED) {
+                        this.closeScanStream();
+                    }
+                });
+            },
+
+            closeScanStream() {
+                if (State.scanStream) {
+                    State.scanStream.close();
+                    State.scanStream = null;
+                }
             }
         };
 
@@ -435,8 +530,6 @@
                 document.getElementById('progressBar').style.width = pct + '%';
                 
                 if (['finished', 'failed'].includes(data.status)) {
-                    if (State.pollInterval) clearInterval(State.pollInterval);
-                    State.pollInterval = null;
                     if (data.status === 'finished' && data.found > 0) document.getElementById('btnRescan').classList.remove('hidden');
                     if (!State.isConsoleCollapsed) this.setConsoleState(true);
                 } else {
@@ -574,15 +667,11 @@
                 State.currentId = id;
                 State.lastLogId = 0;
                 State.selectedDomains.clear();
+                State.currentResults = [];
                 document.getElementById('currentId').innerText = id;
                 document.getElementById('statusArea').classList.remove('hidden');
                 document.getElementById('logConsole').innerHTML = '<div class="text-gray-600 italic">Streaming data interface...</div>';
-                
-                if (State.pollInterval) clearInterval(State.pollInterval);
-                API.updateStatus();
-                API.loadResults();
-                API.loadLogs();
-                State.pollInterval = setInterval(() => { API.updateStatus(); API.loadLogs(); }, State.config.pollRate);
+                API.openScanStream(id);
                 API.loadRecentScans();
             },
 
@@ -717,7 +806,7 @@
         // Entry Point
         window.onload = () => {
             API.loadRecentScans();
-            State.listPollInterval = setInterval(() => API.loadRecentScans(), State.config.listPollRate);
+            API.openScansStream();
         };
     </script>
 </body>
