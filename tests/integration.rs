@@ -1201,16 +1201,9 @@ async fn test_worker_processes_domains() {
     let jobs = Arc::new(Mutex::new(job_rx));
     let reg_clone = registry.clone();
     let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
+    let throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(0), 1));
     tokio::spawn(async move {
-        worker::worker(
-            1,
-            jobs,
-            result_tx,
-            Duration::from_millis(0),
-            reg_clone,
-            cancel_flag,
-        )
-        .await;
+        worker::worker(1, jobs, result_tx, throttle, reg_clone, cancel_flag).await;
     });
     job_tx.send("google.com".to_string()).await.unwrap();
     drop(job_tx);
@@ -1239,16 +1232,9 @@ async fn test_worker_multiple_domains() {
     let jobs = Arc::new(Mutex::new(job_rx));
     let reg_clone = registry.clone();
     let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
+    let throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(0), 1));
     tokio::spawn(async move {
-        worker::worker(
-            1,
-            jobs,
-            result_tx,
-            Duration::from_millis(0),
-            reg_clone,
-            cancel_flag,
-        )
-        .await;
+        worker::worker(1, jobs, result_tx, throttle, reg_clone, cancel_flag).await;
     });
     let test_domains = vec!["example.com".to_string(), "test.org".to_string()];
     for d in &test_domains {
@@ -1276,17 +1262,19 @@ async fn test_worker_multiple_workers_share_jobs() {
     let (job_tx, job_rx) = mpsc::channel(100);
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let jobs = Arc::new(Mutex::new(job_rx));
+    let throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(0), 3));
     for id in 1..=3 {
         let jobs_clone = jobs.clone();
         let tx_clone = result_tx.clone();
         let reg_clone = registry.clone();
         let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
+        let throttle_clone = throttle.clone();
         tokio::spawn(async move {
             worker::worker(
                 id,
                 jobs_clone,
                 tx_clone,
-                Duration::from_millis(0),
+                throttle_clone,
                 reg_clone,
                 cancel_flag,
             )
@@ -1601,16 +1589,9 @@ async fn test_full_pipeline_with_generator_and_worker() {
     let jobs = Arc::new(Mutex::new(dg.domains));
     let reg_clone = registry.clone();
     let cancel_flag = Arc::new(AtomicU8::new(TaskSignal::Run as u8));
+    let throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(0), 1));
     tokio::spawn(async move {
-        worker::worker(
-            1,
-            jobs,
-            result_tx,
-            Duration::from_millis(0),
-            reg_clone,
-            cancel_flag,
-        )
-        .await;
+        worker::worker(1, jobs, result_tx, throttle, reg_clone, cancel_flag).await;
     });
     let mut scan_count = 0u32;
     let mut result_count = 0u32;
