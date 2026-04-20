@@ -1,14 +1,17 @@
 use std::collections::HashMap;
+use std::fs;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
@@ -66,6 +69,8 @@ pub struct WhoisChecker {
     server_map: Arc<HashMap<String, String>>,
     cb: Arc<CircuitBreaker>,
     throttle_map: Arc<RwLock<HashMap<String, Arc<Mutex<WhoisServerThrottle>>>>>,
+    cache_path: Arc<PathBuf>,
+    cache_entries: Arc<Mutex<HashMap<String, WhoisRateLimitCacheEntry>>>,
 }
 
 #[derive(Debug)]
@@ -80,11 +85,40 @@ struct RateLimitHint {
     min_interval: Option<Duration>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WhoisRateLimitCacheFile {
+    #[serde(default)]
+    servers: HashMap<String, WhoisRateLimitCacheEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WhoisRateLimitCacheEntry {
+    min_interval_ms: u64,
+    updated_at_epoch_secs: u64,
+    cooldown_until_epoch_secs: Option<u64>,
+}
+
 impl WhoisServerThrottle {
     fn new() -> Self {
         Self {
             min_interval: Duration::from_millis(250),
             next_allowed_at: Instant::now(),
+        }
+    }
+
+    fn from_cache(entry: &WhoisRateLimitCacheEntry) -> Self {
+        let min_interval = Duration::from_millis(entry.min_interval_ms.max(250));
+        let mut next_allowed_at = Instant::now();
+        if let Some(cooldown_until_epoch_secs) = entry.cooldown_until_epoch_secs {
+            let remaining_secs = cooldown_until_epoch_secs.saturating_sub(now_epoch_secs());
+            if remaining_secs > 0 {
+                next_allowed_at += Duration::from_secs(remaining_secs);
+            }
+        }
+
+        Self {
+            min_interval,
+            next_allowed_at,
         }
     }
 }
@@ -95,21 +129,25 @@ impl WhoisChecker {
     }
 
     pub fn with_servers(custom_servers: HashMap<String, String>) -> Self {
-        let mut m = HashMap::new();
-
-        for (tld, endpoint) in custom_servers {
-            let normalized_tld = tld.trim().trim_start_matches('.').to_ascii_lowercase();
-            let normalized_endpoint = endpoint.trim().to_string();
-            if !normalized_tld.is_empty() && !normalized_endpoint.is_empty() {
-                m.insert(normalized_tld, normalized_endpoint);
-            }
+        let cache_path = default_rate_limit_cache_path();
+        let (cache_entries, initial_throttles) = load_cached_throttles(&cache_path);
+        if !cache_entries.is_empty() {
+            info!(
+                target: "domain_scanner::checker::whois",
+                context = "rate_limit_cache",
+                path = %cache_path.display(),
+                servers = cache_entries.len(),
+                "loaded WHOIS rate-limit cache"
+            );
         }
 
         Self {
             ip_cache: Arc::new(RwLock::new(HashMap::new())),
-            server_map: Arc::new(m),
+            server_map: Arc::new(normalize_server_map(custom_servers)),
             cb: Arc::new(CircuitBreaker::new(5, 120)),
-            throttle_map: Arc::new(RwLock::new(HashMap::new())),
+            throttle_map: Arc::new(RwLock::new(initial_throttles)),
+            cache_path: Arc::new(cache_path),
+            cache_entries: Arc::new(Mutex::new(cache_entries)),
         }
     }
 
@@ -161,9 +199,19 @@ impl WhoisChecker {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
         let floor_ms = 250;
+        let mut changed = false;
         if guard.min_interval.as_millis() as u64 > floor_ms {
             let reduced_ms = ((guard.min_interval.as_millis() as u64) * 8 / 10).max(floor_ms);
             guard.min_interval = Duration::from_millis(reduced_ms);
+            changed = true;
+        }
+        let min_interval = guard.min_interval;
+        let cooldown_until = guard.next_allowed_at;
+        drop(guard);
+
+        if changed {
+            self.persist_rate_limit_cache(server, min_interval, cooldown_until)
+                .await;
         }
     }
 
@@ -205,16 +253,52 @@ impl WhoisChecker {
             .retry_after
             .unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
         guard.next_allowed_at = Instant::now() + retry_after;
+        let min_interval = guard.min_interval;
+        let next_allowed_at = guard.next_allowed_at;
+        let should_persist = hint.retry_after.is_some() || hint.min_interval.is_some();
+        drop(guard);
+
+        if should_persist {
+            self.persist_rate_limit_cache(server, min_interval, next_allowed_at)
+                .await;
+        }
         warn!(
             target: "domain_scanner::checker::whois",
             context = "backoff",
             server,
             reason = "rate_limit",
-            min_interval_ms = guard.min_interval.as_millis() as u64,
+            min_interval_ms = min_interval.as_millis() as u64,
             retry_after_secs = retry_after.as_secs(),
             "WHOIS rate-limit backoff updated"
         );
         retry_after
+    }
+
+    async fn persist_rate_limit_cache(
+        &self,
+        server: &str,
+        min_interval: Duration,
+        next_allowed_at: Instant,
+    ) {
+        let cooldown_secs = next_allowed_at
+            .checked_duration_since(Instant::now())
+            .map(|duration| duration.as_secs())
+            .filter(|secs| *secs > 0);
+
+        let mut guard = self.cache_entries.lock().await;
+        guard.insert(
+            server.to_string(),
+            WhoisRateLimitCacheEntry {
+                min_interval_ms: min_interval.as_millis() as u64,
+                updated_at_epoch_secs: now_epoch_secs(),
+                cooldown_until_epoch_secs: cooldown_secs
+                    .map(|secs| now_epoch_secs().saturating_add(secs)),
+            },
+        );
+        let snapshot = guard.clone();
+        drop(guard);
+
+        write_rate_limit_cache(&self.cache_path, &snapshot);
     }
 
     async fn resolve_server(&self, server_host: &str) -> Option<IpAddr> {
@@ -329,6 +413,37 @@ impl WhoisChecker {
         }
         None
     }
+}
+
+fn normalize_server_map(custom_servers: HashMap<String, String>) -> HashMap<String, String> {
+    let mut normalized = HashMap::new();
+    for (tld, endpoint) in custom_servers {
+        let normalized_tld = tld.trim().trim_start_matches('.').to_ascii_lowercase();
+        let normalized_endpoint = endpoint.trim().to_string();
+        if !normalized_tld.is_empty() && !normalized_endpoint.is_empty() {
+            normalized.insert(normalized_tld, normalized_endpoint);
+        }
+    }
+    normalized
+}
+
+fn load_cached_throttles(
+    cache_path: &Path,
+) -> (
+    HashMap<String, WhoisRateLimitCacheEntry>,
+    HashMap<String, Arc<Mutex<WhoisServerThrottle>>>,
+) {
+    let cache_entries = read_rate_limit_cache(cache_path);
+    let throttles = cache_entries
+        .iter()
+        .map(|(server, entry)| {
+            (
+                server.clone(),
+                Arc::new(Mutex::new(WhoisServerThrottle::from_cache(entry))),
+            )
+        })
+        .collect();
+    (cache_entries, throttles)
 }
 
 impl Default for WhoisChecker {
@@ -485,6 +600,89 @@ fn queries_per_window_to_interval(limit: u64, unit: &str) -> Option<Duration> {
     Some(Duration::from_secs(per_query_secs.max(1)))
 }
 
+fn default_rate_limit_cache_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("data")
+        .join("cache")
+        .join("whois")
+        .join("rate_limits.json")
+}
+
+fn read_rate_limit_cache(path: &Path) -> HashMap<String, WhoisRateLimitCacheEntry> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+
+    match serde_json::from_str::<WhoisRateLimitCacheFile>(&content) {
+        Ok(cache) => cache
+            .servers
+            .into_iter()
+            .filter(|(_, entry)| entry.min_interval_ms > 0)
+            .collect(),
+        Err(err) => {
+            warn!(
+                target: "domain_scanner::checker::whois",
+                context = "rate_limit_cache",
+                path = %path.display(),
+                error = %err,
+                "failed to parse WHOIS rate-limit cache"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn write_rate_limit_cache(path: &Path, servers: &HashMap<String, WhoisRateLimitCacheEntry>) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+
+    if let Err(err) = fs::create_dir_all(parent) {
+        warn!(
+            target: "domain_scanner::checker::whois",
+            context = "rate_limit_cache",
+            path = %parent.display(),
+            error = %err,
+            "failed to create WHOIS rate-limit cache directory"
+        );
+        return;
+    }
+
+    let serialized = match serde_json::to_vec_pretty(&WhoisRateLimitCacheFile {
+        servers: servers.clone(),
+    }) {
+        Ok(serialized) => serialized,
+        Err(err) => {
+            warn!(
+                target: "domain_scanner::checker::whois",
+                context = "rate_limit_cache",
+                path = %path.display(),
+                error = %err,
+                "failed to serialize WHOIS rate-limit cache"
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = fs::write(path, serialized) {
+        warn!(
+            target: "domain_scanner::checker::whois",
+            context = "rate_limit_cache",
+            path = %path.display(),
+            error = %err,
+            "failed to write WHOIS rate-limit cache"
+        );
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +708,32 @@ mod tests {
             queries_per_window_to_interval(120, "hour"),
             Some(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn test_rate_limit_cache_round_trip() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "domain-scanner-whois-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = temp_dir.join("rate_limits.json");
+
+        let mut servers = HashMap::new();
+        servers.insert(
+            "whois.nic.li".to_string(),
+            WhoisRateLimitCacheEntry {
+                min_interval_ms: 1500,
+                updated_at_epoch_secs: now_epoch_secs(),
+                cooldown_until_epoch_secs: Some(now_epoch_secs().saturating_add(60)),
+            },
+        );
+
+        write_rate_limit_cache(&path, &servers);
+        let loaded = read_rate_limit_cache(&path);
+
+        assert_eq!(loaded.get("whois.nic.li").unwrap().min_interval_ms, 1500);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }

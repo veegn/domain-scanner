@@ -10,12 +10,14 @@ use serde_json::{Map, Value, json};
 use sqlx::{Row, sqlite::SqlitePool};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 const MAX_EXCEPTION_REPLAY_ROUNDS: u32 = 3;
+const WORKER_COUNT: usize = 10;
+const WORKER_DELAY_MS: u64 = 500;
 
 #[derive(Serialize)]
 struct ScanLogRecord {
@@ -26,6 +28,13 @@ struct ScanLogRecord {
     message: Option<String>,
     #[serde(skip_serializing_if = "Map::is_empty")]
     fields: Map<String, Value>,
+}
+
+struct PendingScanTask {
+    scan_id: String,
+    params: StartScanRequest,
+    processed: i64,
+    found: i64,
 }
 
 /// The single task background worker.
@@ -46,35 +55,9 @@ pub async fn start_task_worker(
         let next_task = fetch_next_ready_task(&db).await;
 
         if let Some(row) = next_task {
-            let scan_id: String = row.try_get("id").unwrap_or_default();
-
-            let length: i64 = row.try_get("length").unwrap_or(0);
-            let suffix: String = row.try_get("suffix").unwrap_or_default();
-            let pattern: String = row.try_get("pattern").unwrap_or_default();
-            let regex: Option<String> = row.try_get("regex").unwrap_or(None);
-
-            let priority_words_json: String = row
-                .try_get("priority_words")
-                .unwrap_or_else(|_| "null".to_string());
-            let domains_json: String = row
-                .try_get("domains")
-                .unwrap_or_else(|_| "null".to_string());
-
-            let priority_words: Option<Vec<String>> =
-                serde_json::from_str(&priority_words_json).unwrap_or(None);
-            let domains: Option<Vec<String>> = serde_json::from_str(&domains_json).unwrap_or(None);
-
-            let processed: i64 = row.try_get("processed").unwrap_or(0);
-            let found: i64 = row.try_get("found").unwrap_or(0);
-
-            let params = StartScanRequest {
-                length: length as usize,
-                suffix,
-                pattern,
-                regex,
-                priority_words,
-                domains,
-            };
+            let task = PendingScanTask::from_row(row);
+            let scan_id = task.scan_id.clone();
+            let params = &task.params;
 
             info!(
                 target: "domain_scanner::queue",
@@ -118,45 +101,14 @@ pub async fn start_task_worker(
             )
             .await;
 
-            if let Err(err) = sqlx::query(
-                "UPDATE scans
-                 SET status = 'running', retry_not_before = NULL, started_at = CURRENT_TIMESTAMP
-                 WHERE id = ?",
-            )
-            .bind(&scan_id)
-            .execute(&db)
-            .await
-            {
-                error!(
-                    target: "domain_scanner::queue",
-                    context = "task_status",
-                    scan_id = %scan_id,
-                    status = "running",
-                    error = %err,
-                    "failed to mark task as running"
-                );
-                let _ = add_event_log(
-                    &db,
-                    &streams,
-                    &scan_id,
-                    "ERROR",
-                    "task.status_update_failed",
-                    None,
-                    Some("Failed to mark task as running".to_string()),
-                    vec![
-                        ("error", json!(err.to_string())),
-                        ("status", json!("running")),
-                    ],
-                )
-                .await;
-            }
+            mark_scan_running(&db, &streams, &scan_id).await;
 
             run_scan_logic(
                 &db,
                 &scan_id,
-                params,
-                processed,
-                found,
+                task.params,
+                task.processed,
+                task.found,
                 registry.clone(),
                 task_control.clone(),
                 streams.clone(),
@@ -188,6 +140,32 @@ pub async fn start_task_worker(
             }
         } else if rx.recv().await.is_none() {
             break;
+        }
+    }
+}
+
+impl PendingScanTask {
+    fn from_row(row: sqlx::sqlite::SqliteRow) -> Self {
+        let scan_id: String = row.try_get("id").unwrap_or_default();
+        let priority_words_json: String = row
+            .try_get("priority_words")
+            .unwrap_or_else(|_| "null".to_string());
+        let domains_json: String = row
+            .try_get("domains")
+            .unwrap_or_else(|_| "null".to_string());
+
+        Self {
+            scan_id,
+            params: StartScanRequest {
+                length: row.try_get::<i64, _>("length").unwrap_or(0) as usize,
+                suffix: row.try_get("suffix").unwrap_or_default(),
+                pattern: row.try_get("pattern").unwrap_or_default(),
+                regex: row.try_get("regex").unwrap_or(None),
+                priority_words: serde_json::from_str(&priority_words_json).unwrap_or(None),
+                domains: serde_json::from_str(&domains_json).unwrap_or(None),
+            },
+            processed: row.try_get("processed").unwrap_or(0),
+            found: row.try_get("found").unwrap_or(0),
         }
     }
 }
@@ -254,126 +232,22 @@ async fn run_scan_logic(
     let feeder_done = Arc::new(AtomicBool::new(false));
     let pending_domains = Arc::new(AtomicUsize::new(0));
 
-    let total = if let Some(domains) = params.domains.clone() {
-        let filtered_domains: Vec<String> = domains
-            .into_iter()
-            .skip(resume_processed as usize)
-            .collect();
-        let total = params.domains.as_ref().map(|d| d.len()).unwrap_or_default() as i64;
-        let tx = jobs_tx.clone();
-        let scan_id = scan_id.to_string();
-        let signal_clone = task_signal.clone();
-        let feeder_done_clone = feeder_done.clone();
-        let pending_domains_clone = pending_domains.clone();
-        tokio::spawn(async move {
-            for domain in filtered_domains {
-                if TaskControl::signal(&signal_clone) != TaskSignal::Run {
-                    debug!(
-                        target: "domain_scanner::queue",
-                        context = "feeder",
-                        scan_id = %scan_id,
-                        source = "manual",
-                        "feeder interrupted"
-                    );
-                    break;
-                }
-                pending_domains_clone.fetch_add(1, Ordering::Relaxed);
-                if tx.send(domain).await.is_err() {
-                    debug!(
-                        target: "domain_scanner::queue",
-                        context = "feeder",
-                        scan_id = %scan_id,
-                        source = "manual",
-                        "feeder stopped because job queue closed"
-                    );
-                    pending_domains_clone.fetch_sub(1, Ordering::Relaxed);
-                    break;
-                }
-            }
-            feeder_done_clone.store(true, Ordering::Relaxed);
-        });
-        total
-    } else {
-        let domain_gen = match generator::generate_domains(
-            params.length,
-            params.suffix.clone(),
-            params.pattern.clone(),
-            params.regex.clone().unwrap_or_default(),
-            "".to_string(),
-            params.priority_words.clone().unwrap_or_default(),
-            resume_processed,
-        ) {
-            Ok(generator) => {
-                let _ = add_event_log(
-                    db,
-                    &streams,
-                    scan_id,
-                    "INFO",
-                    "generator.started",
-                    None,
-                    Some("Domain generator started".to_string()),
-                    vec![("total", json!(generator.total_count))],
-                )
-                .await;
-                generator
-            }
-            Err(e) => {
-                let _ = add_event_log(
-                    db,
-                    &streams,
-                    scan_id,
-                    "ERROR",
-                    "generator.failed",
-                    None,
-                    Some("Failed to generate domains".to_string()),
-                    vec![("error", json!(e.to_string()))],
-                )
-                .await;
-                let _ = sqlx::query(
-                    "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                )
-                .bind(scan_id)
-                .execute(db)
-                .await;
-                task_control.unregister(scan_id);
-                return;
-            }
-        };
-        let total = domain_gen.total_count as i64;
-        let tx = jobs_tx.clone();
-        let scan_id = scan_id.to_string();
-        let signal_clone = task_signal.clone();
-        let feeder_done_clone = feeder_done.clone();
-        let pending_domains_clone = pending_domains.clone();
-        tokio::spawn(async move {
-            let mut generated = domain_gen.domains;
-            while let Some(domain) = generated.recv().await {
-                if TaskControl::signal(&signal_clone) != TaskSignal::Run {
-                    debug!(
-                        target: "domain_scanner::queue",
-                        context = "feeder",
-                        scan_id = %scan_id,
-                        source = "generator",
-                        "generator feeder interrupted"
-                    );
-                    break;
-                }
-                pending_domains_clone.fetch_add(1, Ordering::Relaxed);
-                if tx.send(domain).await.is_err() {
-                    debug!(
-                        target: "domain_scanner::queue",
-                        context = "feeder",
-                        scan_id = %scan_id,
-                        source = "generator",
-                        "generator feeder stopped because job queue closed"
-                    );
-                    pending_domains_clone.fetch_sub(1, Ordering::Relaxed);
-                    break;
-                }
-            }
-            feeder_done_clone.store(true, Ordering::Relaxed);
-        });
-        total
+    let total = match prepare_job_feeder(
+        db,
+        &streams,
+        scan_id,
+        &params,
+        resume_processed,
+        &jobs_tx,
+        feeder_done.clone(),
+        pending_domains.clone(),
+        task_signal.clone(),
+        task_control.clone(),
+    )
+    .await
+    {
+        Ok(total) => total,
+        Err(()) => return,
     };
     let mut jobs_tx = Some(jobs_tx);
     let jobs_rx = Arc::new(Mutex::new(jobs_rx));
@@ -387,22 +261,15 @@ async fn run_scan_logic(
         None,
         Some("Spawning worker threads".to_string()),
         vec![
-            ("size", json!(10)),
-            ("delay_ms", json!(500)),
+            ("size", json!(WORKER_COUNT)),
+            ("delay_ms", json!(WORKER_DELAY_MS)),
             ("total", json!(total)),
         ],
     )
     .await;
 
-    if let Err(e) = sqlx::query(
-        "UPDATE scans SET total = ?, processed = ?, found = ?, retry_not_before = NULL WHERE id = ?",
-    )
-    .bind(total)
-    .bind(resume_processed)
-    .bind(resume_found)
-    .bind(scan_id)
-    .execute(db)
-    .await
+    if let Err(err) =
+        initialize_scan_counters(db, &streams, scan_id, total, resume_processed, resume_found).await
     {
         let _ = add_event_log(
             db,
@@ -412,21 +279,20 @@ async fn run_scan_logic(
             "storage.counters_init_failed",
             None,
             Some("Failed to initialize scan counters".to_string()),
-            vec![("error", json!(e.to_string()))],
+            vec![("error", json!(err.to_string()))],
         )
         .await;
         task_control.unregister(scan_id);
         return;
     }
 
-    let worker_count = 10usize;
     let (tx_results, mut rx_results) = mpsc::channel(100);
     let worker_throttle = Arc::new(worker::WorkerThrottle::new(
-        Duration::from_millis(500),
-        worker_count,
+        Duration::from_millis(WORKER_DELAY_MS),
+        WORKER_COUNT,
     ));
 
-    for id in 1..=worker_count {
+    for id in 1..=WORKER_COUNT {
         let jobs = jobs_rx.clone();
         let tx = tx_results.clone();
         let throttle = worker_throttle.clone();
@@ -741,7 +607,16 @@ async fn run_scan_logic(
                     last_persisted = processed;
                 }
 
-                publish_scan_status(&streams, scan_id, "running", total, processed, found, deferred_retries.len() as i64).await;
+                publish_scan_status(
+                    &streams,
+                    scan_id,
+                    "running",
+                    total,
+                    processed,
+                    found,
+                    deferred_retries.len() as i64,
+                )
+                .await;
 
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
@@ -897,6 +772,222 @@ async fn run_scan_logic(
     }
 
     task_control.unregister(scan_id);
+}
+
+async fn mark_scan_running(db: &SqlitePool, streams: &StreamHub, scan_id: &str) {
+    if let Err(err) = sqlx::query(
+        "UPDATE scans
+         SET status = 'running', retry_not_before = NULL, started_at = CURRENT_TIMESTAMP
+         WHERE id = ?",
+    )
+    .bind(scan_id)
+    .execute(db)
+    .await
+    {
+        error!(
+            target: "domain_scanner::queue",
+            context = "task_status",
+            scan_id = %scan_id,
+            status = "running",
+            error = %err,
+            "failed to mark task as running"
+        );
+        let _ = add_event_log(
+            db,
+            streams,
+            scan_id,
+            "ERROR",
+            "task.status_update_failed",
+            None,
+            Some("Failed to mark task as running".to_string()),
+            vec![
+                ("error", json!(err.to_string())),
+                ("status", json!("running")),
+            ],
+        )
+        .await;
+    }
+}
+
+async fn prepare_job_feeder(
+    db: &SqlitePool,
+    streams: &StreamHub,
+    scan_id: &str,
+    params: &StartScanRequest,
+    resume_processed: i64,
+    jobs_tx: &mpsc::Sender<String>,
+    feeder_done: Arc<AtomicBool>,
+    pending_domains: Arc<AtomicUsize>,
+    task_signal: Arc<AtomicU8>,
+    task_control: TaskControl,
+) -> Result<i64, ()> {
+    if let Some(domains) = params.domains.clone() {
+        let total = domains.len() as i64;
+        spawn_domain_feeder(
+            domains
+                .into_iter()
+                .skip(resume_processed as usize)
+                .collect(),
+            jobs_tx.clone(),
+            scan_id.to_string(),
+            "manual",
+            feeder_done,
+            pending_domains,
+            task_signal,
+        );
+        return Ok(total);
+    }
+
+    let domain_gen = match generator::generate_domains(
+        params.length,
+        params.suffix.clone(),
+        params.pattern.clone(),
+        params.regex.clone().unwrap_or_default(),
+        "".to_string(),
+        params.priority_words.clone().unwrap_or_default(),
+        resume_processed,
+    ) {
+        Ok(generator) => generator,
+        Err(err) => {
+            let _ = add_event_log(
+                db,
+                streams,
+                scan_id,
+                "ERROR",
+                "generator.failed",
+                None,
+                Some("Failed to generate domains".to_string()),
+                vec![("error", json!(err.to_string()))],
+            )
+            .await;
+            let _ = sqlx::query(
+                "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(scan_id)
+            .execute(db)
+            .await;
+            task_control.unregister(scan_id);
+            return Err(());
+        }
+    };
+
+    let _ = add_event_log(
+        db,
+        streams,
+        scan_id,
+        "INFO",
+        "generator.started",
+        None,
+        Some("Domain generator started".to_string()),
+        vec![("total", json!(domain_gen.total_count))],
+    )
+    .await;
+
+    let total = domain_gen.total_count as i64;
+    spawn_generator_feeder(
+        domain_gen,
+        jobs_tx.clone(),
+        scan_id.to_string(),
+        feeder_done,
+        pending_domains,
+        task_signal,
+    );
+    Ok(total)
+}
+
+fn spawn_domain_feeder(
+    domains: Vec<String>,
+    jobs_tx: mpsc::Sender<String>,
+    scan_id: String,
+    source: &'static str,
+    feeder_done: Arc<AtomicBool>,
+    pending_domains: Arc<AtomicUsize>,
+    task_signal: Arc<AtomicU8>,
+) {
+    tokio::spawn(async move {
+        for domain in domains {
+            if TaskControl::signal(&task_signal) != TaskSignal::Run {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source,
+                    "feeder interrupted"
+                );
+                break;
+            }
+            pending_domains.fetch_add(1, Ordering::Relaxed);
+            if jobs_tx.send(domain).await.is_err() {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source,
+                    "feeder stopped because job queue closed"
+                );
+                pending_domains.fetch_sub(1, Ordering::Relaxed);
+                break;
+            }
+        }
+        feeder_done.store(true, Ordering::Relaxed);
+    });
+}
+
+fn spawn_generator_feeder(
+    domain_gen: generator::DomainGenerator,
+    jobs_tx: mpsc::Sender<String>,
+    scan_id: String,
+    feeder_done: Arc<AtomicBool>,
+    pending_domains: Arc<AtomicUsize>,
+    task_signal: Arc<AtomicU8>,
+) {
+    tokio::spawn(async move {
+        let mut generated = domain_gen.domains;
+        while let Some(domain) = generated.recv().await {
+            if TaskControl::signal(&task_signal) != TaskSignal::Run {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source = "generator",
+                    "generator feeder interrupted"
+                );
+                break;
+            }
+            pending_domains.fetch_add(1, Ordering::Relaxed);
+            if jobs_tx.send(domain).await.is_err() {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source = "generator",
+                    "generator feeder stopped because job queue closed"
+                );
+                pending_domains.fetch_sub(1, Ordering::Relaxed);
+                break;
+            }
+        }
+        feeder_done.store(true, Ordering::Relaxed);
+    });
+}
+
+async fn initialize_scan_counters(
+    db: &SqlitePool,
+    _streams: &StreamHub,
+    scan_id: &str,
+    total: i64,
+    processed: i64,
+    found: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE scans SET total = ?, processed = ?, found = ?, retry_not_before = NULL WHERE id = ?")
+        .bind(total)
+        .bind(processed)
+        .bind(found)
+        .bind(scan_id)
+        .execute(db)
+        .await
+        .map(|_| ())
+        .map(|_| ())
 }
 
 async fn add_log(

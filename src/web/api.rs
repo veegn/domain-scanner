@@ -25,6 +25,8 @@ struct ApiError {
     error: String,
 }
 
+type ApiResponse = axum::response::Response;
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/scans", get(get_scans))
@@ -41,9 +43,9 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn start_scan(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<StartScanRequest>,
-) -> impl IntoResponse {
+) -> ApiResponse {
     if let Err(e) = payload.validate() {
-        return (StatusCode::BAD_REQUEST, Json(ApiError { error: e })).into_response();
+        return api_error(StatusCode::BAD_REQUEST, e);
     }
 
     let scan_id = Uuid::new_v4().to_string();
@@ -55,15 +57,7 @@ async fn start_scan(
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
-        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     if let Err(e) = sqlx::query("INSERT INTO scans (id, status, length, suffix, pattern, regex) VALUES (?, 'pending', ?, ?, ?, ?)")
@@ -75,14 +69,8 @@ async fn start_scan(
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response();
-        }
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
 
     if let Err(e) =
         sqlx::query("INSERT INTO scan_payloads (scan_id, priority_words, domains) VALUES (?, ?, ?)")
@@ -92,23 +80,11 @@ async fn start_scan(
             .execute(&mut *tx)
             .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response();
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e.to_string(),
-            }),
-        )
-            .into_response();
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
     // Send wake up signal (non-blocking)
@@ -121,24 +97,10 @@ async fn start_scan(
 async fn get_scan_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    let row = match sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-        "SELECT id, status, total, processed, found FROM scans WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    {
+) -> ApiResponse {
+    let row = match fetch_scan_status_row(&state.db, &id).await {
         Ok(row) => row,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
-        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     match row {
@@ -155,42 +117,19 @@ async fn get_scan_status(
     }
 }
 
-async fn get_results(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let rows = match sqlx::query_as::<_, ResultRow>("SELECT rowid as event_id, domain, available, expiration_date, signatures FROM results WHERE scan_id = ? AND available = 1")
-        .bind(id)
-        .fetch_all(&state.db)
-        .await
-    {
+async fn get_results(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
+    let rows = match fetch_scan_results(&state.db, &id, 0).await {
         Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     Json(rows).into_response()
 }
 
-async fn get_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn get_scans(State(state): State<Arc<AppState>>) -> ApiResponse {
     let rows = match fetch_scan_summaries(&state.db).await {
         Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
-        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     Json(rows).into_response()
@@ -266,23 +205,9 @@ async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn get_logs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
-    let rows = match sqlx::query_as::<_, LogRow>(
-        "SELECT id, message, level, created_at FROM scan_logs WHERE scan_id = ? ORDER BY id DESC LIMIT 200"
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response()
-        }
+    let rows = match fetch_scan_logs(&state.db, &id, 0).await {
+        Ok(rows) => rows.into_iter().rev().collect::<Vec<_>>(),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     Json(rows).into_response()
@@ -311,98 +236,68 @@ async fn stream_scan(
         {
             Ok(Some((scan_id, status, total, processed, found))) => {
                 yield Ok::<Event, Infallible>(
-                    Event::default()
-                        .id(format_scan_event_id(log_cursor, result_cursor))
-                        .event("status")
-                        .data(json!({
+                    sse_event(
+                        "status",
+                        format_scan_event_id(log_cursor, result_cursor),
+                        json!({
                             "id": scan_id,
                             "status": status,
                             "total": total,
                             "processed": processed,
                             "found": found,
-                        }).to_string())
+                        }),
+                    )
                 );
             }
             Ok(None) => {
                 yield Ok::<Event, Infallible>(
-                    Event::default()
-                        .event("deleted")
-                        .data(json!({ "id": id }).to_string())
+                    sse_event_without_id("deleted", json!({ "id": id }))
                 );
                 return;
             }
             Err(err) => {
                 yield Ok::<Event, Infallible>(
-                    Event::default()
-                        .event("error")
-                        .data(json!({ "error": err.to_string() }).to_string())
+                    sse_event_without_id("error", json!({ "error": err.to_string() }))
                 );
                 return;
             }
         }
 
-        match sqlx::query_as::<_, LogRow>(
-            "SELECT id, message, level, created_at
-             FROM scan_logs
-             WHERE scan_id = ? AND id > ?
-             ORDER BY id ASC
-             LIMIT 200"
-        )
-        .bind(&id)
-        .bind(log_cursor)
-        .fetch_all(&db)
-        .await
-        {
+        match fetch_scan_logs(&db, &id, log_cursor).await {
             Ok(rows) => {
                 for log in rows {
                     log_cursor = log.id.max(log_cursor);
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("log")
-                            .data(serde_json::to_string(&log).unwrap_or_else(|_| "{}".to_string()))
+                        sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
                     );
                 }
             }
             Err(err) => {
                 yield Ok::<Event, Infallible>(
-                    Event::default()
-                        .event("error")
-                        .data(json!({ "error": err.to_string() }).to_string())
+                    sse_event_without_id("error", json!({ "error": err.to_string() }))
                 );
                 return;
             }
         }
 
-        match sqlx::query_as::<_, ResultRow>(
-            "SELECT rowid as event_id, domain, available, expiration_date, signatures
-             FROM results
-             WHERE scan_id = ? AND available = 1 AND rowid > ?
-             ORDER BY rowid ASC"
-        )
-        .bind(&id)
-        .bind(result_cursor)
-        .fetch_all(&db)
-        .await
-        {
+        match fetch_scan_results(&db, &id, result_cursor).await {
             Ok(rows) => {
                 for batch in rows.chunks(100) {
                     if let Some(last) = batch.last() {
                         result_cursor = result_cursor.max(last.event_id);
                     }
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("result_batch")
-                            .data(serde_json::to_string(batch).unwrap_or_else(|_| "[]".to_string()))
+                        sse_serialized_event(
+                            "result_batch",
+                            format_scan_event_id(log_cursor, result_cursor),
+                            batch,
+                        )
                     );
                 }
             }
             Err(err) => {
                 yield Ok::<Event, Infallible>(
-                    Event::default()
-                        .event("error")
-                        .data(json!({ "error": err.to_string() }).to_string())
+                    sse_event_without_id("error", json!({ "error": err.to_string() }))
                 );
                 return;
             }
@@ -420,19 +315,17 @@ async fn stream_scan(
             match next {
                 Ok(ScanStreamMessage::Status(status)) => {
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("status")
-                            .data(serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string()))
+                        sse_serialized_event(
+                            "status",
+                            format_scan_event_id(log_cursor, result_cursor),
+                            &status,
+                        )
                     );
                 }
                 Ok(ScanStreamMessage::Log(log)) => {
                     log_cursor = log_cursor.max(log.id);
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("log")
-                            .data(serde_json::to_string(&log).unwrap_or_else(|_| "{}".to_string()))
+                        sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
                     );
                 }
                 Ok(ScanStreamMessage::Result(result)) => {
@@ -453,27 +346,30 @@ async fn stream_scan(
                         result_cursor = result_cursor.max(last.event_id);
                     }
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("result_batch")
-                            .data(serde_json::to_string(&batch).unwrap_or_else(|_| "[]".to_string()))
+                        sse_serialized_event(
+                            "result_batch",
+                            format_scan_event_id(log_cursor, result_cursor),
+                            &batch,
+                        )
                     );
                 }
                 Ok(ScanStreamMessage::Deleted(scan_id)) => {
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("deleted")
-                            .data(json!({ "id": scan_id }).to_string())
+                        sse_event(
+                            "deleted",
+                            format_scan_event_id(log_cursor, result_cursor),
+                            json!({ "id": scan_id }),
+                        )
                     );
                     break;
                 }
                 Ok(ScanStreamMessage::Complete(scan_id)) => {
                     yield Ok::<Event, Infallible>(
-                        Event::default()
-                            .id(format_scan_event_id(log_cursor, result_cursor))
-                            .event("complete")
-                            .data(json!({ "id": scan_id }).to_string())
+                        sse_event(
+                            "complete",
+                            format_scan_event_id(log_cursor, result_cursor),
+                            json!({ "id": scan_id }),
+                        )
                     );
                     break;
                 }
@@ -515,6 +411,74 @@ async fn fetch_scan_summaries(db: &sqlx::SqlitePool) -> Result<Vec<ScanSummary>,
     )
     .fetch_all(db)
     .await
+}
+
+async fn fetch_scan_status_row(
+    db: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<Option<(String, String, i64, i64, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+        "SELECT id, status, total, processed, found FROM scans WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+async fn fetch_scan_logs(
+    db: &sqlx::SqlitePool,
+    id: &str,
+    after_id: i64,
+) -> Result<Vec<LogRow>, sqlx::Error> {
+    sqlx::query_as::<_, LogRow>(
+        "SELECT id, message, level, created_at
+         FROM scan_logs
+         WHERE scan_id = ? AND id > ?
+         ORDER BY id ASC
+         LIMIT 200",
+    )
+    .bind(id)
+    .bind(after_id)
+    .fetch_all(db)
+    .await
+}
+
+async fn fetch_scan_results(
+    db: &sqlx::SqlitePool,
+    id: &str,
+    after_event_id: i64,
+) -> Result<Vec<ResultRow>, sqlx::Error> {
+    sqlx::query_as::<_, ResultRow>(
+        "SELECT rowid as event_id, domain, available, expiration_date, signatures
+         FROM results
+         WHERE scan_id = ? AND available = 1 AND rowid > ?
+         ORDER BY rowid ASC",
+    )
+    .bind(id)
+    .bind(after_event_id)
+    .fetch_all(db)
+    .await
+}
+
+fn api_error(status: StatusCode, error: String) -> ApiResponse {
+    (status, Json(ApiError { error })).into_response()
+}
+
+fn sse_event<T: Serialize>(event: &str, id: String, payload: T) -> Event {
+    Event::default()
+        .id(id)
+        .event(event)
+        .data(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()))
+}
+
+fn sse_event_without_id<T: Serialize>(event: &str, payload: T) -> Event {
+    Event::default()
+        .event(event)
+        .data(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()))
+}
+
+fn sse_serialized_event<T: Serialize + ?Sized>(event: &str, id: String, payload: &T) -> Event {
+    sse_event(event, id, payload)
 }
 
 fn format_scans_event_id(version: u64) -> String {
