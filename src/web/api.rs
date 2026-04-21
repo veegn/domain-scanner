@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse,
@@ -15,9 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::publish;
+
 use super::models::{
-    AppState, ReorderRequest, ScanLogEvent as LogRow, ScanResultEvent as ResultRow, ScanStatus,
-    ScanStreamMessage, ScanSummary, StartScanRequest,
+    AppState, PublicPublishedScanSummary, PublishScanRequest, PublishedDomainHit,
+    PublishedScanSummary, ReorderRequest, ScanLogEvent as LogRow, ScanResultEvent as ResultRow,
+    ScanStatus, ScanStreamMessage, ScanSummary, StartScanRequest,
 };
 
 #[derive(Serialize)]
@@ -36,8 +39,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scan/:id/stream", get(stream_scan))
         .route("/api/scan/:id/results", get(get_results))
         .route("/api/scan/:id/logs", get(get_logs))
+        .route("/api/scan/:id/publish", post(publish_scan))
+        .route("/api/published", get(get_published_scans))
+        .route(
+            "/api/published/:id",
+            get(get_published_scan)
+                .put(update_published_scan)
+                .delete(delete_published_scan),
+        )
+        .route("/api/public/published", get(get_public_published_scans))
+        .route("/api/public/search", get(search_public_domains))
         .route("/api/scan/:id/reorder", post(reorder_scan))
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct PublicDomainSearchQuery {
+    q: Option<String>,
+    limit: Option<u32>,
 }
 
 async fn start_scan(
@@ -133,6 +152,116 @@ async fn get_scans(State(state): State<Arc<AppState>>) -> ApiResponse {
     };
 
     Json(rows).into_response()
+}
+
+async fn publish_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<PublishScanRequest>,
+) -> ApiResponse {
+    if let Err(error) = payload.validate() {
+        return api_error(StatusCode::BAD_REQUEST, error);
+    }
+
+    let scan_exists = match fetch_scan_exists(&state.db, &id).await {
+        Ok(exists) => exists,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+
+    if !scan_exists {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    match publish::create_published_scan(&state.db, &id, &payload).await {
+        Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("scan not found") {
+                StatusCode::NOT_FOUND
+            } else if message.contains("publish title cannot be empty") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            api_error(status, message)
+        }
+    }
+}
+
+async fn get_published_scans(State(state): State<Arc<AppState>>) -> ApiResponse {
+    match fetch_published_scan_summaries(&state.db).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn get_published_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match fetch_published_scan_summary_by_id(&state.db, &id).await {
+        Ok(Some(row)) => Json(row).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn delete_published_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match publish::delete_published_scan(&state.db, &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn update_published_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<PublishScanRequest>,
+) -> ApiResponse {
+    if let Err(error) = payload.validate() {
+        return api_error(StatusCode::BAD_REQUEST, error);
+    }
+
+    match publish::update_published_scan(&state.db, &id, &payload).await {
+        Ok(Some(summary)) => Json(summary).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("publish title cannot be empty") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            api_error(status, message)
+        }
+    }
+}
+
+async fn get_public_published_scans(State(state): State<Arc<AppState>>) -> ApiResponse {
+    match fetch_public_published_scan_summaries(&state.db).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn search_public_domains(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PublicDomainSearchQuery>,
+) -> ApiResponse {
+    let needle = query.q.unwrap_or_default().trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Json(Vec::<PublishedDomainHit>::new()).into_response();
+    }
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 1000) as i64;
+    match fetch_public_domain_hits(&state.db, &needle, limit).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -425,6 +554,14 @@ async fn fetch_scan_status_row(
     .await
 }
 
+async fn fetch_scan_exists(db: &sqlx::SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scans WHERE id = ?")
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .map(|count| count > 0)
+}
+
 async fn fetch_scan_logs(
     db: &sqlx::SqlitePool,
     id: &str,
@@ -456,6 +593,83 @@ async fn fetch_scan_results(
     )
     .bind(id)
     .bind(after_event_id)
+    .fetch_all(db)
+    .await
+}
+
+async fn fetch_published_scan_summaries(
+    db: &sqlx::SqlitePool,
+) -> Result<Vec<PublishedScanSummary>, sqlx::Error> {
+    sqlx::query_as::<_, PublishedScanSummary>(
+        "SELECT id, scan_id, slug, title, description, status, result_count, published_at, updated_at
+         FROM published_scans
+         ORDER BY published_at DESC, updated_at DESC",
+    )
+    .fetch_all(db)
+    .await
+}
+
+async fn fetch_published_scan_summary_by_id(
+    db: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<Option<PublishedScanSummary>, sqlx::Error> {
+    sqlx::query_as::<_, PublishedScanSummary>(
+        "SELECT id, scan_id, slug, title, description, status, result_count, published_at, updated_at
+         FROM published_scans
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+async fn fetch_public_published_scan_summaries(
+    db: &sqlx::SqlitePool,
+) -> Result<Vec<PublicPublishedScanSummary>, sqlx::Error> {
+    sqlx::query_as::<_, PublicPublishedScanSummary>(
+        "SELECT ps.slug,
+                ps.title,
+                ps.description,
+                s.suffix,
+                s.pattern,
+                s.length,
+                ps.result_count,
+                ps.published_at,
+                s.finished_at as scan_finished_at
+         FROM published_scans ps
+         JOIN scans s ON s.id = ps.scan_id
+         WHERE ps.status = 'active'
+         ORDER BY ps.published_at DESC, ps.updated_at DESC",
+    )
+    .fetch_all(db)
+    .await
+}
+
+async fn fetch_public_domain_hits(
+    db: &sqlx::SqlitePool,
+    needle: &str,
+    limit: i64,
+) -> Result<Vec<PublishedDomainHit>, sqlx::Error> {
+    let pattern = format!("%{needle}%");
+    sqlx::query_as::<_, PublishedDomainHit>(
+        "SELECT pd.domain,
+                pd.available,
+                pd.expiration_date,
+                pd.signatures,
+                pd.published_at,
+                s.finished_at as scan_finished_at,
+                ps.slug,
+                ps.title
+         FROM published_domains pd
+         JOIN published_scans ps ON ps.id = pd.published_scan_id
+         JOIN scans s ON s.id = ps.scan_id
+         WHERE ps.status = 'active'
+           AND LOWER(pd.domain) LIKE ?
+         ORDER BY ps.published_at DESC, pd.domain ASC
+         LIMIT ?",
+    )
+    .bind(pattern)
+    .bind(limit)
     .fetch_all(db)
     .await
 }

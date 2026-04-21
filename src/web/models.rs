@@ -32,6 +32,61 @@ pub struct StartScanRequest {
     pub domains: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PublishScanRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl PublishScanRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() {
+            return Err("publish title cannot be empty".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PublishedScanSummary {
+    pub id: String,
+    pub scan_id: String,
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub result_count: i64,
+    pub published_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PublicPublishedScanSummary {
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub suffix: String,
+    pub pattern: String,
+    pub length: i64,
+    pub result_count: i64,
+    pub published_at: String,
+    pub scan_finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PublishedDomainHit {
+    pub domain: String,
+    pub available: bool,
+    pub expiration_date: Option<String>,
+    pub signatures: String,
+    pub published_at: String,
+    pub scan_finished_at: Option<String>,
+    pub slug: String,
+    pub title: String,
+}
+
 #[derive(Clone, Default)]
 pub struct TaskControl {
     flags: Arc<Mutex<HashMap<String, Arc<AtomicU8>>>>,

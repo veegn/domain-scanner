@@ -5,7 +5,8 @@ use tracing::{info, warn};
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 
 pub async fn init_db() -> SqlitePool {
-    let pool = SqlitePool::connect("sqlite:scans.db?mode=rwc")
+    let _ = std::fs::create_dir_all("data");
+    let pool = SqlitePool::connect("sqlite:data/scans.db?mode=rwc")
         .await
         .unwrap();
 
@@ -100,6 +101,41 @@ pub async fn init_db() -> SqlitePool {
     .await
     .unwrap();
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS published_scans (
+            id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            static_dir TEXT NOT NULL,
+            result_count INTEGER NOT NULL DEFAULT 0,
+            published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS published_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            published_scan_id TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            available BOOLEAN NOT NULL,
+            expiration_date TEXT,
+            signatures TEXT NOT NULL DEFAULT '',
+            published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(published_scan_id) REFERENCES published_scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_results_scan_id ON results(scan_id)")
         .execute(&pool)
         .await;
@@ -113,6 +149,25 @@ pub async fn init_db() -> SqlitePool {
     .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_scans_retry_not_before ON scans(status, retry_not_before)",
+    )
+    .execute(&pool)
+    .await;
+    let _ =
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_published_scans_published_at ON published_scans(published_at DESC)")
+            .execute(&pool)
+            .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_published_domains_domain ON published_domains(domain)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_published_domains_scan_domain ON published_domains(published_scan_id, domain)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_published_domains_published_at ON published_domains(published_at DESC)",
     )
     .execute(&pool)
     .await;

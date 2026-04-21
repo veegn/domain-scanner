@@ -73,6 +73,9 @@
                 <span>API Status:</span>
                 <span class="text-green-600 font-bold">STABLE</span>
             </div>
+            <a href="/published.html" class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
+                Public Releases
+            </a>
         </header>
 
         <main class="grid grid-cols-1 lg:grid-cols-12 gap-8">
@@ -128,6 +131,16 @@
                         <div class="py-12 text-center text-gray-300 italic text-xs">Loading operations...</div>
                     </div>
                 </section>
+
+                <section class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Published Releases</h2>
+                        <a href="/published.html" class="text-[10px] font-black text-emerald-600 hover:text-emerald-700 uppercase tracking-widest">Open Public</a>
+                    </div>
+                    <div id="publishedList" class="space-y-3 max-h-[320px] overflow-y-auto pr-2 custom-scrollbar">
+                        <div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No published releases</div>
+                    </div>
+                </section>
             </aside>
 
             <!-- Main Panel: Status & Table -->
@@ -140,7 +153,7 @@
                             <p class="text-[10px] font-mono text-gray-300 mt-1" id="currentId">REF-0000-0000</p>
                         </div>
                         <div class="flex items-center gap-3">
-                            <button onclick="Handlers.rescanTask()" id="btnRescan" class="hidden h-8 text-[10px] bg-orange-500 text-white hover:bg-orange-600 px-4 rounded-full font-black uppercase tracking-widest transition-all shadow-md shadow-orange-100">Rescan Available</button>
+                            <a id="btnOpenPublished" href="#" target="_blank" rel="noopener noreferrer" class="hidden h-8 items-center bg-emerald-50 border border-emerald-100 px-4 rounded-full text-[10px] font-black tracking-widest text-emerald-700 hover:bg-emerald-100 transition-colors">OPEN PUBLISHED</a>
                             <div class="h-8 flex items-center bg-gray-50 border border-gray-100 px-4 rounded-full">
                                 <span id="statusText" class="text-[10px] font-black tracking-widest">STANDBY</span>
                             </div>
@@ -194,29 +207,28 @@
                 <!-- Results Table -->
                 <section class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <!-- Filters & Search -->
-                    <div class="p-6 border-b border-gray-50 bg-white">
-                        <div class="flex flex-col xl:flex-row justify-between xl:items-end gap-6">
-                            <div class="flex-grow space-y-3">
-                                <h2 class="text-xl font-black text-gray-900">Available Domains</h2>
-                                <div class="flex flex-wrap gap-2">
-                                    <span class="text-[9px] font-black text-gray-300 uppercase self-center pt-0.5 mr-1">Quick Select:</span>
-                                    <button onclick="UI.applySearch('^1')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">STARTS WITH 1</button>
-                                    <button onclick="UI.applySearch('88\\.')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">ENDS WITH 88</button>
-                                    <button onclick="UI.applySearch('(\\d)\\1(\\d)\\2')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">AABB PATTERN</button>
-                                    <button onclick="UI.applySearch('(\\d)\\1{2}')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">TRIPLE AAA</button>
-                                </div>
+                    <div class="p-6 border-b border-gray-50 bg-white space-y-4">
+                        <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
+                            <h2 class="text-xl font-black text-gray-900">Available Domains</h2>
+                            <div class="flex flex-wrap gap-2">
+                                <button onclick="Handlers.rescanTask()" id="btnRescan" class="hidden text-[10px] bg-orange-500 hover:bg-orange-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-orange-100">Rescan Available</button>
+                                <button onclick="Handlers.exportResults()" class="text-[10px] bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-100">Export All</button>
                             </div>
-                            <div class="flex flex-col sm:flex-row gap-2">
-                                <div class="relative group">
-                                    <input type="text" id="domainSearch" placeholder="Filter with Regex..." class="w-full sm:w-56 border border-gray-200 p-2.5 pl-4 pr-10 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold placeholder:font-normal placeholder:text-gray-400" onkeyup="UI.debouncedRender()">
-                                    <button onclick="UI.applySearch('')" class="absolute right-3 top-2.5 text-gray-300 hover:text-red-500 transition-colors" title="Clear Filter">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" /></svg>
-                                    </button>
-                                </div>
-                                <div class="flex gap-2">
-                                    <button onclick="Handlers.bulkRegister()" id="btnBulkRegister" class="hidden text-[10px] bg-green-500 hover:bg-green-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-lg shadow-green-100">Bulk Register</button>
-                                    <button onclick="Handlers.exportResults()" class="text-[10px] bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-lg shadow-indigo-100">Export All</button>
-                                </div>
+                        </div>
+                        
+                        <div class="flex flex-col xl:flex-row justify-between xl:items-center gap-4">
+                            <div class="flex flex-wrap gap-2 items-center">
+                                <span class="text-[9px] font-black text-gray-300 uppercase mr-1">Quick Select:</span>
+                                <button onclick="UI.applySearch('^1')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">STARTS WITH 1</button>
+                                <button onclick="UI.applySearch('88\\.')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">ENDS WITH 88</button>
+                                <button onclick="UI.applySearch('(\\d)\\1(\\d)\\2')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">AABB PATTERN</button>
+                                <button onclick="UI.applySearch('(\\d)\\1{2}')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">TRIPLE AAA</button>
+                            </div>
+                            <div class="relative group w-full xl:w-64 shrink-0">
+                                <input type="text" id="domainSearch" placeholder="Filter with Regex..." class="w-full border border-gray-200 p-2.5 pl-4 pr-10 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold placeholder:font-normal placeholder:text-gray-400" onkeyup="UI.debouncedRender()">
+                                <button onclick="UI.applySearch('')" class="absolute right-3 top-2.5 text-gray-300 hover:text-red-500 transition-colors" title="Clear Filter">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -278,6 +290,9 @@
          */
         const State = {
             currentId: null,
+            scans: [],
+            publishedList: [],
+            publishedByScanId: {},
             pollInterval: null,
             listPollInterval: null,
             scanStream: null,
@@ -318,8 +333,16 @@
 
             async loadRecentScans() {
                 try {
-                    const scans = await this.fetchJson('api/scans');
+                    const [scans, published] = await Promise.all([
+                        this.fetchJson('api/scans'),
+                        this.fetchJson('api/published').catch(() => [])
+                    ]);
+                    State.scans = scans;
+                    State.publishedList = published || [];
+                    State.publishedByScanId = Object.fromEntries((published || []).map(item => [item.scan_id, item]));
                     UI.renderScanList(scans);
+                    UI.renderPublishedList();
+                    UI.syncPublishActions();
                     if (!State.currentId && scans.length > 0) {
                         Handlers.selectScan(scans[0].id);
                     }
@@ -334,7 +357,9 @@
 
                 stream.addEventListener('scans', (event) => {
                     const scans = JSON.parse(event.data);
+                    State.scans = scans;
                     UI.renderScanList(scans);
+                    UI.syncPublishActions();
                     if (!State.currentId && scans.length > 0) {
                         Handlers.selectScan(scans[0].id);
                     }
@@ -367,6 +392,7 @@
                             State.currentId = null;
                             document.getElementById('statusArea').classList.add('hidden');
                             State.currentResults = [];
+                            UI.syncPublishActions();
                             UI.renderResults();
                         }
                     }
@@ -440,6 +466,7 @@
                         State.currentId = null;
                         document.getElementById('statusArea').classList.add('hidden');
                         State.currentResults = [];
+                        UI.syncPublishActions();
                         UI.renderResults();
                     }
                 });
@@ -480,9 +507,11 @@
                 listEl.innerHTML = scans.map(s => {
                     const isRunning = s.status === 'running';
                     const isPending = s.status === 'pending';
+                    const isFinished = s.status === 'finished';
                     const label = isRunning ? 'RUN' : (isPending ? 'WAIT' : (s.status === 'failed' ? 'FAIL' : 'DONE'));
                     const statusColor = isRunning ? 'text-blue-500' : (isPending ? 'text-orange-500' : (s.status === 'failed' ? 'text-red-500' : 'text-green-500'));
                     const activeStyle = State.currentId === s.id ? 'active' : '';
+                    const published = State.publishedByScanId[s.id];
                     
                     const timeStr = s.finished_at ? s.finished_at.split('.')[0].replace('T', ' ') : 'ACTIVE...';
                     
@@ -496,6 +525,7 @@
                             <div class="text-right">
                                 <span class="${statusColor} text-[9px] font-black uppercase tracking-widest">${label} ${s.status}</span>
                                 <p class="text-[8px] font-black text-gray-300 mt-1 uppercase">${timeStr}</p>
+                                ${published ? `<a href="/published/${encodeURIComponent(published.slug)}/" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
                                 <div class="flex space-x-2 mt-2 justify-end">
                                     ${isPending ? `
                                         <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'up')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7"/></svg></button>
@@ -507,6 +537,48 @@
                         </div>
                     `;
                 }).join('');
+            },
+
+            renderPublishedList() {
+                const listEl = document.getElementById('publishedList');
+                if (!State.publishedList.length) {
+                    listEl.innerHTML = '<div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No published releases</div>';
+                    return;
+                }
+
+                listEl.innerHTML = State.publishedList.map(item => `
+                    <div class="bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-start gap-3">
+                        <div class="min-w-0">
+                            <a href="/published/${encodeURIComponent(item.slug)}/" target="_blank" rel="noopener noreferrer" class="text-[9px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">${Utils.escapeHtml(item.slug)}</a>
+                            <p class="text-[10px] font-black text-gray-700 truncate mt-1">${Utils.escapeHtml(item.title)}</p>
+                            <p class="text-[9px] text-gray-400 uppercase mt-1">Hits: <span class="font-black text-gray-500">${item.result_count}</span></p>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                            <a href="/published/${encodeURIComponent(item.slug)}/" target="_blank" rel="noopener noreferrer" class="p-1 hover:bg-emerald-50 text-gray-300 hover:text-emerald-600 rounded" title="Open published page"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 17L17 7M17 7H9m8 0v8"/></svg></a>
+                            <button onclick="Handlers.deletePublished('${item.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded" title="Delete published release"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
+                        </div>
+                    </div>
+                `).join('');
+            },
+
+            syncPublishActions() {
+                const openBtn = document.getElementById('btnOpenPublished');
+                const currentScan = State.scans.find(scan => scan.id === State.currentId);
+                const published = currentScan ? State.publishedByScanId[currentScan.id] : null;
+
+                openBtn.classList.add('hidden');
+                openBtn.classList.remove('inline-flex');
+
+                if (!currentScan) {
+                    openBtn.href = '#';
+                    return;
+                }
+
+                if (published) {
+                    openBtn.href = `/published/${encodeURIComponent(published.slug)}/`;
+                    openBtn.classList.remove('hidden');
+                    openBtn.classList.add('inline-flex');
+                }
             },
 
             syncStatusPanel(data) {
@@ -545,6 +617,8 @@
                     document.getElementById('btnRescan').classList.add('hidden');
                     if (data.status === 'running' && State.isConsoleCollapsed) this.setConsoleState(false);
                 }
+
+                this.syncPublishActions();
             },
 
             renderResults() {
@@ -563,7 +637,10 @@
                     return;
                 }
 
-                tableBody.innerHTML = filtered.map(r => `
+                const limit = Math.min(filtered.length, 500);
+                const display = filtered.slice(0, limit);
+
+                let html = display.map(r => `
                     <tr class="group hover:bg-gray-50 transition-colors ${State.selectedDomains.has(r.domain) ? 'bg-blue-50/50' : ''}">
                         <td class="p-4 text-center">
                             <input type="checkbox" onchange="Handlers.toggleDomain('${r.domain}')" 
@@ -579,7 +656,12 @@
                         </td>
                     </tr>
                 `).join('');
-                this.updateBulkButton();
+
+                if (filtered.length > 500) {
+                    html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Viewing limited to 500 entries (Total Available: ${filtered.length})</td></tr>`;
+                }
+
+                tableBody.innerHTML = html;
             },
 
             renderLogStream(logs) {
@@ -642,14 +724,6 @@
                 this.renderResults();
             },
 
-            updateBulkButton() {
-                const btn = document.getElementById('btnBulkRegister');
-                if (State.selectedDomains.size > 0) {
-                    btn.classList.remove('hidden');
-                    btn.innerText = `Bulk Action (${State.selectedDomains.size})`;
-                } else btn.classList.add('hidden');
-            },
-
             toggleSort() {
                 State.sortDirection = State.sortDirection === 'asc' ? 'desc' : 'asc';
                 document.getElementById('sortIcon').style.transform = State.sortDirection === 'asc' ? 'rotate(0deg)' : 'rotate(180deg)';
@@ -680,6 +754,7 @@
                 document.getElementById('currentId').innerText = id;
                 document.getElementById('statusArea').classList.remove('hidden');
                 document.getElementById('logConsole').innerHTML = '<div class="text-gray-600 italic">Streaming data interface...</div>';
+                UI.syncPublishActions();
                 API.openScanStream(id);
                 API.loadRecentScans();
             },
@@ -731,16 +806,30 @@
                 } catch (e) { console.error(e); }
             },
 
+            async deletePublished(id) {
+                const published = State.publishedList.find(item => item.id === id);
+                if (!published) return;
+                if (!confirm(`Delete published release "${published.title}"?`)) return;
+
+                try {
+                    const resp = await fetch(`${API.base}api/published/${id}`, { method: 'DELETE' });
+                    if (!resp.ok && resp.status !== 204) {
+                        const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+                        throw new Error(payload.error || 'Delete failed');
+                    }
+
+                    State.publishedList = State.publishedList.filter(item => item.id !== id);
+                    delete State.publishedByScanId[published.scan_id];
+                    UI.renderPublishedList();
+                    UI.renderScanList(State.scans);
+                    UI.syncPublishActions();
+                } catch (e) { alert(e.message); }
+            },
+
             toggleDomain(domain) {
                 if (State.selectedDomains.has(domain)) State.selectedDomains.delete(domain);
                 else State.selectedDomains.add(domain);
-                UI.updateBulkButton();
                 UI.renderResults();
-            },
-
-            bulkRegister() {
-                if (State.selectedDomains.size === 0) return;
-                window.open(`https://porkbun.com/checkout/search?q=${Array.from(State.selectedDomains).join(',')}`, '_blank');
             },
 
             exportResults() {
@@ -768,6 +857,14 @@
                 const parts = [`${s.length}${s.suffix || ''} (${label})`];
                 if (s.regex) parts.push(`RX: ${s.regex}`);
                 return parts.join(' | ');
+            },
+
+            buildPublishTitle(scan) {
+                return `Available domains for ${this.formatScanSummary(scan)}`;
+            },
+
+            buildPublishDescription(scan) {
+                return `Published results generated from scan ${scan.id.split('-')[0]} with ${scan.found} available domains.`;
             },
 
             compileSearchRegex(q) {

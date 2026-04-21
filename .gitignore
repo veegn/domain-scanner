@@ -48,3 +48,6 @@ target/
 data/cache/
 .playwright-cli/
 logs/
+web/published/
+.agents/
+*.db

@@ -2,6 +2,7 @@ pub mod checker;
 pub mod config;
 pub mod generator;
 pub mod logging;
+pub mod publish;
 
 pub mod web;
 pub mod worker;

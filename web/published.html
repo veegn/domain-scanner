@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Published Domain Scans</title>
+    <meta name="description" content="Browse published domain scans and search domains across released results.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .glass {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+        }
+
+        .page-bg {
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28rem),
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.12), transparent 24rem),
+                linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
+        }
+    </style>
+</head>
+<body class="page-bg min-h-screen text-gray-900">
+    <div class="max-w-7xl mx-auto px-4 py-8 md:px-8 md:py-10">
+        <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between mb-8">
+            <div>
+                <p class="text-[11px] font-black uppercase tracking-[0.35em] text-blue-500">Public Release</p>
+                <h1 class="text-4xl md:text-5xl font-black tracking-tight mt-2">Published Domain Scans</h1>
+                <p class="text-sm md:text-base text-gray-500 mt-3 max-w-2xl">
+                    Browse released scan snapshots and search published available domains across all public datasets.
+                </p>
+            </div>
+            <div class="flex gap-3">
+                <a href="/index.html" class="px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Dashboard</a>
+                <button id="refreshBtn" class="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-black tracking-wide hover:bg-blue-700 transition-colors">Refresh</button>
+            </div>
+        </header>
+
+        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 p-6 md:p-7 mb-8">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                    <h2 class="text-xl font-black">Global Domain Search</h2>
+                    <p class="text-sm text-gray-500 mt-1">Search all published domain hits. Results link back to each static release page.</p>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-3 w-full lg:w-auto relative">
+                    <div class="relative w-full lg:w-80 group">
+                        <input id="searchInput" type="search" placeholder="Search domains like 88, ai, 123..." class="w-full px-4 py-3 rounded-2xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300 transition-all pr-10">
+                        <button onclick="document.getElementById('searchInput').value=''; runSearch();" class="absolute right-3 top-3.5 text-gray-300 hover:text-red-500 transition-colors" title="Clear Search">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                    </div>
+                    <button id="searchBtn" class="px-5 py-3 rounded-2xl bg-emerald-500 text-white text-sm font-black uppercase tracking-wider hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2 min-w-[100px]">
+                        <span id="searchBtnText">Search</span>
+                        <div id="searchSpinner" class="hidden w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                    </button>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 mt-4">
+                <label class="text-xs font-black uppercase tracking-[0.22em] text-gray-400">Results</label>
+                <select id="searchLimit" class="px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select>
+                <button id="searchMoreBtn" class="hidden px-4 py-2 rounded-xl border border-gray-200 bg-white text-xs font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Load More</button>
+            </div>
+            <div id="searchSummary" class="text-sm text-gray-400 mt-4">Enter a query to search published domains.</div>
+            <div id="searchResults" class="mt-5 space-y-3"></div>
+        </section>
+
+        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 overflow-hidden">
+            <div class="p-6 md:p-7 border-b border-gray-100 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h2 class="text-xl font-black">Published Scans</h2>
+                    <p class="text-sm text-gray-500 mt-1">Static releases generated from completed scans.</p>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+                    <input id="listFilter" type="search" placeholder="Filter by title, slug, suffix..." class="w-full md:w-72 px-4 py-3 rounded-2xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300">
+                    <select id="sortOrder" class="px-4 py-3 rounded-2xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300">
+                        <option value="newest">Newest</option>
+                        <option value="oldest">Oldest</option>
+                        <option value="hits">Most Hits</option>
+                        <option value="title">Title</option>
+                    </select>
+                </div>
+            </div>
+            <div class="px-6 md:px-7 pt-5 pb-5 flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between border-b border-gray-100">
+                <div id="suffixFilters" class="flex flex-wrap gap-2"></div>
+                <div id="scanSummary" class="text-sm text-gray-400">Loading published scans...</div>
+            </div>
+            <div id="scanList" class="grid gap-4 p-6 md:p-7 md:grid-cols-2 xl:grid-cols-3">
+                <div class="rounded-2xl border border-dashed border-gray-200 bg-white/80 p-6 text-sm text-gray-400">Loading published scans...</div>
+            </div>
+            <div class="px-6 md:px-7 pb-6 md:pb-7">
+                <button id="scanMoreBtn" class="hidden w-full md:w-auto px-5 py-3 rounded-2xl border border-gray-200 bg-white text-sm font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Show More</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const state = {
+            scans: [],
+            selectedSuffix: 'all',
+            scanPageSize: 9,
+            searchLimit: 50,
+            currentSearchQuery: '',
+            currentSearchResults: [],
+            searchTimeout: null
+        };
+
+        const els = {
+            refreshBtn: document.getElementById('refreshBtn'),
+            searchBtn: document.getElementById('searchBtn'),
+            searchMoreBtn: document.getElementById('searchMoreBtn'),
+            searchLimit: document.getElementById('searchLimit'),
+            searchInput: document.getElementById('searchInput'),
+            searchResults: document.getElementById('searchResults'),
+            searchSummary: document.getElementById('searchSummary'),
+            listFilter: document.getElementById('listFilter'),
+            sortOrder: document.getElementById('sortOrder'),
+            suffixFilters: document.getElementById('suffixFilters'),
+            scanSummary: document.getElementById('scanSummary'),
+            scanList: document.getElementById('scanList'),
+            scanMoreBtn: document.getElementById('scanMoreBtn'),
+            searchBtnText: document.getElementById('searchBtnText'),
+            searchSpinner: document.getElementById('searchSpinner')
+        };
+
+        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        })[char]);
+
+        async function fetchJson(url) {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`);
+            }
+            return response.json();
+        }
+
+        function formatPattern(pattern) {
+            return { d: '0-9', D: 'a-z', a: 'a-z0-9' }[pattern] || pattern;
+        }
+
+        function formatDate(value) {
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+        }
+
+        function getFilteredScans() {
+            const query = els.listFilter.value.trim().toLowerCase();
+            const sort = els.sortOrder.value;
+            let rows = query
+                ? state.scans.filter((scan) => [scan.title, scan.slug, scan.description || '', scan.suffix].join(' ').toLowerCase().includes(query))
+                : [...state.scans];
+
+            if (state.selectedSuffix !== 'all') {
+                rows = rows.filter((scan) => scan.suffix === state.selectedSuffix);
+            }
+
+            rows.sort((a, b) => {
+                if (sort === 'oldest') return new Date(a.published_at) - new Date(b.published_at);
+                if (sort === 'hits') return b.result_count - a.result_count || new Date(b.published_at) - new Date(a.published_at);
+                if (sort === 'title') return a.title.localeCompare(b.title);
+                return new Date(b.published_at) - new Date(a.published_at);
+            });
+
+            return rows;
+        }
+
+        function renderSuffixFilters() {
+            const suffixes = Array.from(new Set(state.scans.map((scan) => scan.suffix))).sort();
+            const filters = [{ label: 'All', value: 'all' }, ...suffixes.map((suffix) => ({ label: suffix, value: suffix }))];
+
+            els.suffixFilters.innerHTML = filters.map((filter) => `
+                <button
+                    type="button"
+                    onclick="setSuffixFilter('${escapeHtml(filter.value)}')"
+                    class="px-3 py-1.5 rounded-full border text-[11px] font-black uppercase tracking-[0.18em] transition-colors ${state.selectedSuffix === filter.value ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-gray-200 text-gray-500 hover:text-blue-600 hover:border-blue-200'}"
+                >${escapeHtml(filter.label)}</button>
+            `).join('');
+        }
+
+        function renderScanList() {
+            const rows = getFilteredScans();
+            const visible = rows.slice(0, state.scanPageSize);
+            els.scanSummary.textContent = `${visible.length} of ${rows.length} scans shown`;
+
+            if (rows.length === 0) {
+                els.scanList.innerHTML = '<div class="rounded-2xl border border-dashed border-gray-200 bg-white/80 p-6 text-sm text-gray-400 md:col-span-2 xl:col-span-3">No published scans matched the current filter.</div>';
+                els.scanMoreBtn.classList.add('hidden');
+                return;
+            }
+
+            els.scanList.innerHTML = visible.map((scan) => `
+                <article class="rounded-3xl bg-white border border-gray-100 p-5 shadow-sm shadow-slate-100">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <div class="text-[11px] font-black uppercase tracking-[0.28em] text-blue-500">${escapeHtml(scan.slug)}</div>
+                            <h3 class="text-xl font-black tracking-tight mt-2">${escapeHtml(scan.title)}</h3>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-2xl font-black text-emerald-600">${scan.result_count}</div>
+                            <div class="text-[10px] font-black uppercase tracking-[0.22em] text-gray-400">Hits</div>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-500 mt-3 min-h-[42px]">${escapeHtml(scan.description || 'Published scan snapshot')}</p>
+                    <div class="mt-4 flex flex-wrap gap-2 text-[11px] font-black uppercase tracking-[0.16em] text-gray-400">
+                        <span class="px-3 py-1 rounded-full bg-gray-50 border border-gray-100">${scan.length}${escapeHtml(scan.suffix)}</span>
+                        <span class="px-3 py-1 rounded-full bg-gray-50 border border-gray-100">${escapeHtml(formatPattern(scan.pattern))}</span>
+                    </div>
+                    <div class="mt-5 flex items-center justify-between gap-3">
+                        <div class="text-xs text-gray-400">Scan: ${escapeHtml(formatDate(scan.scan_finished_at || scan.published_at))}</div>
+                        <a href="/published/${encodeURIComponent(scan.slug)}/" class="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-black uppercase tracking-[0.22em] hover:bg-blue-700 transition-colors">Open</a>
+                    </div>
+                </article>
+            `).join('');
+
+            els.scanMoreBtn.classList.toggle('hidden', visible.length >= rows.length);
+        }
+
+        async function loadScans() {
+            state.scans = await fetchJson('/api/public/published');
+            state.scanPageSize = 9;
+            renderSuffixFilters();
+            renderScanList();
+        }
+
+        async function runSearch() {
+            const q = els.searchInput.value.trim();
+            if (!q) {
+                state.currentSearchQuery = '';
+                state.currentSearchResults = [];
+                els.searchSummary.textContent = 'Enter a query to search published domains.';
+                els.searchResults.innerHTML = '';
+                els.searchMoreBtn.classList.add('hidden');
+                return;
+            }
+
+            state.currentSearchQuery = q;
+            els.searchSummary.textContent = 'Searching...';
+            els.searchSpinner.classList.remove('hidden');
+            els.searchBtnText.classList.add('hidden');
+
+            try {
+                const rows = await fetchJson(`/api/public/search?q=${encodeURIComponent(q)}&limit=${state.searchLimit}`);
+                state.currentSearchResults = rows;
+
+                if (rows.length === 0) {
+                    els.searchSummary.textContent = `No published domains matched "${q}".`;
+                    els.searchResults.innerHTML = '';
+                    els.searchMoreBtn.classList.add('hidden');
+                    return;
+                }
+
+                els.searchSummary.textContent = `${rows.length} published domains matched "${q}".`;
+                
+                // PERFORMANCE: Virtual DOM Slice - only render first 500 nodes
+                const limit = Math.min(rows.length, 500);
+                const display = rows.slice(0, limit);
+                
+                let html = display.map((row) => `
+                    <a href="/published/${encodeURIComponent(row.slug)}/" class="block rounded-2xl border border-gray-100 bg-white px-4 py-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors">
+                        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <div class="text-lg font-black font-mono text-gray-900">${escapeHtml(row.domain)}</div>
+                                <div class="text-xs text-gray-500 mt-1">${escapeHtml(row.title)} · ${escapeHtml(row.slug)}</div>
+                            </div>
+                            <div class="text-left md:text-right">
+                                <div class="text-xs font-bold text-gray-500">${escapeHtml(row.signatures || 'no-signature')}</div>
+                                <div class="text-xs text-gray-400 mt-1">Scanned: ${escapeHtml(formatDate(row.expiration_date || row.scan_finished_at || row.published_at))}</div>
+                            </div>
+                        </div>
+                    </a>
+                `).join('');
+
+                if (rows.length > 500) {
+                    html += `<div class="p-6 text-center text-gray-400 text-xs font-bold uppercase tracking-[0.2em]">Viewing limited to 500 results for performance. Load more to expand datasets.</div>`;
+                }
+                
+                els.searchResults.innerHTML = html;
+                els.searchMoreBtn.classList.toggle('hidden', rows.length < state.searchLimit || state.searchLimit >= 1000);
+            } finally {
+                els.searchSpinner.classList.add('hidden');
+                els.searchBtnText.classList.remove('hidden');
+            }
+        }
+
+        function debouncedSearch() {
+            if (state.searchTimeout) clearTimeout(state.searchTimeout);
+            state.searchTimeout = setTimeout(() => runSearch(), 400);
+        }
+
+        function setSuffixFilter(value) {
+            state.selectedSuffix = value;
+            state.scanPageSize = 9;
+            renderSuffixFilters();
+            renderScanList();
+        }
+
+        window.setSuffixFilter = setSuffixFilter;
+
+        els.refreshBtn.addEventListener('click', loadScans);
+        els.searchBtn.addEventListener('click', async () => {
+            state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
+            await runSearch();
+        });
+        els.searchMoreBtn.addEventListener('click', async () => {
+            const step = parseInt(els.searchLimit.value, 10) || 50;
+            const nextLimit = Math.min(1000, state.searchLimit + step);
+            if (!state.currentSearchQuery || nextLimit === state.searchLimit) return;
+            state.searchLimit = nextLimit;
+            await runSearch();
+        });
+        els.searchInput.addEventListener('input', () => {
+            if (els.searchInput.value.trim().length > 1) debouncedSearch();
+        });
+        els.searchInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                if (state.searchTimeout) clearTimeout(state.searchTimeout);
+                state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
+                runSearch();
+            }
+        });
+        els.searchLimit.addEventListener('change', () => {
+            if (state.currentSearchQuery) {
+                state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
+                runSearch();
+            }
+        });
+        els.listFilter.addEventListener('input', () => {
+            state.scanPageSize = 9;
+            renderScanList();
+        });
+        els.sortOrder.addEventListener('change', () => {
+            state.scanPageSize = 9;
+            renderScanList();
+        });
+        els.scanMoreBtn.addEventListener('click', () => {
+            state.scanPageSize += 9;
+            renderScanList();
+        });
+
+        loadScans().catch((error) => {
+            els.scanList.innerHTML = `<div class="rounded-2xl border border-red-100 bg-red-50 p-6 text-sm text-red-500 md:col-span-2 xl:col-span-3">${escapeHtml(error.message)}</div>`;
+            els.scanSummary.textContent = 'Failed to load published scans';
+        });
+    </script>
+</body>
+</html>
