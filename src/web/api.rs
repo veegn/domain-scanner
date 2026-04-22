@@ -36,6 +36,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scans/stream", get(stream_scans))
         .route("/api/scan", post(start_scan))
         .route("/api/scan/:id", get(get_scan_status).delete(delete_scan))
+        .route("/api/scan/:id/pause", post(pause_scan))
+        .route("/api/scan/:id/resume", post(resume_scan))
         .route("/api/scan/:id/stream", get(stream_scan))
         .route("/api/scan/:id/results", get(get_results))
         .route("/api/scan/:id/logs", get(get_logs))
@@ -842,5 +844,139 @@ async fn delete_scan(
             )
                 .into_response(),
         }
+    }
+}
+
+async fn pause_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = match fetch_scan_status_row(&state.db, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let (_, status, total, processed, found) = row;
+
+    if status == "paused" {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    if status != "running" {
+        return api_error(
+            StatusCode::CONFLICT,
+            format!("scan cannot be paused from status '{status}'"),
+        );
+    }
+
+    if !state.task_control.pause(&id) {
+        return api_error(
+            StatusCode::CONFLICT,
+            "scan is not actively running in the worker".to_string(),
+        );
+    }
+
+    match sqlx::query("UPDATE scans SET status = 'pausing' WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => {
+            state.streams.notify_scans();
+            state
+                .streams
+                .publish_scan(
+                    &id,
+                    ScanStreamMessage::Status(ScanStatus {
+                        id: id.clone(),
+                        status: "pausing".to_string(),
+                        total,
+                        processed,
+                        found,
+                        deferred: 0,
+                    }),
+                )
+                .await;
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn resume_scan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = match fetch_scan_status_row(&state.db, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let (_, status, total, processed, found) = row;
+
+    if status == "pending" || status == "running" {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    if status != "paused" {
+        return api_error(
+            StatusCode::CONFLICT,
+            format!("scan cannot be resumed from status '{status}'"),
+        );
+    }
+
+    match sqlx::query("UPDATE scans SET status = 'pending', retry_not_before = NULL WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => {
+            let _ = state.task_tx.try_send(());
+            state.streams.notify_scans();
+            state
+                .streams
+                .publish_scan(
+                    &id,
+                    ScanStreamMessage::Status(ScanStatus {
+                        id: id.clone(),
+                        status: "pending".to_string(),
+                        total,
+                        processed,
+                        found,
+                        deferred: 0,
+                    }),
+                )
+                .await;
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }

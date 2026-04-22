@@ -718,7 +718,61 @@ async fn run_scan_logic(
                 .await;
             streams.cleanup_scan(scan_id).await;
         }
-        TaskSignal::Pause => {}
+        TaskSignal::Pause => {
+            let _ = add_event_log(
+                db,
+                &streams,
+                scan_id,
+                "WARN",
+                "task.paused",
+                None,
+                Some("Scan paused".to_string()),
+                vec![("processed", json!(processed)), ("found", json!(found))],
+            )
+            .await;
+
+            if let Err(err) = sqlx::query(
+                "UPDATE scans
+                 SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL
+                 WHERE id = ?",
+            )
+            .bind(processed)
+            .bind(found)
+            .bind(scan_id)
+            .execute(db)
+            .await
+            {
+                error!(
+                    target: "domain_scanner::queue",
+                    context = "task_status",
+                    scan_id = %scan_id,
+                    status = "paused",
+                    error = %err,
+                    "failed to mark task paused"
+                );
+                let _ = add_event_log(
+                    db,
+                    &streams,
+                    scan_id,
+                    "ERROR",
+                    "task.status_update_failed",
+                    None,
+                    Some("Failed to mark task paused".to_string()),
+                    vec![
+                        ("error", json!(err.to_string())),
+                        ("status", json!("paused")),
+                    ],
+                )
+                .await;
+            }
+
+            publish_scan_status(&streams, scan_id, "paused", total, processed, found, 0).await;
+            streams.notify_scans();
+            streams
+                .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))
+                .await;
+            streams.cleanup_scan(scan_id).await;
+        }
         TaskSignal::Run => {
             let _ = add_event_log(
                 db,
@@ -764,34 +818,6 @@ async fn run_scan_logic(
             }
             publish_scan_status(&streams, scan_id, "finished", total, processed, found, 0).await;
             streams.notify_scans();
-
-            if found > 0 {
-                let publish_title = if let Some(r) = &params.regex {
-                    format!("Auto: {}", r)
-                } else if params.domains.is_some() {
-                    "Auto: Custom List".to_string()
-                } else if !params.pattern.is_empty() {
-                    format!("Auto: {}-letter {} ({})", params.length, params.suffix, params.pattern)
-                } else {
-                    format!("Auto: {}-letter {}", params.length, params.suffix)
-                };
-
-                let publish_req = crate::web::models::PublishScanRequest {
-                    title: publish_title,
-                    description: Some("Automatically published upon scan completion.".to_string()),
-                };
-
-                match crate::publish::create_published_scan(db, scan_id, &publish_req).await {
-                    Ok(summary) => {
-                        info!(target: "domain_scanner::queue", scan_id = %scan_id, "auto published successfully");
-                        let _ = add_event_log(db, &streams, scan_id, "INFO", "task.published", None, Some(format!("Scan automatically published as {}", summary.slug)), vec![]).await;
-                    }
-                    Err(e) => {
-                        error!(target: "domain_scanner::queue", scan_id = %scan_id, error = %e, "failed to auto publish");
-                        let _ = add_event_log(db, &streams, scan_id, "ERROR", "task.publish_failed", None, Some("Failed to auto publish scan".to_string()), vec![("error", json!(e.to_string()))]).await;
-                    }
-                }
-            }
 
             streams
                 .publish_scan(scan_id, ScanStreamMessage::Complete(scan_id.to_string()))

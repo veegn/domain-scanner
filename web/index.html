@@ -14,6 +14,10 @@
             --status-running: #3b82f6;
             --status-finished: #10b981;
             --status-failed: #ef4444;
+            --status-paused: #8b5cf6;
+            --status-pausing: #7c3aed;
+            --status-cancelled: #6b7280;
+            --status-cancelling: #f97316;
         }
 
         /* Status Colors */
@@ -21,6 +25,10 @@
         .status-running { color: var(--status-running); font-weight: bold; animation: pulse 2s infinite; }
         .status-finished { color: var(--status-finished); font-weight: bold; }
         .status-failed { color: var(--status-failed); font-weight: bold; }
+        .status-paused { color: var(--status-paused); font-weight: bold; }
+        .status-pausing { color: var(--status-pausing); font-weight: bold; animation: pulse 2s infinite; }
+        .status-cancelled { color: var(--status-cancelled); font-weight: bold; }
+        .status-cancelling { color: var(--status-cancelling); font-weight: bold; animation: pulse 2s infinite; }
 
         /* Log Colors */
         .log-info { color: #10b981; }
@@ -127,6 +135,13 @@
                         <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Recent Scans</h2>
                         <button onclick="API.loadRecentScans()" class="text-[10px] font-black text-blue-500 hover:text-blue-700 uppercase tracking-widest">Refresh</button>
                     </div>
+                    <div class="mb-4 flex flex-wrap items-center gap-2">
+                        <button onclick="Handlers.setScanFilter('all')" data-scan-filter="all" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">All</button>
+                        <button onclick="Handlers.setScanFilter('active')" data-scan-filter="active" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Active</button>
+                        <button onclick="Handlers.setScanFilter('paused')" data-scan-filter="paused" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Paused</button>
+                        <button onclick="Handlers.setScanFilter('terminal')" data-scan-filter="terminal" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Terminal</button>
+                        <button onclick="Handlers.clearTerminalScans()" class="ml-auto rounded-full border border-red-100 bg-red-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-red-500 transition-colors hover:bg-red-100 hover:text-red-600">Clear Terminal</button>
+                    </div>
                     <div id="recentScansList" class="space-y-3 max-h-[480px] overflow-y-auto pr-2 custom-scrollbar">
                         <div class="py-12 text-center text-gray-300 italic text-xs">Loading operations...</div>
                     </div>
@@ -154,6 +169,8 @@
                         </div>
                         <div class="flex items-center gap-3">
                             <a id="btnOpenPublished" href="#" target="_blank" rel="noopener noreferrer" class="hidden h-8 items-center bg-emerald-50 border border-emerald-100 px-4 rounded-full text-[10px] font-black tracking-widest text-emerald-700 hover:bg-emerald-100 transition-colors">OPEN PUBLISHED</a>
+                            <button id="btnPauseCurrent" onclick="Handlers.pauseScan(State.currentId)" class="hidden h-8 items-center bg-amber-50 border border-amber-100 px-4 rounded-full text-[10px] font-black tracking-widest text-amber-700 hover:bg-amber-100 transition-colors">PAUSE</button>
+                            <button id="btnResumeCurrent" onclick="Handlers.resumeScan(State.currentId)" class="hidden h-8 items-center bg-violet-50 border border-violet-100 px-4 rounded-full text-[10px] font-black tracking-widest text-violet-700 hover:bg-violet-100 transition-colors">RESUME</button>
                             <div class="h-8 flex items-center bg-gray-50 border border-gray-100 px-4 rounded-full">
                                 <span id="statusText" class="text-[10px] font-black tracking-widest">STANDBY</span>
                             </div>
@@ -293,6 +310,7 @@
             scans: [],
             publishedList: [],
             publishedByScanId: {},
+            scanFilter: 'all',
             pollInterval: null,
             listPollInterval: null,
             scanStream: null,
@@ -499,21 +517,32 @@
         const UI = {
             renderScanList(scans) {
                 const listEl = document.getElementById('recentScansList');
-                if (scans.length === 0) {
+                this.syncScanFilterButtons();
+                const filteredScans = scans.filter(scan => this.matchesScanFilter(scan));
+                if (filteredScans.length === 0) {
                     listEl.innerHTML = '<div class="py-12 text-center text-gray-300 italic text-xs uppercase tracking-widest">No operation history found</div>';
                     return;
                 }
 
-                listEl.innerHTML = scans.map(s => {
+                listEl.innerHTML = filteredScans.map(s => {
                     const isRunning = s.status === 'running';
                     const isPending = s.status === 'pending';
                     const isFinished = s.status === 'finished';
-                    const label = isRunning ? 'RUN' : (isPending ? 'WAIT' : (s.status === 'failed' ? 'FAIL' : 'DONE'));
-                    const statusColor = isRunning ? 'text-blue-500' : (isPending ? 'text-orange-500' : (s.status === 'failed' ? 'text-red-500' : 'text-green-500'));
+                    const isPaused = s.status === 'paused';
+                    const statusMeta = {
+                        running: { label: 'RUN', color: 'text-blue-500' },
+                        pending: { label: 'WAIT', color: 'text-orange-500' },
+                        pausing: { label: 'PAUSE', color: 'text-violet-500' },
+                        paused: { label: 'HOLD', color: 'text-violet-500' },
+                        cancelling: { label: 'STOP', color: 'text-orange-500' },
+                        cancelled: { label: 'HALT', color: 'text-gray-500' },
+                        failed: { label: 'FAIL', color: 'text-red-500' },
+                        finished: { label: 'DONE', color: 'text-green-500' }
+                    };
+                    const meta = statusMeta[s.status] || { label: 'TASK', color: 'text-gray-500' };
                     const activeStyle = State.currentId === s.id ? 'active' : '';
                     const published = State.publishedByScanId[s.id];
-                    
-                    const timeStr = s.finished_at ? s.finished_at.split('.')[0].replace('T', ' ') : 'ACTIVE...';
+                    const timeStr = s.finished_at ? s.finished_at.split('.')[0].replace('T', ' ') : (isPaused ? 'PAUSED' : 'ACTIVE...');
                     
                     return `
                         <div onclick="Handlers.selectScan('${s.id}')" class="scan-item bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-center group ${activeStyle}">
@@ -523,7 +552,7 @@
                                 <p class="text-[9px] font-black mt-1 uppercase text-gray-400">FOUND: <span class="text-green-600">${s.found}</span></p>
                             </div>
                             <div class="text-right">
-                                <span class="${statusColor} text-[9px] font-black uppercase tracking-widest">${label} ${s.status}</span>
+                                <span class="${meta.color} text-[9px] font-black uppercase tracking-widest">${meta.label} ${s.status}</span>
                                 <p class="text-[8px] font-black text-gray-300 mt-1 uppercase">${timeStr}</p>
                                 ${published ? `<a href="/published/${encodeURIComponent(published.slug)}/" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
                                 <div class="flex space-x-2 mt-2 justify-end">
@@ -531,12 +560,43 @@
                                         <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'up')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7"/></svg></button>
                                         <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'down')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg></button>
                                     ` : ''}
+                                    ${isRunning ? `
+                                        <button onclick="event.stopPropagation(); Handlers.pauseScan('${s.id}')" class="p-1 hover:bg-amber-50 text-gray-300 hover:text-amber-600 rounded" title="Pause scan"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></button>
+                                    ` : ''}
+                                    ${isPaused ? `
+                                        <button onclick="event.stopPropagation(); Handlers.resumeScan('${s.id}')" class="p-1 hover:bg-violet-50 text-gray-300 hover:text-violet-600 rounded" title="Resume scan"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+                                    ` : ''}
                                     <button onclick="event.stopPropagation(); API.deleteScan('${s.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                                 </div>
                             </div>
                         </div>
                     `;
                 }).join('');
+            },
+
+            matchesScanFilter(scan) {
+                if (State.scanFilter === 'active') {
+                    return ['pending', 'running', 'pausing', 'cancelling'].includes(scan.status);
+                }
+                if (State.scanFilter === 'paused') {
+                    return scan.status === 'paused';
+                }
+                if (State.scanFilter === 'terminal') {
+                    return ['finished', 'failed', 'cancelled'].includes(scan.status);
+                }
+                return true;
+            },
+
+            syncScanFilterButtons() {
+                document.querySelectorAll('[data-scan-filter]').forEach(button => {
+                    const isActive = button.dataset.scanFilter === State.scanFilter;
+                    button.classList.toggle('bg-blue-50', isActive);
+                    button.classList.toggle('border-blue-200', isActive);
+                    button.classList.toggle('text-blue-600', isActive);
+                    button.classList.toggle('bg-gray-50', !isActive);
+                    button.classList.toggle('border-gray-200', !isActive);
+                    button.classList.toggle('text-gray-500', !isActive);
+                });
             },
 
             renderPublishedList() {
@@ -563,15 +623,33 @@
 
             syncPublishActions() {
                 const openBtn = document.getElementById('btnOpenPublished');
+                const pauseBtn = document.getElementById('btnPauseCurrent');
+                const resumeBtn = document.getElementById('btnResumeCurrent');
                 const currentScan = State.scans.find(scan => scan.id === State.currentId);
                 const published = currentScan ? State.publishedByScanId[currentScan.id] : null;
 
                 openBtn.classList.add('hidden');
                 openBtn.classList.remove('inline-flex');
+                pauseBtn.classList.add('hidden');
+                pauseBtn.classList.remove('inline-flex');
+                pauseBtn.disabled = true;
+                resumeBtn.classList.add('hidden');
+                resumeBtn.classList.remove('inline-flex');
+                resumeBtn.disabled = true;
 
                 if (!currentScan) {
                     openBtn.href = '#';
                     return;
+                }
+
+                if (currentScan.status === 'running') {
+                    pauseBtn.classList.remove('hidden');
+                    pauseBtn.classList.add('inline-flex');
+                    pauseBtn.disabled = false;
+                } else if (currentScan.status === 'paused') {
+                    resumeBtn.classList.remove('hidden');
+                    resumeBtn.classList.add('inline-flex');
+                    resumeBtn.disabled = false;
                 }
 
                 if (published) {
@@ -610,7 +688,7 @@
                 document.getElementById('percentageInline').innerText = pct;
                 document.getElementById('progressBar').style.width = pct + '%';
                 
-                if (['finished', 'failed'].includes(data.status)) {
+                if (['finished', 'failed', 'paused', 'cancelled'].includes(data.status)) {
                     if (data.status === 'finished' && data.found > 0) document.getElementById('btnRescan').classList.remove('hidden');
                     if (!State.isConsoleCollapsed) this.setConsoleState(true);
                 } else {
@@ -759,6 +837,11 @@
                 API.loadRecentScans();
             },
 
+            setScanFilter(filter) {
+                State.scanFilter = filter;
+                UI.renderScanList(State.scans);
+            },
+
             async startScan() {
                 const fileInput = document.getElementById('priority_dict_file');
                 let words = null;
@@ -806,6 +889,30 @@
                 } catch (e) { console.error(e); }
             },
 
+            async pauseScan(id) {
+                if (!id) return;
+                try {
+                    const resp = await fetch(`${API.base}api/scan/${id}/pause`, { method: 'POST' });
+                    if (!resp.ok && resp.status !== 202 && resp.status !== 204) {
+                        const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+                        throw new Error(payload.error || 'Pause failed');
+                    }
+                    API.loadRecentScans();
+                } catch (e) { alert(e.message); }
+            },
+
+            async resumeScan(id) {
+                if (!id) return;
+                try {
+                    const resp = await fetch(`${API.base}api/scan/${id}/resume`, { method: 'POST' });
+                    if (!resp.ok && resp.status !== 202 && resp.status !== 204) {
+                        const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+                        throw new Error(payload.error || 'Resume failed');
+                    }
+                    this.selectScan(id);
+                } catch (e) { alert(e.message); }
+            },
+
             async deletePublished(id) {
                 const published = State.publishedList.find(item => item.id === id);
                 if (!published) return;
@@ -824,6 +931,40 @@
                     UI.renderScanList(State.scans);
                     UI.syncPublishActions();
                 } catch (e) { alert(e.message); }
+            },
+
+            async clearTerminalScans() {
+                const terminalScans = State.scans.filter(scan => ['finished', 'failed', 'cancelled'].includes(scan.status));
+                if (!terminalScans.length) {
+                    alert('No terminal scans to clear.');
+                    return;
+                }
+
+                if (!confirm(`Delete ${terminalScans.length} terminal scans from local history?`)) return;
+
+                let failed = 0;
+                for (const scan of terminalScans) {
+                    try {
+                        const resp = await fetch(`${API.base}api/scan/${scan.id}`, { method: 'DELETE' });
+                        if (!resp.ok) failed += 1;
+                    } catch (_) {
+                        failed += 1;
+                    }
+                }
+
+                if (State.currentId && terminalScans.some(scan => scan.id === State.currentId)) {
+                    API.closeScanStream();
+                    State.currentId = null;
+                    document.getElementById('statusArea').classList.add('hidden');
+                    State.currentResults = [];
+                    UI.syncPublishActions();
+                    UI.renderResults();
+                }
+
+                await API.loadRecentScans();
+                if (failed > 0) {
+                    alert(`${failed} scans could not be deleted.`);
+                }
             },
 
             toggleDomain(domain) {
