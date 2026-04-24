@@ -31,7 +31,7 @@
                 </p>
             </div>
             <div class="flex gap-3">
-                <a href="/index.html" class="px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Dashboard</a>
+                <a id="dashboardLink" href="index.html" class="px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Dashboard</a>
                 <button id="refreshBtn" class="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-black tracking-wide hover:bg-blue-700 transition-colors">Refresh</button>
             </div>
         </header>
@@ -109,6 +109,7 @@
         };
 
         const els = {
+            dashboardLink: document.getElementById('dashboardLink'),
             refreshBtn: document.getElementById('refreshBtn'),
             searchBtn: document.getElementById('searchBtn'),
             searchMoreBtn: document.getElementById('searchMoreBtn'),
@@ -126,6 +127,30 @@
             searchSpinner: document.getElementById('searchSpinner')
         };
 
+        const Routes = {
+            appRootPath() {
+                const path = window.location.pathname;
+                const publishedMatch = path.match(/^(.*\/)published\/[^/]+\/?$/);
+                if (publishedMatch) return publishedMatch[1] || '/';
+                if (path.endsWith('/')) return path;
+                const slashIndex = path.lastIndexOf('/');
+                return slashIndex >= 0 ? path.slice(0, slashIndex + 1) : '/';
+            },
+
+            build(path) {
+                const root = new URL(this.appRootPath(), window.location.origin);
+                return new URL(path.replace(/^\//, ''), root).toString();
+            },
+
+            api(path) {
+                return this.build(path);
+            },
+
+            published(slug) {
+                return this.build(`published/${encodeURIComponent(slug)}/`);
+            }
+        };
+
         const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
             '&': '&amp;',
             '<': '&lt;',
@@ -135,7 +160,7 @@
         })[char]);
 
         async function fetchJson(url) {
-            const response = await fetch(url);
+            const response = await fetch(Routes.api(url));
             if (!response.ok) {
                 throw new Error(`Request failed: ${response.status}`);
             }
@@ -215,7 +240,7 @@
                     </div>
                     <div class="mt-5 flex items-center justify-between gap-3">
                         <div class="text-xs text-gray-400">Scan: ${escapeHtml(formatDate(scan.scan_finished_at || scan.published_at))}</div>
-                        <a href="/published/${encodeURIComponent(scan.slug)}/" class="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-black uppercase tracking-[0.22em] hover:bg-blue-700 transition-colors">Open</a>
+                        <a href="${Routes.published(scan.slug)}" class="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-black uppercase tracking-[0.22em] hover:bg-blue-700 transition-colors">Open</a>
                     </div>
                 </article>
             `).join('');
@@ -224,7 +249,7 @@
         }
 
         async function loadScans() {
-            state.scans = await fetchJson('/api/public/published');
+            state.scans = await fetchJson('api/public/published');
             state.scanPageSize = 9;
             renderSuffixFilters();
             renderScanList();
@@ -247,7 +272,7 @@
             els.searchBtnText.classList.add('hidden');
 
             try {
-                const rows = await fetchJson(`/api/public/search?q=${encodeURIComponent(q)}&limit=${state.searchLimit}`);
+                const rows = await fetchJson(`api/public/search?q=${encodeURIComponent(q)}&limit=${state.searchLimit}`);
                 state.currentSearchResults = rows;
 
                 if (rows.length === 0) {
@@ -264,7 +289,7 @@
                 const display = rows.slice(0, limit);
                 
                 let html = display.map((row) => `
-                    <a href="/published/${encodeURIComponent(row.slug)}/" class="block rounded-2xl border border-gray-100 bg-white px-4 py-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors">
+                    <a href="${Routes.published(row.slug)}" class="block rounded-2xl border border-gray-100 bg-white px-4 py-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors">
                         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                             <div>
                                 <div class="text-lg font-black font-mono text-gray-900">${escapeHtml(row.domain)}</div>
@@ -304,6 +329,7 @@
 
         window.setSuffixFilter = setSuffixFilter;
 
+        els.dashboardLink.href = Routes.build('index.html');
         els.refreshBtn.addEventListener('click', loadScans);
         els.searchBtn.addEventListener('click', async () => {
             state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;

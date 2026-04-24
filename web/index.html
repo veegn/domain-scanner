@@ -81,7 +81,7 @@
                 <span>API Status:</span>
                 <span class="text-green-600 font-bold">STABLE</span>
             </div>
-            <a href="/published.html" class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
+            <a href="published.html" class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
                 Public Releases
             </a>
         </header>
@@ -150,7 +150,7 @@
                 <section class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Published Releases</h2>
-                        <a href="/published.html" class="text-[10px] font-black text-emerald-600 hover:text-emerald-700 uppercase tracking-widest">Open Public</a>
+                        <a href="published.html" class="text-[10px] font-black text-emerald-600 hover:text-emerald-700 uppercase tracking-widest">Open Public</a>
                     </div>
                     <div id="publishedList" class="space-y-3 max-h-[320px] overflow-y-auto pr-2 custom-scrollbar">
                         <div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No published releases</div>
@@ -169,6 +169,7 @@
                         </div>
                         <div class="flex items-center gap-3">
                             <a id="btnOpenPublished" href="#" target="_blank" rel="noopener noreferrer" class="hidden h-8 items-center bg-emerald-50 border border-emerald-100 px-4 rounded-full text-[10px] font-black tracking-widest text-emerald-700 hover:bg-emerald-100 transition-colors">OPEN PUBLISHED</a>
+                            <button id="btnPublishCurrent" onclick="Handlers.publishCurrent()" class="hidden h-8 items-center bg-blue-50 border border-blue-100 px-4 rounded-full text-[10px] font-black tracking-widest text-blue-700 hover:bg-blue-100 transition-colors">PUBLISH</button>
                             <button id="btnPauseCurrent" onclick="Handlers.pauseScan(State.currentId)" class="hidden h-8 items-center bg-amber-50 border border-amber-100 px-4 rounded-full text-[10px] font-black tracking-widest text-amber-700 hover:bg-amber-100 transition-colors">PAUSE</button>
                             <button id="btnResumeCurrent" onclick="Handlers.resumeScan(State.currentId)" class="hidden h-8 items-center bg-violet-50 border border-violet-100 px-4 rounded-full text-[10px] font-black tracking-widest text-violet-700 hover:bg-violet-100 transition-colors">RESUME</button>
                             <div class="h-8 flex items-center bg-gray-50 border border-gray-100 px-4 rounded-full">
@@ -333,14 +334,12 @@
          * API Interaction Layer
          */
         const API = {
-            // Auto-detect base path for subdirectory deployment
             get base() {
-                const path = window.location.pathname;
-                return path.endsWith('/') ? path : path.substring(0, path.lastIndexOf('/') + 1);
+                return Routes.appRootPath();
             },
 
             async fetchJson(path, options = {}) {
-                const url = this.base + path.replace(/^\//, '');
+                const url = Routes.api(path);
                 const resp = await fetch(url, options);
                 if (!resp.ok) {
                     const errorMsg = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -369,7 +368,7 @@
 
             openScansStream() {
                 this.closeScansStream();
-                const url = this.base + 'api/scans/stream';
+                const url = Routes.api('api/scans/stream');
                 const stream = new EventSource(url);
                 State.scansStream = stream;
 
@@ -400,7 +399,7 @@
             async deleteScan(id) {
                 if (!confirm("Confirm complete data destruction for this operation?")) return;
                 try {
-                    const url = this.base + `api/scan/${id}`;
+                    const url = Routes.api(`api/scan/${id}`);
                     const resp = await fetch(url, { method: 'DELETE' });
                     if (resp.status === 202) {
                         this.loadRecentScans();
@@ -428,7 +427,7 @@
 
             openScanStream(id) {
                 this.closeScanStream();
-                const url = this.base + `api/scan/${id}/stream`;
+                const url = Routes.api(`api/scan/${id}/stream`);
                 const stream = new EventSource(url);
                 const statusRows = [];
                 State.scanStream = stream;
@@ -511,6 +510,30 @@
             }
         };
 
+        const Routes = {
+            appRootPath() {
+                const path = window.location.pathname;
+                const publishedMatch = path.match(/^(.*\/)published\/[^/]+\/?$/);
+                if (publishedMatch) return publishedMatch[1] || '/';
+                if (path.endsWith('/')) return path;
+                const slashIndex = path.lastIndexOf('/');
+                return slashIndex >= 0 ? path.slice(0, slashIndex + 1) : '/';
+            },
+
+            build(path) {
+                const root = new URL(this.appRootPath(), window.location.origin);
+                return new URL(path.replace(/^\//, ''), root).toString();
+            },
+
+            api(path) {
+                return this.build(path);
+            },
+
+            published(slug) {
+                return this.build(`published/${encodeURIComponent(slug)}/`);
+            }
+        };
+
         /**
          * UI Manipulation and Rendering
          */
@@ -554,7 +577,7 @@
                             <div class="text-right">
                                 <span class="${meta.color} text-[9px] font-black uppercase tracking-widest">${meta.label} ${s.status}</span>
                                 <p class="text-[8px] font-black text-gray-300 mt-1 uppercase">${timeStr}</p>
-                                ${published ? `<a href="/published/${encodeURIComponent(published.slug)}/" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
+                                ${published ? `<a href="${Routes.published(published.slug)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
                                 <div class="flex space-x-2 mt-2 justify-end">
                                     ${isPending ? `
                                         <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'up')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7"/></svg></button>
@@ -609,12 +632,12 @@
                 listEl.innerHTML = State.publishedList.map(item => `
                     <div class="bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-start gap-3">
                         <div class="min-w-0">
-                            <a href="/published/${encodeURIComponent(item.slug)}/" target="_blank" rel="noopener noreferrer" class="text-[9px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">${Utils.escapeHtml(item.slug)}</a>
+                            <a href="${Routes.published(item.slug)}" target="_blank" rel="noopener noreferrer" class="text-[9px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">${Utils.escapeHtml(item.slug)}</a>
                             <p class="text-[10px] font-black text-gray-700 truncate mt-1">${Utils.escapeHtml(item.title)}</p>
                             <p class="text-[9px] text-gray-400 uppercase mt-1">Hits: <span class="font-black text-gray-500">${item.result_count}</span></p>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
-                            <a href="/published/${encodeURIComponent(item.slug)}/" target="_blank" rel="noopener noreferrer" class="p-1 hover:bg-emerald-50 text-gray-300 hover:text-emerald-600 rounded" title="Open published page"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 17L17 7M17 7H9m8 0v8"/></svg></a>
+                            <a href="${Routes.published(item.slug)}" target="_blank" rel="noopener noreferrer" class="p-1 hover:bg-emerald-50 text-gray-300 hover:text-emerald-600 rounded" title="Open published page"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 17L17 7M17 7H9m8 0v8"/></svg></a>
                             <button onclick="Handlers.deletePublished('${item.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded" title="Delete published release"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                         </div>
                     </div>
@@ -623,6 +646,7 @@
 
             syncPublishActions() {
                 const openBtn = document.getElementById('btnOpenPublished');
+                const publishBtn = document.getElementById('btnPublishCurrent');
                 const pauseBtn = document.getElementById('btnPauseCurrent');
                 const resumeBtn = document.getElementById('btnResumeCurrent');
                 const currentScan = State.scans.find(scan => scan.id === State.currentId);
@@ -630,6 +654,9 @@
 
                 openBtn.classList.add('hidden');
                 openBtn.classList.remove('inline-flex');
+                publishBtn.classList.add('hidden');
+                publishBtn.classList.remove('inline-flex');
+                publishBtn.disabled = true;
                 pauseBtn.classList.add('hidden');
                 pauseBtn.classList.remove('inline-flex');
                 pauseBtn.disabled = true;
@@ -653,9 +680,16 @@
                 }
 
                 if (published) {
-                    openBtn.href = `/published/${encodeURIComponent(published.slug)}/`;
+                    openBtn.href = Routes.published(published.slug);
                     openBtn.classList.remove('hidden');
                     openBtn.classList.add('inline-flex');
+                } else if (
+                    currentScan.found > 0 &&
+                    ['finished', 'paused', 'cancelled'].includes(currentScan.status)
+                ) {
+                    publishBtn.classList.remove('hidden');
+                    publishBtn.classList.add('inline-flex');
+                    publishBtn.disabled = false;
                 }
             },
 
@@ -892,7 +926,7 @@
             async pauseScan(id) {
                 if (!id) return;
                 try {
-                    const resp = await fetch(`${API.base}api/scan/${id}/pause`, { method: 'POST' });
+                    const resp = await fetch(Routes.api(`api/scan/${id}/pause`), { method: 'POST' });
                     if (!resp.ok && resp.status !== 202 && resp.status !== 204) {
                         const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
                         throw new Error(payload.error || 'Pause failed');
@@ -904,7 +938,7 @@
             async resumeScan(id) {
                 if (!id) return;
                 try {
-                    const resp = await fetch(`${API.base}api/scan/${id}/resume`, { method: 'POST' });
+                    const resp = await fetch(Routes.api(`api/scan/${id}/resume`), { method: 'POST' });
                     if (!resp.ok && resp.status !== 202 && resp.status !== 204) {
                         const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
                         throw new Error(payload.error || 'Resume failed');
@@ -919,7 +953,7 @@
                 if (!confirm(`Delete published release "${published.title}"?`)) return;
 
                 try {
-                    const resp = await fetch(`${API.base}api/published/${id}`, { method: 'DELETE' });
+                    const resp = await fetch(Routes.api(`api/published/${id}`), { method: 'DELETE' });
                     if (!resp.ok && resp.status !== 204) {
                         const payload = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
                         throw new Error(payload.error || 'Delete failed');
@@ -927,6 +961,52 @@
 
                     State.publishedList = State.publishedList.filter(item => item.id !== id);
                     delete State.publishedByScanId[published.scan_id];
+                    UI.renderPublishedList();
+                    UI.renderScanList(State.scans);
+                    UI.syncPublishActions();
+                } catch (e) { alert(e.message); }
+            },
+
+            async publishCurrent() {
+                if (!State.currentId) return;
+                await this.publishScan(State.currentId);
+            },
+
+            async publishScan(id) {
+                const scan = State.scans.find(item => item.id === id);
+                if (!scan) return;
+                if (scan.found <= 0) {
+                    alert('No available domains to publish.');
+                    return;
+                }
+
+                const defaultTitle = Utils.buildPublishTitle(scan);
+                const title = prompt('Publish title', defaultTitle);
+                if (title === null) return;
+                if (!title.trim()) {
+                    alert('Publish title cannot be empty.');
+                    return;
+                }
+
+                const defaultDescription = Utils.buildPublishDescription(scan);
+                const description = prompt('Publish description (optional)', defaultDescription);
+                if (description === null) return;
+
+                try {
+                    const published = await API.fetchJson(`api/scan/${id}/publish`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            title: title.trim(),
+                            description: description.trim() || null
+                        })
+                    });
+
+                    State.publishedByScanId[published.scan_id] = published;
+                    State.publishedList = [
+                        published,
+                        ...State.publishedList.filter(item => item.id !== published.id)
+                    ];
                     UI.renderPublishedList();
                     UI.renderScanList(State.scans);
                     UI.syncPublishActions();
@@ -945,7 +1025,7 @@
                 let failed = 0;
                 for (const scan of terminalScans) {
                     try {
-                        const resp = await fetch(`${API.base}api/scan/${scan.id}`, { method: 'DELETE' });
+                        const resp = await fetch(Routes.api(`api/scan/${scan.id}`), { method: 'DELETE' });
                         if (!resp.ok) failed += 1;
                     } catch (_) {
                         failed += 1;
@@ -1052,6 +1132,9 @@
 
         // Entry Point
         window.onload = () => {
+            document.querySelectorAll('a[href="published.html"]').forEach(anchor => {
+                anchor.href = Routes.build('published.html');
+            });
             API.loadRecentScans();
             API.openScansStream();
         };
