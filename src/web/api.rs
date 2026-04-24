@@ -254,7 +254,7 @@ async fn search_public_domains(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PublicDomainSearchQuery>,
 ) -> ApiResponse {
-    let needle = query.q.unwrap_or_default().trim().to_ascii_lowercase();
+    let needle = query.q.unwrap_or_default().trim().to_string();
     if needle.is_empty() {
         return Json(Vec::<PublishedDomainHit>::new()).into_response();
     }
@@ -666,7 +666,7 @@ async fn fetch_public_domain_hits(
          JOIN published_scans ps ON ps.id = pd.published_scan_id
          JOIN scans s ON s.id = ps.scan_id
          WHERE ps.status = 'active'
-           AND LOWER(pd.domain) LIKE ?
+           AND pd.domain LIKE ? COLLATE NOCASE
          ORDER BY ps.published_at DESC, pd.domain ASC
          LIMIT ?",
     )

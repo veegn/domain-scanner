@@ -325,6 +325,10 @@ impl StreamHub {
         self.scan_sender(scan_id).await.subscribe()
     }
 
+    pub async fn sender_for_scan(&self, scan_id: &str) -> broadcast::Sender<ScanStreamMessage> {
+        self.scan_sender(scan_id).await
+    }
+
     pub async fn publish_scan(&self, scan_id: &str, message: ScanStreamMessage) {
         let sender = self.scan_sender(scan_id).await;
         let _ = sender.send(message);

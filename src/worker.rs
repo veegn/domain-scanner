@@ -1,9 +1,9 @@
 use crate::DomainResult;
 use crate::checker::{CheckResult, CheckerRegistry};
+use async_channel::Receiver;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -117,7 +117,7 @@ fn now_epoch_millis() -> u64 {
 
 pub async fn worker(
     id: usize,
-    jobs: Arc<Mutex<mpsc::Receiver<String>>>,
+    jobs: Receiver<String>,
     results: mpsc::Sender<crate::WorkerMessage>,
     throttle: Arc<WorkerThrottle>,
     registry: Arc<CheckerRegistry>,
@@ -144,11 +144,7 @@ pub async fn worker(
             break;
         }
 
-        // Lock the receiver just long enough to get a job
-        let domain_name = {
-            let mut rx = jobs.lock().await;
-            rx.recv().await
-        };
+        let domain_name = jobs.recv().await.ok();
 
         match domain_name {
             Some(domain) => {

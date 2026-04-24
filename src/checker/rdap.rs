@@ -6,17 +6,16 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
 
-static RDAP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+static RDAP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .user_agent("domain-scanner/0.1")
         .build()
         .unwrap()
 });

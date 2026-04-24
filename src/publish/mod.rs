@@ -3,7 +3,7 @@ mod templates;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
@@ -178,8 +178,8 @@ pub async fn update_published_scan(
         bail!("publish title cannot be empty");
     }
 
-    let row = sqlx::query_as::<_, (String, String, String, String, i64, String, String)>(
-        "SELECT ps.scan_id, ps.slug, s.suffix, s.pattern, s.length, ps.published_at, ps.static_dir
+    let row = sqlx::query_as::<_, (String, String, String, String, i64, String, String, Option<String>)>(
+        "SELECT ps.scan_id, ps.slug, s.suffix, s.pattern, s.length, ps.published_at, ps.static_dir, s.finished_at
          FROM published_scans ps
          JOIN scans s ON s.id = ps.scan_id
          WHERE ps.id = ?",
@@ -189,7 +189,7 @@ pub async fn update_published_scan(
     .await
     .context("failed to load published scan for update")?;
 
-    let Some((scan_id, slug, suffix, pattern, length, published_at, static_dir)) = row else {
+    let Some((scan_id, slug, suffix, pattern, length, published_at, static_dir, finished_at)) = row else {
         return Ok(None);
     };
 
@@ -223,7 +223,7 @@ pub async fn update_published_scan(
         length,
         result_count: domains.len() as i64,
         published_at: published_at.clone(),
-        scan_finished_at: published_at.clone(), // Default for existing ones if field missing
+        scan_finished_at: finished_at.unwrap_or(published_at.clone()),
         updated_at: updated_at.clone(),
     };
     let data = PublishedPageData {
@@ -352,21 +352,26 @@ async fn persist_publication(
     .await
     .context("failed to insert published scan")?;
 
-    for domain in domains {
-        sqlx::query(
+    for batch in domains.chunks(500) {
+        let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
             "INSERT INTO published_domains
-                (published_scan_id, domain, available, expiration_date, signatures, published_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&meta.id)
-        .bind(&domain.domain)
-        .bind(domain.available)
-        .bind(&domain.expiration_date)
-        .bind(&domain.signatures)
-        .bind(&meta.published_at)
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("failed to insert published domain '{}'", domain.domain))?;
+                (published_scan_id, domain, available, expiration_date, signatures, published_at) ",
+        );
+
+        builder.push_values(batch, |mut row, domain| {
+            row.push_bind(&meta.id)
+                .push_bind(&domain.domain)
+                .push_bind(domain.available)
+                .push_bind(&domain.expiration_date)
+                .push_bind(&domain.signatures)
+                .push_bind(&meta.published_at);
+        });
+
+        builder
+            .build()
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert published domain batch")?;
     }
 
     tx.commit()

@@ -4,87 +4,242 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](./Dockerfile)
 
-一个基于 Rust 实现的高性能、异步队列域名可用性扫描器。现在已从 CLI 工具全面升级为具备 Web 控制面板和 SQLite 持久化能力的生产级扫描系统。
+一个基于 Rust、Axum、SQLite 实现的异步域名可用性扫描系统。项目提供 Web 控制台、任务队列、实时扫描状态流、RDAP/WHOIS/DoH 多源检查、公开结果发布和域名检索能力。
 
-## 🚀 核心特性
+## 核心特性
 
-- **现代 Web 界面**：基于 Axum 的 RESTful API 和模块化前端 Dashboard，支持实时日志流和任务状态追踪。
-- **智能任务队列**：内置单线程异步任务队列，确保同一时间只有一个扫描任务执行，防止网络拥塞和 IP 封禁。
-- **鲁棒性设计**：支持断点续传。服务重启后，未完成的任务会自动从数据库加载并从精确位置恢复。
-- **多维度检查引擎**：
-  - **DoH (DNS over HTTPS)**：支持 Google/Cloudflare/AliDNS 多源负载均衡。
-  - **RDAP (Registration Data Access Protocol)**：支持 IANA 官方引导的权威数据查询。
-  - **WHOIS 到期解析**：自动提取到期时间（Expiration Date）并解析域名状态。
-  - **本地保留规则**：内置 RFC 2606 规定的保留域名过滤。
-- **分层检查策略**：采用 `Local -> Fast (DoH) -> Standard (RDAP) -> Fallback (WHOIS)` 的分层架构，兼顾性能与准确性。
-- **结构化日志**：接入 `tracing` 日志系统，支持控制台彩色输出、每日滚动文件存储及自动清理（默认保留 14 天）。
+- **Web 控制台**：通过浏览器创建扫描任务、查看最近任务、暂停/恢复/取消任务、导出结果和发布结果页。
+- **事件驱动实时更新**：任务列表、扫描进度、域名状态滑动窗口和可用域名结果通过 `SSE` 推送，支持事件编号和断线续传。
+- **异步任务队列**：后台队列按优先级执行扫描任务，并在服务重启后恢复未完成任务。
+- **多源检查引擎**：
+  - `LocalReserved`：本地保留域名检查。
+  - `DoH`：DNS-over-HTTPS 快速探测。
+  - `RDAP`：支持 IANA bootstrap，并带本地缓存。
+  - `WHOIS`：支持 DB seed + `config.json` 覆盖的 server 映射、到期时间解析和限流嗅探。
+- **自适应限流**：WHOIS 触发限流后会暂停当前任务、优先降低 worker 并发；并发降到 1 后再降低扫描速度。嗅探到的 WHOIS server 限流值会缓存到本地，供下次启动加载。
+- **异常重扫策略**：扫描中遇到 timeout、rate limit 等可重试异常时先记录异常域名，主扫描完成后统一调度异常重扫，并限制重扫轮次。
+- **公开发布与检索**：完成的扫描结果可以发布为公开静态页面，并写入检索索引，支持跨发布结果的公开域名搜索。
+- **结构化日志**：接入 `tracing`，支持控制台输出、每日文件日志和自动清理。
 
-## ⚖️ 法律声明与合规使用
+## 合规使用
 
-本工具仅用于**学术研究**及**个人域名资产管理**。在使用过程中，请务必遵守以下原则：
+本工具仅用于学术研究、个人域名资产管理和合法的域名可用性分析。大量查询可能触发 DoH、RDAP 或 WHOIS 服务商的限制，请控制任务规模并遵守服务条款。
 
-1. **尊重服务条款**：大量并发查询可能违反 DoH 或 WHOIS 服务商的 TOS，请根据实际情况调整 `config.json` 中的频率限制。
-2. **禁止恶意抢注**：严禁利用本工具进行针对品牌商标的恶意抢注行为。
-3. **熔断保护**：系统内置了熔断器（Circuit Breaker），当监测到限流（HTTP 429）或网络故障时会自动降级。
+系统内置了熔断、限流、暂停和异常重扫机制，但这些机制不能替代合规使用。严禁利用本工具进行商标侵权、恶意抢注或绕过第三方服务限制的行为。
 
-## 🛠️ 快速开始
+## 快速开始
 
-### 方案 A：使用 Docker (推荐)
-
-项目已配置 GitHub Actions 自动构建，您可以使用极简的 Docker 镜像部署：
+### Docker
 
 ```bash
 docker pull ghcr.io/veegn/domain-scanner:latest
 docker run -d -p 3000:3000 -v ./data:/app/data -v ./logs:/app/logs ghcr.io/veegn/domain-scanner
 ```
 
-### 方案 B：本地编译运行
+### 本地运行
 
-确保安装了 Rust (Edition 2024 / 1.85+):
+需要 Rust Edition 2024 / Rust 1.85+。
 
 ```bash
-# 1. 克隆并进入目录
 git clone https://github.com/veegn/domain-scanner.git
 cd domain-scanner
-
-# 2. 编译并启动
 cargo run --release -- --port 3000
 ```
-访问 `http://localhost:3000` 即可开始扫描。
 
-## ⚙️ 核心配置 (`config.json`)
+访问：
 
-系统在首次启动时会自动生成 `config.json`。您可以根据需要调整：
+```text
+http://localhost:3000
+```
 
-- `logging`: 配置日志保持时间、存储目录及是否启用文件记录。
-- `doh_servers`: 自定义 DoH 服务器列表。
-- `whois_servers`: 手动覆盖特定 TLD 的 WHOIS 服务器映射。
-- `rdap_bootstrap_url`: 指向 IANA 的 RDAP 引导配置文件。
+公开发布页入口：
 
-## 📝 扫描规则说明
+```text
+http://localhost:3000/published.html
+```
 
-- **模式生成**：支持 `d` (数字)、`D` (大写字母)、`a` (小写字母+数字) 灵活组合。
-- **正则表达式**：在生成阶段进行过滤。例如 `^a.*123$` 仅扫描以 a 开头 123 结尾的域名。
-- **字典上传**：支持纯文本格式，每行一个前缀。
+## 配置
 
-## 📂 项目结构
+首次启动时系统会自动生成 `config.json`。
+
+```json
+{
+  "doh_servers": [],
+  "whois_servers": {},
+  "rdap_servers": {},
+  "rdap_bootstrap_url": "https://data.iana.org/rdap/dns.json",
+  "logging": {
+    "console_enabled": true,
+    "file_enabled": true,
+    "directory": "logs",
+    "file_prefix": "domain-scanner",
+    "max_files": 14
+  }
+}
+```
+
+配置项说明：
+
+- `doh_servers`：自定义 DoH 服务列表；为空时使用内置默认。
+- `whois_servers`：覆盖或补充 WHOIS server 映射，格式为 `TLD -> host` 或 `TLD -> host:port`。
+- `rdap_servers`：覆盖或补充 RDAP endpoint。
+- `rdap_bootstrap_url`：RDAP bootstrap 数据源，默认使用 IANA `dns.json`。
+- `logging`：控制日志输出位置、文件名前缀和保留数量。
+
+WHOIS 默认映射来自数据库初始化 seed，`config.json` 中的 `whois_servers` 会覆盖默认值。
+
+## 数据与缓存目录
+
+常用运行时文件：
+
+```text
+scans.db                         # SQLite 数据库
+logs/                            # 每日滚动日志
+data/seed.sql                    # TLD 和 WHOIS server 初始化数据
+data/cache/rdap/                 # RDAP bootstrap 本地缓存
+data/cache/whois/rate_limits.json # WHOIS server 限流嗅探缓存
+web/published/<slug>/            # 已发布的静态结果页
+```
+
+## 扫描规则
+
+生成式扫描支持三种模式：
+
+- `d`：数字，字符集 `0-9`
+- `D`：字母，字符集 `a-z`
+- `a`：字母数字，字符集 `a-z0-9`
+
+其他能力：
+
+- `regex`：在生成阶段过滤候选前缀。
+- `priority_words`：优先扫描指定词。
+- `domains`：直接提交域名列表进行扫描。
+
+系统会校验任务规模、正则长度、域名格式和批量域名数量，避免提交不可控的大任务。
+
+## 任务生命周期
+
+任务状态包括：
+
+- `pending`
+- `running`
+- `paused`
+- `cancelling`
+- `cancelled`
+- `finished`
+- `failed`
+
+支持操作：
+
+- 创建任务
+- 暂停任务
+- 恢复任务
+- 删除或取消任务
+- 调整 pending 任务优先级
+- 使用已发现可用域名重新扫描
+- 发布已完成扫描结果
+
+暂停和 WHOIS 限流冷却不会阻塞删除操作。
+
+## 实时更新
+
+前端主要通过 `SSE` 接收实时事件：
+
+- `/api/scans/stream`：最近任务列表更新。
+- `/api/scan/:id/stream`：单个任务的状态、域名状态滑动窗口和结果增量。
+
+单任务流带事件编号，浏览器断线重连时会通过 `Last-Event-ID` 补发缺失的日志和结果批次。
+
+## 公开发布
+
+扫描完成后，可以将结果发布为公开静态页面。发布过程会：
+
+- 生成唯一 `slug`
+- 写入 `web/published/<slug>/index.html`
+- 写入 `meta.json`
+- 写入 `data.json`
+- 写入 `published_scans`
+- 写入 `published_domains`
+
+公开页面只展示可公开的结果数据，不包含内部 trace、限流细节、worker 状态或调试日志。
+
+公开入口：
+
+```text
+/published.html
+/published/<slug>/
+```
+
+公开检索接口基于 `published_domains` 表，不扫描静态 JSON 文件。
+
+## API 概览
+
+任务接口：
+
+```text
+GET    /api/scans
+GET    /api/scans/stream
+POST   /api/scan
+GET    /api/scan/:id
+DELETE /api/scan/:id
+POST   /api/scan/:id/pause
+POST   /api/scan/:id/resume
+GET    /api/scan/:id/stream
+GET    /api/scan/:id/results
+GET    /api/scan/:id/logs
+POST   /api/scan/:id/reorder
+```
+
+发布管理接口：
+
+```text
+POST   /api/scan/:id/publish
+GET    /api/published
+GET    /api/published/:id
+PUT    /api/published/:id
+DELETE /api/published/:id
+```
+
+公开接口：
+
+```text
+GET    /api/public/published
+GET    /api/public/search?q=<domain>
+```
+
+## 项目结构
 
 ```text
 src/
-├── logging.rs       # 结构化日志系统初始化
-├── config.rs        # 配置加载与序列化逻辑
-├── checker/         # 插件式检查引擎 (DNS, RDAP, WHOIS)
-├── web/             # Web 核心模块 (API, DB, Queue)
-├── generator.rs     # 高性能域名生成核心
-└── worker.rs        # 异步扫描 Worker 逻辑
+├── checker/          # LocalReserved, DoH, RDAP, WHOIS 检查器
+├── publish/          # 静态结果发布、slug、meta/data/index 生成
+├── web/              # API、DB、队列、状态模型
+├── config.rs         # config.json 加载与默认配置
+├── generator.rs      # 域名候选生成
+├── lib.rs            # 公共模型导出
+├── logging.rs        # tracing 初始化、文件日志和清理
+└── worker.rs         # 扫描 worker 与任务节流
+
 web/
-└── index.html       # 模块化前端应用 (State-Action 架构)
+├── index.html        # 管理控制台
+├── published.html    # 公开发布列表和域名检索页
+└── published/        # 发布生成的静态结果目录
 ```
 
-## 📜 许可证与作者
+## 开发验证
 
-- **作者**: Veegn (veegn.me@gmail.com)
-- **许可证**: [MIT License](./LICENSE)
+常用检查：
 
----
-*Made with ❤️ using Rust and Axum.*
+```bash
+cargo fmt
+cargo check
+cargo test --lib
+cargo test --test integration -- --nocapture
+```
+
+如果本地正在运行 `target/debug/domain-scanner.exe`，Windows 可能会因为文件锁导致完整测试无法重新构建。先停止运行中的服务后再执行完整测试。
+
+## 许可证与作者
+
+- 作者: Veegn (veegn.me@gmail.com)
+- 许可证: [MIT License](./LICENSE)

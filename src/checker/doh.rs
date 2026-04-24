@@ -4,7 +4,7 @@
 //! If a domain has NS records, it's very likely registered.
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,7 +24,7 @@ pub const DEFAULT_DOH_SERVERS: &[&str] = &[
 ];
 
 /// Shared HTTP client for DoH queries
-static DOH_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+static DOH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -279,8 +279,18 @@ impl DomainChecker for DohChecker {
 mod tests {
     use super::*;
 
+    fn live_network_enabled() -> bool {
+        std::env::var("DOMAIN_SCANNER_LIVE_TESTS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn test_doh_google_com() {
+        if !live_network_enabled() {
+            return;
+        }
+
         let checker = DohChecker::new().await;
         // google.com has NS records
         let result = checker.check("google.com").await;
@@ -303,6 +313,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_doh_nonexistent() {
+        if !live_network_enabled() {
+            return;
+        }
+
         let checker = DohChecker::new().await;
         // Use a random domain that definitely doesn't exist
         let domain = format!(

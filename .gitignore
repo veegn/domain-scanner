@@ -46,8 +46,8 @@ Thumbs.db
 
 target/
 data/cache/
+data/scans.db*
 .playwright-cli/
 logs/
 web/published/
 .agents/
-*.db

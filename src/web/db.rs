@@ -10,9 +10,16 @@ pub async fn init_db() -> SqlitePool {
         .await
         .unwrap();
 
-    let _ = sqlx::query("PRAGMA foreign_keys = ON;")
-        .execute(&pool)
-        .await;
+    let pragmas = [
+        "PRAGMA foreign_keys = ON;",
+        "PRAGMA journal_mode = WAL;",
+        "PRAGMA synchronous = NORMAL;",
+        "PRAGMA busy_timeout = 5000;",
+        "PRAGMA temp_store = MEMORY;",
+    ];
+    for pragma in pragmas {
+        let _ = sqlx::query(pragma).execute(&pool).await;
+    }
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scans (
@@ -139,9 +146,19 @@ pub async fn init_db() -> SqlitePool {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_results_scan_id ON results(scan_id)")
         .execute(&pool)
         .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_results_scan_available_domain ON results(scan_id, available, domain)",
+    )
+    .execute(&pool)
+    .await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_scan_id ON scan_logs(scan_id)")
         .execute(&pool)
         .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_scan_id_id ON scan_logs(scan_id, id)",
+    )
+    .execute(&pool)
+    .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_scans_status_priority ON scans(status, priority DESC, created_at ASC)",
     )
@@ -157,7 +174,17 @@ pub async fn init_db() -> SqlitePool {
             .execute(&pool)
             .await;
     let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_published_scans_status_published_at ON published_scans(status, published_at DESC, updated_at DESC)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_published_domains_domain ON published_domains(domain)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_published_domains_domain_nocase ON published_domains(domain COLLATE NOCASE)",
     )
     .execute(&pool)
     .await;

@@ -12,6 +12,10 @@ pub struct DomainGenerator {
     pub generated: Arc<AtomicI64>,
 }
 
+fn normalized_skip_count(skip_count: i64) -> usize {
+    if skip_count < 0 { 0 } else { skip_count as usize }
+}
+
 pub fn generate_domains(
     length: usize,
     suffix: String,
@@ -75,11 +79,7 @@ pub fn generate_domains(
         let suffix = suffix.clone();
         let priority_set_clone = priority_set.clone();
         tokio::spawn(async move {
-            let skip = if skip_count < 0 {
-                0
-            } else {
-                skip_count as usize
-            };
+            let skip = normalized_skip_count(skip_count);
             let mut current_idx = 0;
 
             // Priority Phase
@@ -133,20 +133,19 @@ pub fn generate_domains(
 
         let charset_len = charset.len();
         if charset_len > 0 && length > 0 {
-            total_estimated =
+            total_estimated = if regex.is_none() {
+                exact_combination_count(&charset, length, &priority_set)
+            } else {
                 count_matching_combinations(&charset, length, regex.as_ref(), &priority_set)
-                    + priority_set_len;
+                    + priority_set_len
+            };
 
             let tx = tx.clone();
             let suffix = suffix.clone();
             let priority_set_clone = priority_set.clone();
 
             tokio::spawn(async move {
-                let skip = if skip_count < 0 {
-                    0
-                } else {
-                    skip_count as usize
-                };
+                let skip = normalized_skip_count(skip_count);
                 let mut current_idx = 0;
 
                 // Priority Phase
@@ -282,15 +281,27 @@ fn count_matching_combinations(
     count
 }
 
+fn exact_combination_count(charset: &str, length: usize, priority_set: &HashSet<String>) -> usize {
+    let charset_size = charset.len();
+    let total = charset_size.pow(length as u32);
+
+    let duplicate_priority_count = priority_set
+        .iter()
+        .filter(|word| word.len() == length && word.bytes().all(|b| charset.as_bytes().contains(&b)))
+        .count();
+
+    total + priority_set.len().saturating_sub(duplicate_priority_count)
+}
+
 fn build_combination(mut counter: usize, charset_chars: &[char], length: usize) -> String {
     let charset_size = charset_chars.len();
-    let mut current = String::with_capacity(length);
-    for _ in 0..length {
-        let idx = counter % charset_size;
-        current.insert(0, charset_chars[idx]);
+    let mut current = vec![0_u8; length];
+    for position in (0..length).rev() {
+        let charset_idx = counter % charset_size;
+        current[position] = charset_chars[charset_idx] as u8;
         counter /= charset_size;
     }
-    current
+    String::from_utf8(current).expect("domain charset is always ASCII")
 }
 
 #[cfg(test)]

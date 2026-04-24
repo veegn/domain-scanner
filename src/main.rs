@@ -122,6 +122,7 @@ async fn main() {
         "startup task scan complete"
     );
 
+    let mut should_wake_worker = false;
     for task in pending_tasks {
         if let Ok(id) = task.try_get::<String, _>("id") {
             warn!(
@@ -130,8 +131,12 @@ async fn main() {
                 scan_id = %id,
                 "re-queueing unfinished task"
             );
-            let _ = state.task_tx.try_send(());
+            should_wake_worker = true;
         }
+    }
+
+    if should_wake_worker {
+        let _ = state.task_tx.try_send(());
     }
 
     // 10. Build router and start server

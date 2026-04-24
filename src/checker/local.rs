@@ -4,7 +4,7 @@
 //! without making any network requests. It's the fastest checker.
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashSet;
 
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
@@ -12,7 +12,7 @@ use super::traits::{CheckResult, CheckerPriority, DomainChecker};
 // Conservative list of strictly reserved words (RFC 2606, etc.)
 // These are names that are technically reserved or invalid for registration
 // across standardized TLDs.
-static RESERVED_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+static RESERVED_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let mut s = HashSet::new();
     let words = vec![
         // RFC 2606 Reserved Names
