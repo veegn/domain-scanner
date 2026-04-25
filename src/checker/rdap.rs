@@ -21,6 +21,12 @@ static RDAP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 const RDAP_BOOTSTRAP_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+const BUILTIN_RDAP_ENDPOINTS: &[(&str, &str)] = &[
+    ("uk", "https://rdap.nominet.uk/uk/"),
+    ("co.uk", "https://rdap.nominet.uk/uk/"),
+    ("org.uk", "https://rdap.nominet.uk/uk/"),
+    ("me.uk", "https://rdap.nominet.uk/uk/"),
+];
 
 #[derive(Debug, Clone)]
 pub struct RdapChecker {
@@ -71,7 +77,7 @@ impl RdapChecker {
         bootstrap_url: Option<String>,
         cache_dir: Option<PathBuf>,
     ) -> Self {
-        let mut endpoint_map = normalize_endpoint_map(custom_endpoints);
+        let mut endpoint_map = builtin_endpoint_map();
 
         if let Some(url) = bootstrap_url.filter(|url| !url.trim().is_empty()) {
             match fetch_bootstrap_map_with_cache(&url, cache_dir.as_deref()).await {
@@ -98,6 +104,8 @@ impl RdapChecker {
                 }
             }
         }
+
+        endpoint_map.extend(normalize_endpoint_map(custom_endpoints));
 
         Self {
             endpoint_map: Arc::new(endpoint_map),
@@ -215,6 +223,13 @@ fn normalize_endpoint_map(input: HashMap<String, String>) -> HashMap<String, Str
         }
     }
     normalized
+}
+
+fn builtin_endpoint_map() -> HashMap<String, String> {
+    BUILTIN_RDAP_ENDPOINTS
+        .iter()
+        .map(|(suffix, endpoint)| (suffix.to_string(), endpoint.to_string()))
+        .collect()
 }
 
 fn ensure_trailing_slash(endpoint: &str) -> String {

@@ -551,6 +551,13 @@ async fn test_rdap_checker_metadata() {
 }
 
 #[tokio::test]
+async fn test_rdap_builtin_supports_uk_without_bootstrap() {
+    let checker = RdapChecker::with_config(std::collections::HashMap::new(), None).await;
+    assert!(checker.supports_tld("uk"));
+    assert_eq!(checker.matching_suffix("4tb.uk").as_deref(), Some("uk"));
+}
+
+#[tokio::test]
 async fn test_doh_round_robin() {
     if !live_network_enabled() {
         return;

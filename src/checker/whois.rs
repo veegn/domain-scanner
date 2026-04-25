@@ -373,6 +373,23 @@ impl WhoisChecker {
             || lower.contains("no matching record")
     }
 
+    fn is_registered(&self, response: &str) -> bool {
+        let lower = response.to_ascii_lowercase();
+        [
+            "domain name:",
+            "registrar:",
+            "registered on:",
+            "registration time:",
+            "creation date:",
+            "expiry date:",
+            "expiration date:",
+            "domain status:",
+            "name servers:",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    }
+
     fn is_rate_limited(&self, response: &str) -> bool {
         let lower = response.to_lowercase();
         lower.contains("limit exceeded")
@@ -484,6 +501,24 @@ impl DomainChecker for WhoisChecker {
 
         match self.query_whois(domain, server).await {
             Ok(response) => {
+                let response = response.trim();
+
+                if response.is_empty() {
+                    self.cb.record_failure();
+                    warn!(
+                        target: "domain_scanner::checker::whois",
+                        context = "query",
+                        domain,
+                        server,
+                        "WHOIS returned empty response"
+                    );
+                    return CheckResult::error(format!(
+                        "WHOIS returned empty response from {}",
+                        server
+                    ))
+                    .with_trace(format!("WHOIS: empty response via {}", server));
+                }
+
                 if self.is_rate_limited(&response) {
                     self.cb.record_failure();
                     let hint = self.sniff_rate_limit_hint(&response);
@@ -503,15 +538,28 @@ impl DomainChecker for WhoisChecker {
                     .with_trace(format!("WHOIS: rate limited via {}", server));
                 }
 
-                self.cb.record_success();
-                self.record_success(server).await;
-
                 if self.is_available(&response) {
+                    self.cb.record_success();
+                    self.record_success(server).await;
                     CheckResult::available().with_trace(format!("WHOIS: available via {}", server))
-                } else {
+                } else if self.is_registered(&response) {
+                    self.cb.record_success();
+                    self.record_success(server).await;
                     let expiry = self.extract_expiry(&response);
                     CheckResult::registered_with_expiry(vec!["WHOIS".to_string()], expiry)
                         .with_trace(format!("WHOIS: registered via {}", server))
+                } else {
+                    self.cb.record_failure();
+                    warn!(
+                        target: "domain_scanner::checker::whois",
+                        context = "query",
+                        domain,
+                        server,
+                        response_preview = %response.chars().take(120).collect::<String>(),
+                        "WHOIS returned inconclusive response"
+                    );
+                    CheckResult::error(format!("WHOIS inconclusive response from {}", server))
+                        .with_trace(format!("WHOIS: inconclusive via {}", server))
                 }
             }
             Err(e) => {
@@ -686,6 +734,27 @@ fn now_epoch_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_registered_response_requires_markers() {
+        let checker = WhoisChecker::new();
+        let response = "Domain Name: GOOGLE.COM\nRegistrar: MarkMonitor Inc.\nName Server: NS1.GOOGLE.COM";
+        assert!(checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_empty_response_is_not_registered() {
+        let checker = WhoisChecker::new();
+        assert!(!checker.is_registered(""));
+        assert!(!checker.is_available(""));
+    }
+
+    #[test]
+    fn test_free_response_still_detected_as_available() {
+        let checker = WhoisChecker::new();
+        assert!(checker.is_available("No match for domain \"4TB.UK\""));
+        assert!(!checker.is_registered("No match for domain \"4TB.UK\""));
+    }
 
     #[test]
     fn test_sniff_rate_limit_hint_parses_retry_after_and_qpm() {
