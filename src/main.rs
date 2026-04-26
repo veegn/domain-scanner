@@ -3,7 +3,6 @@ use domain_scanner::checker::CheckerRegistry;
 use domain_scanner::config::AppConfig;
 use domain_scanner::logging;
 use domain_scanner::web;
-use sqlx::Row;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -104,38 +103,29 @@ async fn main() {
         streams,
     });
 
-    // 9. Resume unfinished tasks from previous run
-    let pending_tasks = sqlx::query(
-        "SELECT id FROM scans
-         WHERE status IN ('pending', 'running')
-           AND (retry_not_before IS NULL OR retry_not_before <= strftime('%s','now'))
-         ORDER BY created_at ASC",
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    // 9. Recover stale transient statuses and resume ready unfinished tasks.
+    let recovery = web::recover_startup_tasks(&state.db).await;
 
     info!(
         target: "domain_scanner::main",
         context = "task_resume",
-        resumable_tasks = pending_tasks.len(),
+        resumable_tasks = recovery.ready_scan_ids.len(),
+        recovered_cancelling = recovery.recovered_cancelling,
+        recovered_pausing = recovery.recovered_pausing,
+        repaired_counters = recovery.repaired_counters,
         "startup task scan complete"
     );
 
-    let mut should_wake_worker = false;
-    for task in pending_tasks {
-        if let Ok(id) = task.try_get::<String, _>("id") {
-            warn!(
-                target: "domain_scanner::main",
-                context = "task_resume",
-                scan_id = %id,
-                "re-queueing unfinished task"
-            );
-            should_wake_worker = true;
-        }
+    for id in &recovery.ready_scan_ids {
+        warn!(
+            target: "domain_scanner::main",
+            context = "task_resume",
+            scan_id = %id,
+            "re-queueing unfinished task"
+        );
     }
 
-    if should_wake_worker {
+    if recovery.should_wake_worker() {
         let _ = state.task_tx.try_send(());
     }
 

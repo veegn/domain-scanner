@@ -29,6 +29,8 @@ pub(super) async fn run_scan_logic(
 ) {
     let task_signal = task_control.register(scan_id);
     let scan_stream = streams.sender_for_scan(scan_id).await;
+    mark_scan_running(db, &streams, scan_id).await;
+
     let counts = get_result_counts(db, scan_id).await.unwrap_or((0, 0));
     let resume_processed = counts.0;
     let resume_found = counts.1;

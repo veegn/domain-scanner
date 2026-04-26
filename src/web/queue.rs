@@ -1,5 +1,5 @@
 use super::models::{StartScanRequest, StreamHub, TaskControl};
-use super::scan_runtime::{add_event_log, mark_scan_running, run_scan_logic};
+use super::scan_runtime::{add_event_log, run_scan_logic};
 use crate::checker::CheckerRegistry;
 use serde_json::json;
 use sqlx::{Row, sqlite::SqlitePool};
@@ -78,8 +78,6 @@ pub async fn start_task_worker(
                 ],
             )
             .await;
-
-            mark_scan_running(&db, &streams, &scan_id).await;
 
             run_scan_logic(
                 &db,

@@ -144,6 +144,11 @@ impl TaskControl {
         let mut flags = self.flags.lock().expect("task control mutex poisoned");
         flags.remove(scan_id);
     }
+
+    pub fn contains(&self, scan_id: &str) -> bool {
+        let flags = self.flags.lock().expect("task control mutex poisoned");
+        flags.contains_key(scan_id)
+    }
 }
 
 impl StartScanRequest {

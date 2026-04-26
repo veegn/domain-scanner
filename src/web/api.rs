@@ -786,8 +786,9 @@ async fn delete_scan(
         }
     };
     let (status, total, processed, found) = row;
+    let has_live_task = state.task_control.contains(&id);
 
-    if matches!(status.as_str(), "running" | "cancelling") {
+    if has_live_task && matches!(status.as_str(), "pending" | "running" | "cancelling") {
         state.task_control.cancel(&id);
         match sqlx::query("UPDATE scans SET status = 'cancelling' WHERE id = ?")
             .bind(&id)

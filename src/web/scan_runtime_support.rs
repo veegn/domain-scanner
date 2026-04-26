@@ -78,7 +78,9 @@ impl ScanRuntimeState {
 pub(super) async fn mark_scan_running(db: &SqlitePool, streams: &StreamHub, scan_id: &str) {
     if let Err(err) = sqlx::query(
         "UPDATE scans
-         SET status = 'running', retry_not_before = NULL, started_at = CURRENT_TIMESTAMP
+         SET status = 'running',
+             retry_not_before = NULL,
+             started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
          WHERE id = ?",
     )
     .bind(scan_id)
