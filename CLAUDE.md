@@ -71,7 +71,7 @@ Real-time updates are pushed via Server-Sent Events:
 
 ### Publish system (`src/publish/`)
 
-Completed scans can be published as static pages under `web/published/{slug}/` with `meta.json`, `data.json`, and a static `index.html`. DB tables `published_scans` and `published_domains` support cross-scan search at `/api/public/search?q=<domain>`.
+Completed scans can be published as static pages under `data/published/{slug}/` with `meta.json`, `data.json`, and a static `index.html`. DB tables `published_scans` and `published_domains` support cross-scan search at `/api/public/search?q=<domain>`.
 
 ### Frontend (`web/index.html`)
 

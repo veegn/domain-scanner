@@ -98,7 +98,7 @@ logs/                            # 每日滚动日志
 data/seed.sql                    # TLD 和 WHOIS server 初始化数据
 data/cache/rdap/                 # RDAP bootstrap 本地缓存
 data/cache/whois/rate_limits.json # WHOIS server 限流嗅探缓存
-web/published/<slug>/            # 已发布的静态结果页
+data/published/<slug>/            # 已发布的静态结果页
 ```
 
 ## 扫描规则
@@ -155,7 +155,7 @@ web/published/<slug>/            # 已发布的静态结果页
 扫描完成后，可以将结果发布为公开静态页面。发布过程会：
 
 - 生成唯一 `slug`
-- 写入 `web/published/<slug>/index.html`
+- 写入 `data/published/<slug>/index.html`
 - 写入 `meta.json`
 - 写入 `data.json`
 - 写入 `published_scans`

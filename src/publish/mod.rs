@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::web::models::{PublishScanRequest, PublishedScanSummary};
 
-const PUBLISHED_ROOT: &str = "web/published";
+const PUBLISHED_ROOT: &str = "data/published";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PublishedPageMeta {

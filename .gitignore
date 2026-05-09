@@ -49,5 +49,5 @@ data/cache/
 data/scans.db*
 .playwright-cli/
 logs/
-web/published/
+data/published/
 .agents/

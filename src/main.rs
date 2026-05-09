@@ -130,7 +130,9 @@ async fn main() {
     }
 
     // 10. Build router and start server
-    let app = web::router(state).fallback_service(tower_http::services::ServeDir::new("web"));
+    let app = web::router(state)
+        .nest_service("/published", tower_http::services::ServeDir::new("data/published"))
+        .fallback_service(tower_http::services::ServeDir::new("web"));
 
     info!(
         target: "domain_scanner::main",
