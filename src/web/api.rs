@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
@@ -17,6 +18,7 @@ use uuid::Uuid;
 
 use crate::publish;
 
+use super::dictionary::{self, RenameRequest};
 use super::models::{
     AppState, PublicPublishedScanSummary, PublishScanRequest, PublishedDomainHit,
     PublishedScanSummary, ReorderRequest, ScanLogEvent as LogRow, ScanResultEvent as ResultRow,
@@ -52,6 +54,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/public/published", get(get_public_published_scans))
         .route("/api/public/search", get(search_public_domains))
         .route("/api/scan/:id/reorder", post(reorder_scan))
+        .route("/api/dictionary", post(upload_dictionary))
+        .route("/api/dictionaries", get(list_dictionaries))
+        .route("/api/dictionary/:id", get(get_dictionary).put(rename_dictionary).delete(delete_dictionary))
+        .route("/api/dictionary/:id/words", get(get_dictionary_words))
         .with_state(state)
 }
 
@@ -75,6 +81,8 @@ async fn start_scan(
         serde_json::to_string(&payload.priority_words).unwrap_or_else(|_| "null".to_string());
     let domains_json =
         serde_json::to_string(&payload.domains).unwrap_or_else(|_| "null".to_string());
+    let dictionary_words_json =
+        serde_json::to_string(&payload.dictionary_words).unwrap_or_else(|_| "null".to_string());
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
@@ -94,10 +102,14 @@ async fn start_scan(
     }
 
     if let Err(e) =
-        sqlx::query("INSERT INTO scan_payloads (scan_id, priority_words, domains) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO scan_payloads (scan_id, priority_words, domains, dictionary_words, prefix, postfix, dictionary_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .bind(&scan_id)
             .bind(priority_words_json)
             .bind(domains_json)
+            .bind(dictionary_words_json)
+            .bind(&payload.prefix)
+            .bind(&payload.postfix)
+            .bind(&payload.dictionary_id)
             .execute(&mut *tx)
             .await
     {
@@ -979,5 +991,101 @@ async fn resume_scan(
             }),
         )
             .into_response(),
+    }
+}
+
+// --- Dictionary management handlers ---
+
+#[derive(serde::Deserialize)]
+struct DictionaryUploadQuery {
+    name: Option<String>,
+}
+
+async fn upload_dictionary(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DictionaryUploadQuery>,
+    body: Bytes,
+) -> ApiResponse {
+    let name = params.name.unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "dictionary name is required".to_string());
+    }
+    if body.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "dictionary body cannot be empty".to_string());
+    }
+
+    match dictionary::create_dictionary(&state.db, &name, &body).await {
+        Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
+        Err(error) => {
+            let msg = error.to_string();
+            let status = if msg.contains("too many") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            api_error(status, msg)
+        }
+    }
+}
+
+async fn list_dictionaries(State(state): State<Arc<AppState>>) -> ApiResponse {
+    match dictionary::list_dictionaries(&state.db).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn get_dictionary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match dictionary::get_dictionary(&state.db, &id).await {
+        Ok(Some(detail)) => Json(detail).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn rename_dictionary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<RenameRequest>,
+) -> ApiResponse {
+    if payload.name.trim().is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "name cannot be empty".to_string());
+    }
+    match dictionary::rename_dictionary(&state.db, &id, payload.name.trim()).await {
+        Ok(Some(summary)) => Json(summary).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn delete_dictionary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match dictionary::delete_dictionary(&state.db, &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct WordPreviewQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+async fn get_dictionary_words(
+    Path(id): Path<String>,
+    Query(query): Query<WordPreviewQuery>,
+) -> ApiResponse {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100).min(1000);
+    match dictionary::get_dictionary_words(&id, offset, limit).await {
+        Ok(words) => Json(words).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

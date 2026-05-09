@@ -51,7 +51,28 @@ pub async fn init_db() -> SqlitePool {
             scan_id TEXT PRIMARY KEY,
             priority_words TEXT,
             domains TEXT,
+            dictionary_words TEXT,
+            prefix TEXT,
+            postfix TEXT,
             FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_words TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN prefix TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN postfix TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_id TEXT").execute(&pool).await;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dictionaries (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            word_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
     )
     .execute(&pool)
@@ -195,6 +216,11 @@ pub async fn init_db() -> SqlitePool {
     .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_published_domains_published_at ON published_domains(published_at DESC)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dictionaries_updated_at ON dictionaries(updated_at DESC)",
     )
     .execute(&pool)
     .await;

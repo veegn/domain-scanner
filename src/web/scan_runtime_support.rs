@@ -172,6 +172,79 @@ pub(super) async fn prepare_job_feeder(
         return Ok(total);
     }
 
+    if let Some(dict_id) = &params.dictionary_id {
+        let dict_words = match crate::web::dictionary::load_dictionary_words(dict_id).await {
+            Ok(words) => words,
+            Err(err) => {
+                let _ = add_event_log(
+                    db,
+                    streams,
+                    scan_id,
+                    "ERROR",
+                    "dictionary.load_failed",
+                    None,
+                    Some(format!("Failed to load dictionary {}: {}", dict_id, err)),
+                    vec![("dictionary_id", json!(dict_id)), ("error", json!(err.to_string()))],
+                )
+                .await;
+                let _ = sqlx::query(
+                    "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                )
+                .bind(scan_id)
+                .execute(db)
+                .await;
+                task_control.unregister(scan_id);
+                return Err(());
+            }
+        };
+
+        let total = dict_words.len() as i64;
+        let prefix = params.prefix.clone().unwrap_or_default();
+        let postfix = params.postfix.clone().unwrap_or_default();
+        let suffix = params.suffix.clone();
+
+        let domains: Vec<String> = dict_words
+            .into_iter()
+            .map(|word| format!("{}{}{}{}", prefix, word, postfix, suffix))
+            .collect();
+
+        spawn_domain_feeder(
+            domains,
+            resume_processed as usize,
+            jobs_tx.clone(),
+            scan_id.to_string(),
+            "dictionary",
+            feeder_done,
+            pending_domains,
+            task_signal,
+        );
+        return Ok(total);
+    }
+
+    if let Some(dict_words) = params.dictionary_words.clone() {
+        let total = dict_words.len() as i64;
+        let prefix = params.prefix.clone().unwrap_or_default();
+        let postfix = params.postfix.clone().unwrap_or_default();
+        let suffix = params.suffix.clone();
+        
+        let domains: Vec<String> = dict_words
+            .into_iter()
+            .map(|word| format!("{}{}{}{}", prefix, word, postfix, suffix))
+            .collect();
+
+        spawn_domain_feeder(
+            domains,
+            resume_processed as usize,
+            jobs_tx.clone(),
+            scan_id.to_string(),
+            "dictionary",
+            feeder_done,
+            pending_domains,
+            task_signal,
+        );
+        return Ok(total);
+    }
+
     let domain_gen = match generator::generate_domains(
         params.length,
         params.suffix.clone(),

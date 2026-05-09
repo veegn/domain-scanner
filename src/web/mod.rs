@@ -1,5 +1,6 @@
 pub mod api;
 pub mod db;
+pub mod dictionary;
 pub mod models;
 pub mod queue;
 pub mod recovery;

@@ -13,6 +13,7 @@ const MAX_PRIORITY_WORD_LENGTH: usize = 63;
 const MAX_DOMAINS_PER_SCAN: usize = 50_000;
 const MAX_DOMAIN_LENGTH: usize = 253;
 const MAX_SUFFIX_LENGTH: usize = 32;
+const MAX_DICTIONARY_WORDS: usize = 2_000_000;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,12 +25,20 @@ pub struct AppState {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct StartScanRequest {
+    #[serde(default)]
     pub length: usize,
+    #[serde(default)]
     pub suffix: String,
+    #[serde(default)]
     pub pattern: String,
     pub regex: Option<String>,
     pub priority_words: Option<Vec<String>>,
     pub domains: Option<Vec<String>>,
+    pub dictionary_words: Option<Vec<String>>,
+    #[serde(default)]
+    pub dictionary_id: Option<String>,
+    pub prefix: Option<String>,
+    pub postfix: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -178,6 +187,40 @@ impl StartScanRequest {
 
             for domain in domains {
                 validate_domain(domain)?;
+            }
+
+            return Ok(());
+        }
+
+        if let Some(_dict_id) = &self.dictionary_id {
+            if self.dictionary_words.is_some() {
+                return Err("Cannot provide both dictionary_id and dictionary_words".to_string());
+            }
+
+            validate_suffix(&self.suffix)?;
+            return Ok(());
+        }
+
+        if let Some(dict_words) = &self.dictionary_words {
+            if dict_words.is_empty() {
+                return Err("Dictionary words list cannot be empty".to_string());
+            }
+
+            if dict_words.len() > MAX_DICTIONARY_WORDS {
+                return Err(format!(
+                    "Too many dictionary words (max {})",
+                    MAX_DICTIONARY_WORDS
+                ));
+            }
+
+            validate_suffix(&self.suffix)?;
+            
+            let prefix = self.prefix.as_deref().unwrap_or("");
+            let postfix = self.postfix.as_deref().unwrap_or("");
+
+            for word in dict_words {
+                let domain = format!("{}{}{}{}", prefix, word, postfix, self.suffix);
+                validate_domain(&domain)?;
             }
 
             return Ok(());
