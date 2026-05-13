@@ -132,6 +132,9 @@ impl PendingScanTask {
         let dictionary_words_json: String = row
             .try_get("dictionary_words")
             .unwrap_or_else(|_| "null".to_string());
+        let dictionary_ids_json: String = row
+            .try_get("dictionary_ids")
+            .unwrap_or_else(|_| "null".to_string());
 
         Self {
             scan_id,
@@ -144,6 +147,9 @@ impl PendingScanTask {
                 domains: serde_json::from_str(&domains_json).unwrap_or(None),
                 dictionary_words: serde_json::from_str(&dictionary_words_json).unwrap_or(None),
                 dictionary_id: row.try_get("dictionary_id").unwrap_or(None),
+                dictionary_ids: serde_json::from_str(&dictionary_ids_json).unwrap_or(None),
+                separator: row.try_get("separator").unwrap_or(None),
+                format_template: row.try_get("format_template").unwrap_or(None),
                 prefix: row.try_get("prefix").unwrap_or(None),
                 postfix: row.try_get("postfix").unwrap_or(None),
             },
@@ -157,7 +163,7 @@ async fn fetch_next_ready_task(db: &SqlitePool) -> Option<sqlx::sqlite::SqliteRo
     match sqlx::query(
         "
         SELECT s.id, s.length, s.suffix, s.pattern, s.regex, s.processed, s.found,
-               p.priority_words, p.domains, p.dictionary_words, p.prefix, p.postfix, p.dictionary_id
+               p.priority_words, p.domains, p.dictionary_words, p.prefix, p.postfix, p.dictionary_id, p.dictionary_ids, p.separator, p.format_template
         FROM scans s
         LEFT JOIN scan_payloads p ON s.id = p.scan_id
         WHERE s.status IN ('pending', 'running')

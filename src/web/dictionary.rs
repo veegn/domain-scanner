@@ -148,6 +148,18 @@ pub async fn load_dictionary_words(id: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+pub async fn load_multiple_dictionary_words(ids: &[String]) -> Result<Vec<Vec<String>>> {
+    let mut all_words = Vec::with_capacity(ids.len());
+    for id in ids {
+        let words = load_dictionary_words(id).await?;
+        if words.is_empty() {
+            anyhow::bail!("Dictionary '{}' is empty", id);
+        }
+        all_words.push(words);
+    }
+    Ok(all_words)
+}
+
 pub async fn rename_dictionary(
     db: &SqlitePool,
     id: &str,

@@ -304,6 +304,140 @@ fn build_combination(mut counter: usize, charset_chars: &[char], length: usize) 
     String::from_utf8(current).expect("domain charset is always ASCII")
 }
 
+/// A lazy odometer-based iterator that yields Cartesian product combinations
+/// of words from multiple dictionaries.
+///
+/// The `format_template` string uses `{0}`, `{1}`, ... as placeholders for
+/// words from each dictionary. The `suffix` (TLD) is appended after the template.
+///
+/// The "least significant" dimension is the last dictionary in `word_lists`,
+/// meaning that dict advances fastest.
+pub struct DictionaryCombinator {
+    word_lists: Vec<Vec<String>>,
+    indices: Vec<usize>,
+    format_template: String,
+    suffix: String,
+    done: bool,
+}
+
+impl DictionaryCombinator {
+    pub fn new(word_lists: Vec<Vec<String>>, format_template: String, suffix: String) -> Self {
+        let list_count = word_lists.len();
+        let done = list_count == 0 || word_lists.iter().any(|l| l.is_empty());
+        Self {
+            word_lists,
+            indices: vec![0; list_count],
+            format_template,
+            suffix,
+            done,
+        }
+    }
+
+    /// Build a combinator from legacy prefix/separator/postfix fields.
+    /// Constructs the equivalent template string.
+    pub fn from_parts(
+        word_lists: Vec<Vec<String>>,
+        prefix: &str,
+        separator: &str,
+        postfix: &str,
+        suffix: String,
+    ) -> Self {
+        let mut template = String::from(prefix);
+        for i in 0..word_lists.len() {
+            if i > 0 && !separator.is_empty() {
+                template.push_str(separator);
+            }
+            template.push_str(&format!("{{{}}}", i));
+        }
+        template.push_str(postfix);
+        Self::new(word_lists, template, suffix)
+    }
+
+    pub fn total_combinations(&self) -> usize {
+        self.word_lists
+            .iter()
+            .fold(1usize, |acc, wl| acc.saturating_mul(wl.len()))
+    }
+
+    pub fn current_position(&self) -> usize {
+        if self.done {
+            return self.total_combinations();
+        }
+        let mut pos = 0usize;
+        let mut multiplier = 1usize;
+        for i in (0..self.word_lists.len()).rev() {
+            pos += self.indices[i] * multiplier;
+            multiplier *= self.word_lists[i].len();
+        }
+        pos
+    }
+
+    pub fn set_position(&mut self, pos: usize) {
+        let total = self.total_combinations();
+        if pos >= total {
+            self.done = true;
+            return;
+        }
+        let mut remaining = pos;
+        for i in (0..self.word_lists.len()).rev() {
+            let size = self.word_lists[i].len();
+            if size > 0 {
+                self.indices[i] = remaining % size;
+                remaining /= size;
+            } else {
+                self.indices[i] = 0;
+            }
+        }
+        self.done = false;
+    }
+
+    pub fn skip_to(&mut self, pos: usize) {
+        self.set_position(pos);
+    }
+
+    pub fn next(&mut self) -> Option<String> {
+        if self.done {
+            return None;
+        }
+
+        // Render template by replacing {N} placeholders with current dict words
+        let mut domain = String::new();
+        let template_bytes = self.format_template.as_bytes();
+        let mut i = 0;
+        while i < template_bytes.len() {
+            if template_bytes[i] == b'{' {
+                if let Some(end) = template_bytes[i..].iter().position(|&b| b == b'}') {
+                    let idx_str = &self.format_template[i + 1..i + end];
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if let Some(list) = self.word_lists.get(idx) {
+                            domain.push_str(&list[self.indices[idx]]);
+                            i += end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            domain.push(template_bytes[i] as char);
+            i += 1;
+        }
+        domain.push_str(&self.suffix);
+
+        // Advance odometer (least significant = last dict)
+        for i in (0..self.indices.len()).rev() {
+            self.indices[i] += 1;
+            if self.indices[i] < self.word_lists[i].len() {
+                break;
+            }
+            self.indices[i] = 0;
+            if i == 0 {
+                self.done = true;
+            }
+        }
+
+        Some(domain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +493,149 @@ mod tests {
         assert_eq!(skip_list.len(), 34);
         assert_eq!(skip_list[0], "c.com"); // Should be c.com
         assert_eq!(skip_list, full_list[2..].to_vec());
+    }
+
+    #[test]
+    fn test_combinator_two_dicts() {
+        let dicts = vec![
+            vec!["red".to_string(), "blue".to_string()],
+            vec!["fox".to_string(), "bird".to_string()],
+        ];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "{0}{1}".into(),
+            ".io".into(),
+        );
+        assert_eq!(c.total_combinations(), 4);
+        assert_eq!(c.next(), Some("redfox.io".to_string()));
+        assert_eq!(c.next(), Some("redbird.io".to_string()));
+        assert_eq!(c.next(), Some("bluefox.io".to_string()));
+        assert_eq!(c.next(), Some("bluebird.io".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_with_separator() {
+        let dicts = vec![
+            vec!["go".to_string()],
+            vec!["app".to_string(), "tech".to_string()],
+        ];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "{0}-{1}".into(),
+            ".com".into(),
+        );
+        assert_eq!(c.next(), Some("go-app.com".to_string()));
+        assert_eq!(c.next(), Some("go-tech.com".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_with_prefix_postfix() {
+        let dicts = vec![
+            vec!["app".to_string(), "web".to_string()],
+            vec!["dev".to_string()],
+        ];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "my{0}-{1}hq".into(),
+            ".xyz".into(),
+        );
+        assert_eq!(c.next(), Some("myapp-devhq.xyz".to_string()));
+        assert_eq!(c.next(), Some("myweb-devhq.xyz".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_set_position() {
+        let dicts = vec![
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            vec!["x".to_string(), "y".to_string()],
+        ];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "{0}{1}".into(),
+            ".com".into(),
+        );
+        c.skip_to(2);
+        assert_eq!(c.current_position(), 2);
+        assert_eq!(c.next(), Some("bx.com".to_string()));
+        assert_eq!(c.current_position(), 3);
+        assert_eq!(c.next(), Some("by.com".to_string()));
+        c.skip_to(6);
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_empty_dict() {
+        let dicts = vec![vec!["a".to_string()], vec![]];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "{0}{1}".into(),
+            ".com".into(),
+        );
+        assert_eq!(c.total_combinations(), 0);
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_single_dict() {
+        let dicts = vec![vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+        ]];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "{0}".into(),
+            ".net".into(),
+        );
+        assert_eq!(c.next(), Some("alpha.net".to_string()));
+        assert_eq!(c.next(), Some("beta.net".to_string()));
+        assert_eq!(c.next(), Some("gamma.net".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_from_parts() {
+        let dicts = vec![
+            vec!["app".to_string(), "web".to_string()],
+            vec!["dev".to_string()],
+        ];
+        let mut c = DictionaryCombinator::from_parts(
+            dicts,
+            "go",
+            "-",
+            "hq",
+            ".xyz".into(),
+        );
+        assert_eq!(c.next(), Some("goapp-devhq.xyz".to_string()));
+        assert_eq!(c.next(), Some("goweb-devhq.xyz".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_template_placeholder() {
+        let dicts = vec![vec!["a".to_string(), "b".to_string()]];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "just-text-{0}nope".into(),
+            ".com".into(),
+        );
+        assert_eq!(c.next(), Some("just-text-anope.com".to_string()));
+        assert_eq!(c.next(), Some("just-text-bnope.com".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_template_oob_kept() {
+        let dicts = vec![vec!["a".to_string()]];
+        let mut c = DictionaryCombinator::new(
+            dicts,
+            "pre-{99}-literal".into(),
+            ".com".into(),
+        );
+        assert_eq!(c.next(), Some("pre-{99}-literal.com".to_string()));
+        assert_eq!(c.next(), None);
     }
 }

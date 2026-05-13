@@ -14,6 +14,7 @@ const MAX_DOMAINS_PER_SCAN: usize = 50_000;
 const MAX_DOMAIN_LENGTH: usize = 253;
 const MAX_SUFFIX_LENGTH: usize = 32;
 const MAX_DICTIONARY_WORDS: usize = 2_000_000;
+pub const MAX_DICTIONARY_PRODUCT: usize = 2_000_000;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +38,12 @@ pub struct StartScanRequest {
     pub dictionary_words: Option<Vec<String>>,
     #[serde(default)]
     pub dictionary_id: Option<String>,
+    #[serde(default)]
+    pub dictionary_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub separator: Option<String>,
+    #[serde(default)]
+    pub format_template: Option<String>,
     pub prefix: Option<String>,
     pub postfix: Option<String>,
 }
@@ -198,6 +205,31 @@ impl StartScanRequest {
             }
 
             validate_suffix(&self.suffix)?;
+            return Ok(());
+        }
+
+        if let Some(dict_ids) = &self.dictionary_ids {
+            if dict_ids.is_empty() {
+                return Err("dictionary_ids list cannot be empty".to_string());
+            }
+            if self.dictionary_words.is_some() {
+                return Err("Cannot provide both dictionary_ids and dictionary_words".to_string());
+            }
+
+            validate_suffix(&self.suffix)?;
+
+            if let Some(template) = &self.format_template {
+                if template.len() > 256 {
+                    return Err("Format template must be at most 256 characters".to_string());
+                }
+            }
+
+            if let Some(sep) = &self.separator {
+                if sep.len() > 8 {
+                    return Err("Separator must be at most 8 characters".to_string());
+                }
+            }
+
             return Ok(());
         }
 

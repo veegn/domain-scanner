@@ -65,6 +65,9 @@ pub async fn init_db() -> SqlitePool {
     let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN prefix TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN postfix TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_id TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_ids TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN separator TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN format_template TEXT").execute(&pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dictionaries (

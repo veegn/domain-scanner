@@ -2,7 +2,7 @@ use super::models::{
     ScanLogEvent, ScanResultEvent, ScanStatus, ScanStreamMessage, StartScanRequest, StreamHub,
     TaskControl, TaskSignal,
 };
-use crate::generator;
+use crate::generator::{self, DictionaryCombinator};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
@@ -170,6 +170,56 @@ pub(super) async fn prepare_job_feeder(
             task_signal,
         );
         return Ok(total);
+    }
+
+    if let Some(dict_ids) = &params.dictionary_ids {
+        if !dict_ids.is_empty() {
+            let all_words = match crate::web::dictionary::load_multiple_dictionary_words(dict_ids).await {
+                Ok(words) => words,
+                Err(err) => {
+                    let _ = add_event_log(
+                        db, streams, scan_id, "ERROR", "dictionary.load_failed",
+                        None,
+                        Some(format!("Failed to load dictionaries: {}", err)),
+                        vec![("dictionary_ids", json!(dict_ids)), ("error", json!(err.to_string()))],
+                    )
+                    .await;
+                    let _ = sqlx::query(
+                        "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    )
+                    .bind(scan_id)
+                    .execute(db)
+                    .await;
+                    task_control.unregister(scan_id);
+                    return Err(());
+                }
+            };
+
+            let suffix = params.suffix.clone();
+
+            let total: usize = all_words.iter().map(|wl| wl.len()).product();
+            let total_i64 = total as i64;
+
+            let combinator = if let Some(template) = &params.format_template {
+                DictionaryCombinator::new(all_words, template.clone(), suffix)
+            } else {
+                let separator = params.separator.clone().unwrap_or_default();
+                let prefix = params.prefix.clone().unwrap_or_default();
+                let postfix = params.postfix.clone().unwrap_or_default();
+                DictionaryCombinator::from_parts(all_words, &prefix, &separator, &postfix, suffix)
+            };
+
+            spawn_combinator_feeder(
+                combinator,
+                resume_processed as usize,
+                jobs_tx.clone(),
+                scan_id.to_string(),
+                feeder_done,
+                pending_domains,
+                task_signal,
+            );
+            return Ok(total_i64);
+        }
     }
 
     if let Some(dict_id) = &params.dictionary_id {
@@ -370,6 +420,48 @@ fn spawn_generator_feeder(
                     scan_id = %scan_id,
                     source = "generator",
                     "generator feeder stopped because job queue closed"
+                );
+                pending_domains.fetch_sub(1, Ordering::Relaxed);
+                break;
+            }
+        }
+        feeder_done.store(true, Ordering::Relaxed);
+    });
+}
+
+fn spawn_combinator_feeder(
+    mut combinator: DictionaryCombinator,
+    skip: usize,
+    jobs_tx: async_channel::Sender<String>,
+    scan_id: String,
+    feeder_done: Arc<AtomicBool>,
+    pending_domains: Arc<AtomicUsize>,
+    task_signal: Arc<AtomicU8>,
+) {
+    tokio::spawn(async move {
+        if skip > 0 {
+            combinator.skip_to(skip);
+        }
+
+        while let Some(domain) = combinator.next() {
+            if TaskControl::signal(&task_signal) != TaskSignal::Run {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source = "combinator",
+                    "combinator feeder interrupted"
+                );
+                break;
+            }
+            pending_domains.fetch_add(1, Ordering::Relaxed);
+            if jobs_tx.send(domain).await.is_err() {
+                debug!(
+                    target: "domain_scanner::queue",
+                    context = "feeder",
+                    scan_id = %scan_id,
+                    source = "combinator",
+                    "combinator feeder stopped because job queue closed"
                 );
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;

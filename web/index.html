@@ -120,63 +120,40 @@
                             </select>
                         </div>
 
-                        <div class="space-y-1">
-                            <label class="text-[10px] font-black text-gray-500 uppercase">Regex Filter</label>
-                            <input id="regex" type="text" placeholder="e.g. ^1.*$" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
-                        </div>
-
-                        <div class="space-y-1">
-                            <label class="text-[10px] font-black text-gray-500 uppercase">Upload Priority Words (Optional)</label>
-                            <div class="relative group">
-                                <input id="priority_dict_file" type="file" accept=".txt" class="w-full border border-dashed border-gray-300 p-2 rounded-xl text-xs text-gray-400 cursor-pointer group-hover:border-blue-400 transition-colors">
-                            </div>
-                        </div>
                     </div>
 
                     <div id="formDictionary" class="space-y-4 hidden transition-all">
-                        <div class="space-y-1">
-                            <label class="text-[10px] font-black text-gray-500 uppercase">Saved Dictionary</label>
-                            <select id="dict_select" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
-                                <option value="">-- Select a saved dictionary --</option>
-                            </select>
-                        </div>
-
-                        <div class="relative">
-                            <div class="absolute inset-0 flex items-center">
-                                <div class="w-full border-t border-gray-200"></div>
+                        <div id="dictSlotsContainer" class="space-y-3">
+                            <div class="dict-slot space-y-1" data-slot="0">
+                                <label class="text-[10px] font-black text-gray-500 uppercase">Dictionary 1</label>
+                                <select class="dict-select w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
+                                    <option value="">-- Select a dictionary --</option>
+                                </select>
                             </div>
-                            <div class="relative flex justify-center text-[10px]">
-                                <span class="bg-white px-2 text-gray-400 font-black uppercase tracking-widest">Or upload new</span>
-                            </div>
-                        </div>
-
-                        <div class="space-y-1">
-                            <label class="text-[10px] font-black text-gray-500 uppercase">New Dictionary File</label>
-                            <div class="relative group">
-                                <input id="main_dict_file" type="file" accept=".txt" class="w-full border border-dashed border-blue-300 bg-blue-50 p-2 rounded-xl text-xs text-blue-500 cursor-pointer hover:border-blue-400 transition-colors">
-                            </div>
-                            <p class="text-[9px] text-gray-400">Upload a wordlist txt file (max 2,000,000 words)</p>
                         </div>
 
                         <div class="flex gap-2">
-                            <button onclick="Handlers.manageDictionaries()" class="flex-1 text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-xl font-black uppercase tracking-widest transition-all">
-                                Manage Dictionaries
+                            <button type="button" onclick="UI.addDictSlot()" class="flex-1 text-[10px] bg-blue-50 hover:bg-blue-100 text-blue-600 py-2 rounded-xl font-black uppercase tracking-widest transition-all border border-dashed border-blue-200">
+                                + Add Dictionary
                             </button>
+                            <a href="dictionaries.html" class="flex-1 text-center text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-xl font-black uppercase tracking-widest transition-all">
+                                Manage
+                            </a>
                         </div>
 
-                        <div class="grid grid-cols-2 gap-4">
-                            <div class="space-y-1">
-                                <label class="text-[10px] font-black text-gray-500 uppercase">Prefix (Optional)</label>
-                                <input id="dict_prefix" type="text" placeholder="e.g. go" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
-                            </div>
-                            <div class="space-y-1">
-                                <label class="text-[10px] font-black text-gray-500 uppercase">Postfix (Optional)</label>
-                                <input id="dict_postfix" type="text" placeholder="e.g. hq" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
-                            </div>
+                        <div class="space-y-1">
+                            <label class="text-[10px] font-black text-gray-500 uppercase">Format Template</label>
+                            <input id="dict_template" type="text" placeholder="e.g. {0}-{1} or go{0}hq" maxlength="256" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
+                            <p class="text-[9px] text-gray-400">Use {0}, {1}, {2} as placeholders for each dictionary above</p>
                         </div>
+
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Suffix</label>
                             <input id="dict_suffix" type="text" value=".xyz" placeholder=".com" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                        </div>
+
+                        <div id="dictEstimate" class="text-[10px] font-black text-gray-400 text-center hidden">
+                            Estimated Domains: <span id="dictEstimateCount" class="text-blue-600">0</span>
                         </div>
                     </div>
 
@@ -345,34 +322,6 @@
         </main>
     </div>
 
-    <!-- Dictionary Management Modal -->
-    <div id="dictMgmtModal" class="hidden fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onclick="if(event.target===this)Handlers.closeDictMgmt()">
-        <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden">
-            <div class="flex justify-between items-center p-6 border-b border-gray-100">
-                <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Dictionary Manager</h2>
-                <button onclick="Handlers.closeDictMgmt()" class="text-gray-300 hover:text-red-500 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
-                </button>
-            </div>
-            <div class="p-6 border-b border-gray-50 bg-gray-50/50">
-                <div class="flex gap-3 items-end">
-                    <div class="flex-1 space-y-1">
-                        <label class="text-[9px] font-black text-gray-500 uppercase">Dictionary Name</label>
-                        <input id="new_dict_name" type="text" placeholder="e.g. Top English Nouns" class="w-full border border-gray-200 p-2.5 rounded-xl bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
-                    </div>
-                    <div class="flex-1 space-y-1">
-                        <label class="text-[9px] font-black text-gray-500 uppercase">File (.txt)</label>
-                        <input id="new_dict_file" type="file" accept=".txt" class="w-full border border-dashed border-gray-300 p-2 rounded-xl text-xs text-gray-400 cursor-pointer hover:border-blue-400 transition-colors">
-                    </div>
-                    <button onclick="Handlers.uploadDictionary()" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl hover:bg-blue-700 font-black text-[10px] uppercase tracking-widest transition-all whitespace-nowrap flex-shrink-0">Upload</button>
-                </div>
-            </div>
-            <div class="flex-1 overflow-y-auto p-6 space-y-3 custom-scrollbar" id="dictListContainer">
-                <div class="py-10 text-center text-gray-300 italic text-xs">Loading dictionaries...</div>
-            </div>
-        </div>
-    </div>
-
     <!-- Footer -->
     <footer class="max-w-7xl mx-auto mt-12 pb-8 w-full border-t border-gray-200 pt-8 opacity-60">
         <div class="flex flex-col md:flex-row justify-between items-center text-[10px] font-black text-gray-400 uppercase tracking-widest gap-4">
@@ -409,6 +358,7 @@
             currentStatus: null,
             lastFoundCount: 0,
             taskMode: 'combinatorial',
+            dictSlots: 1,
             dictionaries: [],
             config: {
                 maxConsoleDomains: 10,
@@ -482,43 +432,8 @@
                 }
             },
 
-            // --- Dictionary management ---
-
-            async uploadDictionary(name, fileContent) {
-                const url = Routes.api(`api/dictionary?name=${encodeURIComponent(name)}`);
-                const resp = await fetch(url, {
-                    method: 'POST',
-                    body: fileContent
-                });
-                if (!resp.ok) {
-                    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-                    throw new Error(err.error || 'Upload failed');
-                }
-                return resp.json();
-            },
-
             async listDictionaries() {
                 return this.fetchJson('api/dictionaries');
-            },
-
-            async renameDictionary(id, name) {
-                return this.fetchJson(`api/dictionary/${id}`, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ name })
-                });
-            },
-
-            async deleteDictionary(id) {
-                const resp = await fetch(Routes.api(`api/dictionary/${id}`), { method: 'DELETE' });
-                if (!resp.ok && resp.status !== 204) {
-                    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-                    throw new Error(err.error || 'Delete failed');
-                }
-            },
-
-            async getDictionaryWords(id, offset = 0, limit = 100) {
-                return this.fetchJson(`api/dictionary/${id}/words?offset=${offset}&limit=${limit}`);
             },
 
             async deleteScan(id) {
@@ -835,45 +750,76 @@
                 }
             },
 
-            renderDictionaryList() {
-                const container = document.getElementById('dictListContainer');
-                if (!State.dictionaries.length) {
-                    container.innerHTML = '<div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No dictionaries saved</div>';
-                    return;
-                }
-                container.innerHTML = State.dictionaries.map(dict => `
-                    <div class="bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-start gap-3">
-                        <div class="min-w-0 flex-1">
-                            <div class="flex items-center gap-2">
-                                <span class="text-[10px] font-black text-gray-700 truncate">${Utils.escapeHtml(dict.name)}</span>
-                                <button onclick="Handlers.renameDictionary('${dict.id}')" class="text-gray-300 hover:text-blue-500 transition-colors shrink-0" title="Rename">
-                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
-                                </button>
-                            </div>
-                            <p class="text-[9px] text-gray-400 mt-1">${dict.word_count.toLocaleString()} words</p>
-                            <p class="text-[8px] text-gray-300 mt-0.5">Created: ${dict.created_at}</p>
-                        </div>
-                        <div class="flex items-center gap-2 shrink-0">
-                            <button onclick="Handlers.toggleWordPreview('${dict.id}')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-600 rounded" title="Preview words">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
-                            </button>
-                            <button onclick="Handlers.deleteDictionary('${dict.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded" title="Delete">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                            </button>
-                        </div>
-                    </div>
-                    <div id="wordPreview_${dict.id}" class="hidden bg-gray-50 rounded-xl p-3 mx-2 mb-2 max-h-48 overflow-y-auto custom-scrollbar">
-                        <div class="text-center text-gray-400 text-[9px] italic">Loading preview...</div>
-                    </div>
-                `).join('');
+            populateDictionarySelect() {
+                const selects = document.querySelectorAll('.dict-select');
+                const currentValues = Array.from(selects).map(sel => sel.value);
+                const optionsHtml = '<option value="">-- Select a dictionary --</option>' +
+                    State.dictionaries.map(d => `<option value="${d.id}" data-wc="${d.word_count}">${Utils.escapeHtml(d.name)} (${d.word_count.toLocaleString()} words)</option>`).join('');
+                selects.forEach((sel, i) => {
+                    sel.innerHTML = optionsHtml;
+                    if (currentValues[i]) sel.value = currentValues[i];
+                    sel.onchange = () => UI.updateDictEstimate();
+                });
+                this.updateDictEstimate();
             },
 
-            populateDictionarySelect() {
-                const select = document.getElementById('dict_select');
-                const currentValue = select.value;
-                select.innerHTML = '<option value="">-- Select a saved dictionary --</option>' +
-                    State.dictionaries.map(d => `<option value="${d.id}">${Utils.escapeHtml(d.name)} (${d.word_count.toLocaleString()} words)</option>`).join('');
-                select.value = currentValue;
+            addDictSlot() {
+                const container = document.getElementById('dictSlotsContainer');
+                const slotIndex = State.dictSlots;
+                const slotDiv = document.createElement('div');
+                slotDiv.className = 'dict-slot space-y-1';
+                slotDiv.dataset.slot = slotIndex;
+                const optionsHtml = '<option value="">-- Select a dictionary --</option>' +
+                    State.dictionaries.map(d => `<option value="${d.id}" data-wc="${d.word_count}">${Utils.escapeHtml(d.name)} (${d.word_count.toLocaleString()} words)</option>`).join('');
+                slotDiv.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <label class="text-[10px] font-black text-gray-500 uppercase">Dictionary ${slotIndex + 1}</label>
+                        <button type="button" onclick="UI.removeDictSlot(${slotIndex})" class="text-[9px] text-red-400 hover:text-red-600 font-black uppercase">Remove</button>
+                    </div>
+                    <select class="dict-select w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer" onchange="UI.updateDictEstimate()">
+                        ${optionsHtml}
+                    </select>
+                `;
+                container.appendChild(slotDiv);
+                State.dictSlots++;
+                this.updateDictEstimate();
+            },
+
+            removeDictSlot(index) {
+                const slot = document.querySelector(`.dict-slot[data-slot="${index}"]`);
+                if (slot) slot.remove();
+                State.dictSlots--;
+                this.updateDictEstimate();
+            },
+
+            updateDictEstimate() {
+                const selects = document.querySelectorAll('.dict-select');
+                const estimateEl = document.getElementById('dictEstimate');
+                const countEl = document.getElementById('dictEstimateCount');
+                const startBtn = document.querySelector('[onclick="Handlers.startScan()"]');
+                let product = 1;
+                let hasAllSelected = true;
+                for (const sel of selects) {
+                    const opt = sel.options[sel.selectedIndex];
+                    if (!opt || !opt.value) { hasAllSelected = false; break; }
+                    const wc = parseInt(opt.dataset.wc || '0');
+                    product *= wc || 1;
+                }
+                if (hasAllSelected && State.dictSlots >= 1) {
+                    estimateEl.classList.remove('hidden');
+                    const formatted = product.toLocaleString();
+                    countEl.innerText = formatted;
+                    if (product > 2000000) {
+                        countEl.className = 'text-red-600';
+                        if (startBtn) { startBtn.disabled = true; startBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                    } else {
+                        countEl.className = 'text-blue-600';
+                        if (startBtn) { startBtn.disabled = false; startBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                    }
+                } else {
+                    estimateEl.classList.add('hidden');
+                    if (startBtn) { startBtn.disabled = false; startBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                }
             },
 
             syncStatusPanel(data) {
@@ -1059,138 +1005,34 @@
                 UI.renderScanList(State.scans);
             },
 
-            // --- Dictionary management ---
-
-            manageDictionaries() {
-                document.getElementById('dictMgmtModal').classList.remove('hidden');
-                this.loadDictionaries();
-            },
-
-            closeDictMgmt() {
-                document.getElementById('dictMgmtModal').classList.add('hidden');
-            },
-
-            async loadDictionaries() {
-                try {
-                    State.dictionaries = await API.listDictionaries();
-                    UI.renderDictionaryList();
-                    UI.populateDictionarySelect();
-                } catch (e) { console.error('Failed to load dictionaries:', e); }
-            },
-
-            async uploadDictionary() {
-                const nameInput = document.getElementById('new_dict_name');
-                const fileInput = document.getElementById('new_dict_file');
-                const name = nameInput.value.trim();
-                if (!name) { alert('Please enter a dictionary name.'); return; }
-                if (!fileInput.files.length) { alert('Please select a file.'); return; }
-                try {
-                    const fileContent = await fileInput.files[0].text();
-                    await API.uploadDictionary(name, fileContent);
-                    nameInput.value = '';
-                    fileInput.value = '';
-                    this.loadDictionaries();
-                } catch (e) { alert(e.message); }
-            },
-
-            async renameDictionary(id) {
-                const dict = State.dictionaries.find(d => d.id === id);
-                if (!dict) return;
-                const newName = prompt('Rename dictionary:', dict.name);
-                if (!newName || newName.trim() === dict.name) return;
-                try {
-                    await API.renameDictionary(id, newName.trim());
-                    this.loadDictionaries();
-                } catch (e) { alert(e.message); }
-            },
-
-            async deleteDictionary(id) {
-                const dict = State.dictionaries.find(d => d.id === id);
-                if (!dict) return;
-                if (!confirm(`Delete dictionary "${dict.name}" (${dict.word_count.toLocaleString()} words)?`)) return;
-                try {
-                    await API.deleteDictionary(id);
-                    this.loadDictionaries();
-                } catch (e) { alert(e.message); }
-            },
-
-            async toggleWordPreview(id) {
-                const previewEl = document.getElementById(`wordPreview_${id}`);
-                if (!previewEl) return;
-                const isVisible = !previewEl.classList.contains('hidden');
-                previewEl.classList.toggle('hidden');
-                if (isVisible) return;
-                previewEl.innerHTML = '<div class="text-center text-gray-400 text-[9px] italic">Loading preview...</div>';
-                try {
-                    const words = await API.getDictionaryWords(id, 0, 100);
-                    if (!words || words.length === 0) {
-                        previewEl.innerHTML = '<div class="text-center text-gray-400 text-[9px]">No words</div>';
-                        return;
-                    }
-                    previewEl.innerHTML = words.map(w =>
-                        `<span class="inline-block bg-white px-2 py-0.5 rounded text-[10px] font-mono text-gray-700 border border-gray-100 m-0.5">${Utils.escapeHtml(w)}</span>`
-                    ).join('');
-                    if (words.length === 100) {
-                        previewEl.innerHTML += '<div class="text-center text-gray-400 text-[8px] mt-2">Showing first 100 words...</div>';
-                    }
-                } catch (e) { previewEl.innerHTML = '<div class="text-center text-gray-400 text-[9px]">Failed to load preview</div>'; }
-            },
-
             async startScan() {
                 let payload = {};
                 
                 if (State.taskMode === 'combinatorial') {
-                    const fileInput = document.getElementById('priority_dict_file');
-                    let words = null;
-                    if (fileInput.files.length > 0) {
-                        words = (await fileInput.files[0].text()).split('\n').map(l => l.trim()).filter(l => l);
-                    }
                     payload = {
                         length: parseInt(document.getElementById('length').value),
                         suffix: document.getElementById('suffix').value,
                         pattern: document.getElementById('pattern').value,
-                        regex: document.getElementById('regex').value || null,
-                        priority_words: words
                     };
                 } else if (State.taskMode === 'dictionary') {
-                    const dictSelect = document.getElementById('dict_select');
-                    const selectedDictId = dictSelect.value;
-                    const fileInput = document.getElementById('main_dict_file');
+                    const selects = document.querySelectorAll('.dict-select');
+                    const selectedDictIds = Array.from(selects).map(s => s.value).filter(v => v);
 
-                    if (selectedDictId) {
-                        payload = {
-                            dictionary_id: selectedDictId,
-                            prefix: document.getElementById('dict_prefix').value || null,
-                            postfix: document.getElementById('dict_postfix').value || null,
-                            suffix: document.getElementById('dict_suffix').value,
-                            length: 1,
-                            pattern: "d",
-                            regex: null,
-                        };
-                    } else {
-                        if (fileInput.files.length === 0) {
-                            alert("Please select a saved dictionary or upload a file.");
-                            return;
-                        }
-                        const dictWords = (await fileInput.files[0].text()).split('\n').map(l => l.trim()).filter(l => l);
-                        if (dictWords.length === 0) {
-                            alert("The dictionary file is empty.");
-                            return;
-                        }
-                        if (dictWords.length > 2000000) {
-                            alert("Dictionary too large. Max 2,000,000 words.");
-                            return;
-                        }
-                        payload = {
-                            dictionary_words: dictWords,
-                            prefix: document.getElementById('dict_prefix').value || null,
-                            postfix: document.getElementById('dict_postfix').value || null,
-                            suffix: document.getElementById('dict_suffix').value,
-                            length: 1,
-                            pattern: "d",
-                            regex: null,
-                        };
+                    if (selectedDictIds.length === 0) {
+                        alert("Please select at least one dictionary.");
+                        return;
                     }
+
+                    const template = document.getElementById('dict_template').value.trim() || '{0}';
+
+                    payload = {
+                        dictionary_ids: selectedDictIds,
+                        format_template: template,
+                        suffix: document.getElementById('dict_suffix').value,
+                        length: 1,
+                        pattern: "d",
+                        regex: null,
+                    };
                 }
 
                 try {
@@ -1200,11 +1042,6 @@
                         body: JSON.stringify(payload)
                     });
                     this.selectScan(newId);
-                    if (State.taskMode === 'combinatorial') {
-                        document.getElementById('priority_dict_file').value = '';
-                    } else {
-                        document.getElementById('main_dict_file').value = '';
-                    }
                 } catch (e) { alert(e.message); }
             },
 

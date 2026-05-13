@@ -20,9 +20,9 @@ use crate::publish;
 
 use super::dictionary::{self, RenameRequest};
 use super::models::{
-    AppState, PublicPublishedScanSummary, PublishScanRequest, PublishedDomainHit,
-    PublishedScanSummary, ReorderRequest, ScanLogEvent as LogRow, ScanResultEvent as ResultRow,
-    ScanStatus, ScanStreamMessage, ScanSummary, StartScanRequest,
+    AppState, MAX_DICTIONARY_PRODUCT, PublicPublishedScanSummary, PublishScanRequest,
+    PublishedDomainHit, PublishedScanSummary, ReorderRequest, ScanLogEvent as LogRow,
+    ScanResultEvent as ResultRow, ScanStatus, ScanStreamMessage, ScanSummary, StartScanRequest,
 };
 
 #[derive(Serialize)]
@@ -75,6 +75,45 @@ async fn start_scan(
         return api_error(StatusCode::BAD_REQUEST, e);
     }
 
+    // Validate multi-dictionary product against 2M cap
+    if let Some(dict_ids) = &payload.dictionary_ids {
+        if !dict_ids.is_empty() {
+            let mut total: usize = 1;
+            for dict_id in dict_ids {
+                match dictionary::get_dictionary(&state.db, dict_id).await {
+                    Ok(Some(d)) => {
+                        let wc = d.word_count as usize;
+                        total = total.saturating_mul(wc);
+                        if total > MAX_DICTIONARY_PRODUCT {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("Dictionary not found: {}", dict_id),
+                        );
+                    }
+                    Err(e) => {
+                        return api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to load dictionary {}: {}", dict_id, e),
+                        );
+                    }
+                }
+            }
+            if total > MAX_DICTIONARY_PRODUCT {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Dictionary product {} exceeds maximum of {}",
+                        total, MAX_DICTIONARY_PRODUCT
+                    ),
+                );
+            }
+        }
+    }
+
     let scan_id = Uuid::new_v4().to_string();
 
     let priority_words_json =
@@ -83,6 +122,8 @@ async fn start_scan(
         serde_json::to_string(&payload.domains).unwrap_or_else(|_| "null".to_string());
     let dictionary_words_json =
         serde_json::to_string(&payload.dictionary_words).unwrap_or_else(|_| "null".to_string());
+    let dictionary_ids_json =
+        serde_json::to_string(&payload.dictionary_ids).unwrap_or_else(|_| "null".to_string());
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
@@ -102,7 +143,7 @@ async fn start_scan(
     }
 
     if let Err(e) =
-        sqlx::query("INSERT INTO scan_payloads (scan_id, priority_words, domains, dictionary_words, prefix, postfix, dictionary_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO scan_payloads (scan_id, priority_words, domains, dictionary_words, prefix, postfix, dictionary_id, dictionary_ids, separator, format_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&scan_id)
             .bind(priority_words_json)
             .bind(domains_json)
@@ -110,6 +151,9 @@ async fn start_scan(
             .bind(&payload.prefix)
             .bind(&payload.postfix)
             .bind(&payload.dictionary_id)
+            .bind(&dictionary_ids_json)
+            .bind(&payload.separator)
+            .bind(&payload.format_template)
             .execute(&mut *tx)
             .await
     {
