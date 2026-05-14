@@ -30,21 +30,47 @@
         .status-cancelled { color: var(--status-cancelled); font-weight: bold; }
         .status-cancelling { color: var(--status-cancelling); font-weight: bold; animation: pulse 2s infinite; }
 
-        /* Log Colors */
-        .log-info { color: #10b981; }
-        .log-warn { color: #f59e0b; }
-        .log-error { color: #ef4444; font-weight: bold; }
-        .log-time { color: #4b5563; margin-right: 8px; }
-        .log-domain { color: #e5e7eb; }
-        .log-meta { color: #9ca3af; }
-
         /* Animations */
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         @keyframes count-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); color: #059669; } }
-        @keyframes console-slide-in { 0% { opacity: 0; transform: translateY(8px); } 100% { opacity: 1; transform: translateY(0); } }
+        @keyframes domain-chip-in { 0% { opacity: 0; transform: scale(0.85); } 100% { opacity: 1; transform: scale(1); } }
 
-        .console-row { animation: console-slide-in 0.22s ease-out; }
-        .console-system { border-top: 1px solid rgba(75, 85, 99, 0.35); margin-top: 6px; padding-top: 6px; }
+        /* Domain status chips */
+        .domain-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+            animation: domain-chip-in 0.18s ease-out;
+            white-space: nowrap;
+            line-height: 1.5;
+        }
+        .domain-chip .chip-domain { color: #e5e7eb; }
+        .domain-chip .chip-status { margin-left: 1px; }
+        .chip-open { background: rgba(16, 185, 129, 0.15); }
+        .chip-open .chip-status { color: #34d399; }
+        .chip-taken { background: rgba(239, 68, 68, 0.12); }
+        .chip-taken .chip-status { color: #f87171; }
+        .chip-err { background: rgba(245, 158, 11, 0.15); }
+        .chip-err .chip-status { color: #fbbf24; }
+        .chip-scan { background: rgba(96, 165, 250, 0.12); }
+        .chip-scan .chip-status { color: #93c5fd; }
+        .chip-task { background: rgba(139, 92, 246, 0.12); }
+        .chip-task .chip-status { color: #c4b5fd; }
+        .chip-halt { background: rgba(248, 113, 113, 0.1); }
+        .chip-halt .chip-status { color: #fca5a5; }
+        .chip-done { background: rgba(16, 185, 129, 0.12); }
+        .chip-done .chip-status { color: #6ee7b7; }
+        .console-break {
+            width: 100%;
+            flex-basis: 100%;
+            border-top: 1px solid rgba(75, 85, 99, 0.25);
+            margin: 6px 0 2px 0;
+        }
         .count-update { animation: count-pulse 0.4s ease-out; }
         
         /* UI Components */
@@ -248,8 +274,8 @@
                             </button>
                         </div>
                         <div id="logConsoleContainer" class="transition-all duration-500 overflow-hidden">
-                            <div id="logConsole" class="bg-gray-900 rounded-xl p-4 h-48 overflow-y-auto font-mono text-[10px] leading-relaxed custom-scrollbar shadow-inner">
-                                <div class="text-gray-600 italic">Initializing data synchronization...</div>
+                            <div id="logConsole" class="bg-gray-900 rounded-xl p-4 h-48 overflow-y-auto custom-scrollbar shadow-inner flex flex-wrap content-start gap-x-1.5 gap-y-1">
+                                <div class="text-gray-600 text-xs italic w-full">Initializing data synchronization...</div>
                             </div>
                         </div>
                     </div>
@@ -360,10 +386,7 @@
             taskMode: 'combinatorial',
             dictSlots: 1,
             dictionaries: [],
-            config: {
-                maxConsoleDomains: 10,
-                maxSystemLines: 2
-            }
+            config: {}
         };
 
         /**
@@ -919,15 +942,23 @@
                         }
                         domainOrder.push(status.domain);
                         domainStates.set(status.domain, status);
-                    } else {
+                    } else if (status.tag && !['SCAN'].includes(status.tag)) {
                         systemLines.push(status);
                     }
                 }
 
-                const domainRows = domainOrder.slice(-State.config.maxConsoleDomains).map(d => Utils.renderStatusRow(domainStates.get(d), false));
-                const systemRows = systemLines.slice(-State.config.maxSystemLines).map(s => Utils.renderStatusRow(s, true));
+                let html = '';
+                for (const domain of domainOrder) {
+                    html += Utils.renderDomainChip(domainStates.get(domain));
+                }
+                if (systemLines.length > 0) {
+                    html += '<div class="console-break"></div>';
+                    for (const s of systemLines) {
+                        html += Utils.renderSystemChip(s);
+                    }
+                }
 
-                consoleEl.innerHTML = [...domainRows, ...systemRows].join('');
+                consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full">Waiting for domain activity...</div>';
                 consoleEl.scrollTop = consoleEl.scrollHeight;
             },
 
@@ -1241,38 +1272,36 @@
             },
 
             formatLogMessage(log) {
-                const time = log.created_at.split(' ')[1] || log.created_at;
                 let parsed = null;
                 try { parsed = JSON.parse(log.message); } catch (_) {}
 
                 if (parsed && parsed.event) {
-                    const eventMap = {
-                        'task.picked': { tag: 'TASK', level: 'info' },
-                        'task.cancelled': { tag: 'HALT', level: 'warn' },
-                        'task.summary': { tag: 'DONE', level: 'info' },
-                        'domain.scanning': { tag: 'SCAN', level: 'info' },
-                        'domain.available': { tag: 'OPEN', level: 'info' },
-                        'domain.registered': { tag: 'TAKEN', level: 'info' },
-                        'domain.error': { tag: 'ERR', level: 'error' }
+                    const chipMap = {
+                        'task.picked': { tag: 'TASK', css: 'chip-task' },
+                        'task.cancelled': { tag: 'HALT', css: 'chip-halt' },
+                        'task.summary': { tag: 'DONE', css: 'chip-done' },
+                        'domain.scanning': { tag: 'SCAN', css: 'chip-scan' },
+                        'domain.available': { tag: 'OPEN', css: 'chip-open' },
+                        'domain.registered': { tag: 'TAKEN', css: 'chip-taken' },
+                        'domain.error': { tag: 'ERR', css: 'chip-err' }
                     };
-                    const meta = eventMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), level: log.level?.toLowerCase() || 'info' };
-                    return { time, tag: meta.tag, domain: parsed.domain, detail: parsed.message || this.formatFields(parsed.fields), levelClass: 'log-' + meta.level };
+                    const meta = chipMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), css: 'chip-task' };
+                    return { tag: meta.tag, domain: parsed.domain, detail: parsed.message || this.formatFields(parsed.fields), chipClass: meta.css };
                 }
 
                 // Fallback for plain messages
-                return { time, tag: log.level || 'LOG', domain: log.message, levelClass: 'log-' + (log.level?.toLowerCase() || 'info') };
+                return { tag: log.level || 'LOG', domain: log.message, chipClass: 'chip-task' };
             },
 
             formatFields: f => f ? Object.entries(f).filter(([_,v])=>v!=null).map(([k,v])=>`${k}=${v}`).join(' | ') : '',
 
-            renderStatusRow: (s, isSystem) => `
-                <div class="console-row py-0.5 ${isSystem ? 'console-system' : ''}">
-                    <span class="log-time">[${s.time}]</span>
-                    <span class="${s.levelClass}">[${s.tag}]</span>
-                    ${s.domain ? `<span class="log-domain">${s.domain}</span>` : ''}
-                    ${s.detail ? `<span class="log-meta">${Utils.escapeHtml(s.detail)}</span>` : ''}
-                </div>
-            `
+            renderDomainChip(s) {
+                const detail = s.detail ? ` ${Utils.escapeHtml(s.detail)}` : '';
+                return `<span class="domain-chip ${s.chipClass}"><span class="chip-domain">${Utils.escapeHtml(s.domain)}</span><span class="chip-status">[${s.tag}]${detail}</span></span>`;
+            },
+            renderSystemChip(s) {
+                return `<span class="domain-chip ${s.chipClass}" style="display:block;width:100%;"><span class="chip-status">[${s.tag}] ${s.domain ? Utils.escapeHtml(s.domain) + ' ' : ''}${s.detail ? Utils.escapeHtml(s.detail) : ''}</span></span>`;
+            }
         };
 
         // Entry Point

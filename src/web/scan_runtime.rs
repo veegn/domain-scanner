@@ -186,17 +186,16 @@ pub(super) async fn run_scan_logic(
 
         match msg {
             crate::WorkerMessage::Scanning(domain) => {
-                let _ = add_event_log(
-                    db,
-                    &streams,
-                    scan_id,
-                    "INFO",
-                    "domain.scanning",
-                    Some(domain.as_str()),
-                    None,
-                    vec![],
-                )
-                .await;
+                // SSE-only broadcast: scanning status notification without DB persistence
+                let payload = serde_json::json!({"event":"domain.scanning","domain":&domain}).to_string();
+                let _ = scan_stream.send(crate::web::models::ScanStreamMessage::Log(
+                    crate::web::models::ScanLogEvent {
+                        id: 0,
+                        message: payload,
+                        level: "INFO".to_string(),
+                        created_at: String::new(),
+                    },
+                ));
             }
             crate::WorkerMessage::Result(res) => {
                 if !res.trace.is_empty() {

@@ -655,11 +655,6 @@ pub(super) async fn flush_pending_results(
     }
 
     let batch = std::mem::take(pending);
-    let available_domains: Vec<String> = batch
-        .iter()
-        .filter(|row| row.available)
-        .map(|row| row.domain.clone())
-        .collect();
 
     let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
         "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures) ",
@@ -671,59 +666,15 @@ pub(super) async fn flush_pending_results(
             .push_bind(&result.expiration_date)
             .push_bind(&result.signatures);
     });
-
-    if let Err(err) = builder.build().execute(db).await {
-        error!(
-            target: "domain_scanner::queue",
-            context = "storage",
-            scan_id = %scan_id,
-            error = %err,
-            batch_size = batch.len(),
-            "failed to persist result batch"
-        );
-        let _ = add_event_log(
-            db,
-            streams,
-            scan_id,
-            "ERROR",
-            "storage.result_batch_persist_failed",
-            None,
-            Some("Failed to persist result batch".to_string()),
-            vec![
-                ("batch_size", json!(batch.len())),
-                ("error", json!(err.to_string())),
-            ],
-        )
-        .await;
-        return;
-    }
-
-    if available_domains.is_empty() {
-        return;
-    }
-
-    let mut query: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
-        "SELECT rowid as event_id, domain, available, expiration_date, signatures
-         FROM results
-         WHERE scan_id = ",
+    builder.push(
+        " RETURNING rowid as event_id, domain, available, expiration_date, signatures",
     );
-    query.push_bind(scan_id);
-    query.push(" AND domain IN (");
-    {
-        let mut separated = query.separated(", ");
-        for domain in &available_domains {
-            separated.push_bind(domain);
-        }
-    }
-    query.push(")");
 
-    match query.build_query_as::<ScanResultEvent>().fetch_all(db).await {
+    match builder.build_query_as::<ScanResultEvent>().fetch_all(db).await {
         Ok(rows) => {
-            let row_by_domain: HashMap<String, ScanResultEvent> =
-                rows.into_iter().map(|row| (row.domain.clone(), row)).collect();
-            for domain in available_domains {
-                if let Some(row) = row_by_domain.get(&domain) {
-                    let _ = scan_stream.send(ScanStreamMessage::Result(row.clone()));
+            for row in rows {
+                if row.available {
+                    let _ = scan_stream.send(ScanStreamMessage::Result(row));
                 }
             }
         }
@@ -733,17 +684,21 @@ pub(super) async fn flush_pending_results(
                 context = "storage",
                 scan_id = %scan_id,
                 error = %err,
-                "failed to load persisted available result batch"
+                batch_size = batch.len(),
+                "failed to persist result batch"
             );
             let _ = add_event_log(
                 db,
                 streams,
                 scan_id,
                 "ERROR",
-                "storage.result_batch_reload_failed",
+                "storage.result_batch_persist_failed",
                 None,
-                Some("Failed to load persisted available result batch".to_string()),
-                vec![("error", json!(err.to_string()))],
+                Some("Failed to persist result batch".to_string()),
+                vec![
+                    ("batch_size", json!(batch.len())),
+                    ("error", json!(err.to_string())),
+                ],
             )
             .await;
         }
@@ -768,34 +723,14 @@ async fn flush_pending_logs(
             .push_bind(&log.level)
             .push_bind(&log.message);
     });
+    builder.push(" RETURNING id, message, level, created_at");
 
-    if let Err(err) = builder.build().execute(db).await {
-        warn!(
-            target: "domain_scanner::queue",
-            context = "scan_log",
-            scan_id = %scan_id,
-            error = %err,
-            batch_size = batch.len(),
-            "failed to write scan log batch"
-        );
-        return;
-    }
-
-    let count = batch.len() as i64;
-    match sqlx::query_as::<_, ScanLogEvent>(
-        "SELECT id, message, level, created_at
-         FROM scan_logs
-         WHERE scan_id = ?
-         ORDER BY id DESC
-         LIMIT ?",
-    )
-    .bind(scan_id)
-    .bind(count)
-    .fetch_all(db)
-    .await
+    match builder
+        .build_query_as::<ScanLogEvent>()
+        .fetch_all(db)
+        .await
     {
-        Ok(mut inserted) => {
-            inserted.reverse();
+        Ok(inserted) => {
             for log in inserted {
                 let _ = scan_stream.send(ScanStreamMessage::Log(log));
             }
@@ -806,7 +741,8 @@ async fn flush_pending_logs(
                 context = "scan_log",
                 scan_id = %scan_id,
                 error = %err,
-                "failed to reload scan log batch for streaming"
+                batch_size = batch.len(),
+                "failed to write scan log batch"
             );
         }
     }

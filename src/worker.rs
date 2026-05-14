@@ -166,6 +166,12 @@ pub async fn worker(
                 // Use the registry to check the domain
                 let check_result: CheckResult = registry.check(&domain).await;
 
+                // Determine if WHOIS was reached (for adaptive delay)
+                let reached_whois = check_result
+                    .trace
+                    .iter()
+                    .any(|s| s.starts_with("WHOIS: "));
+
                 let result = DomainResult {
                     domain,
                     available: check_result.available,
@@ -202,7 +208,9 @@ pub async fn worker(
                     break;
                 }
 
-                tokio::time::sleep(throttle.current_delay()).await;
+                if reached_whois {
+                    tokio::time::sleep(throttle.current_delay()).await;
+                }
             }
             None => {
                 debug!(
