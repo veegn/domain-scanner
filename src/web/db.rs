@@ -340,7 +340,7 @@ pub async fn seed_builtin_dictionaries(pool: &SqlitePool) {
             continue;
         }
 
-        let src_path = Path::new("data/dictionaries").join(src_filename);
+        let src_path = Path::new("seed/dictionaries").join(src_filename);
         if !src_path.exists() {
             warn!(
                 target: "domain_scanner::db",
