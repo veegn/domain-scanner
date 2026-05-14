@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dictionary Manager — Domain Scanner</title>
+    <meta name="description" content="Manage reusable domain dictionaries for dictionary-based scanning.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .glass {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+        }
+        .page-bg {
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28rem),
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.12), transparent 24rem),
+                linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 3px; }
+    </style>
+</head>
+<body class="page-bg min-h-screen text-gray-900">
+    <div class="max-w-4xl mx-auto px-4 py-8 md:px-8 md:py-10">
+        <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between mb-8">
+            <div>
+                <p class="text-[11px] font-black uppercase tracking-[0.35em] text-blue-500">Dictionary Manager</p>
+                <h1 class="text-4xl md:text-5xl font-black tracking-tight mt-2">Reusable Dictionaries</h1>
+                <p class="text-sm md:text-base text-gray-500 mt-3 max-w-2xl">
+                    Upload, rename, and delete wordlist dictionaries. Saved dictionaries can be selected during scan creation instead of uploading a file every time.
+                </p>
+            </div>
+            <div class="flex gap-3">
+                <a id="dashboardLink" href="index.html" class="px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Dashboard</a>
+                <button id="refreshBtn" class="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-black tracking-wide hover:bg-blue-700 transition-colors">Refresh</button>
+            </div>
+        </header>
+
+        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 p-6 md:p-7 mb-8">
+            <h2 class="text-xl font-black mb-4">Upload New Dictionary</h2>
+            <div class="flex flex-col sm:flex-row gap-3 items-end">
+                <div class="flex-1 w-full space-y-1">
+                    <label class="text-[11px] font-black text-gray-500 uppercase">Dictionary Name</label>
+                    <input id="new_dict_name" type="text" placeholder="e.g. Top English Nouns" class="w-full border border-gray-200 p-3 rounded-2xl bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                </div>
+                <div class="flex-1 w-full space-y-1">
+                    <label class="text-[11px] font-black text-gray-500 uppercase">File (.txt)</label>
+                    <input id="new_dict_file" type="file" accept=".txt" class="w-full border border-dashed border-gray-300 p-2.5 rounded-2xl text-xs text-gray-400 cursor-pointer hover:border-blue-400 transition-colors">
+                </div>
+                <button id="uploadBtn" class="bg-blue-600 text-white px-6 py-3 rounded-2xl hover:bg-blue-700 font-black text-sm uppercase tracking-widest transition-all whitespace-nowrap flex-shrink-0">Upload</button>
+            </div>
+            <p class="text-[11px] text-gray-400 mt-3">One word per line. Max 2,000,000 words. File is saved as-is on the server.</p>
+        </section>
+
+        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 overflow-hidden">
+            <div class="p-6 md:p-7 border-b border-gray-100 flex items-center justify-between">
+                <h2 class="text-xl font-black">Saved Dictionaries</h2>
+                <span id="dictCount" class="text-sm text-gray-400 font-bold"></span>
+            </div>
+            <div id="dictList" class="divide-y divide-gray-50">
+                <div class="p-12 text-center text-gray-300 italic text-sm">Loading dictionaries...</div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const Routes = {
+            appRootPath() {
+                const path = window.location.pathname;
+                if (path.endsWith('/')) return path;
+                const slashIndex = path.lastIndexOf('/');
+                return slashIndex >= 0 ? path.slice(0, slashIndex + 1) : '/';
+            },
+
+            build(path) {
+                const root = new URL(this.appRootPath(), window.location.origin);
+                return new URL(path.replace(/^\//, ''), root).toString();
+            },
+
+            api(path) {
+                return this.build(path);
+            }
+        };
+
+        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[char]);
+
+        async function fetchJson(url, opts) {
+            const response = await fetch(Routes.api(url), opts);
+            if (!response.ok) {
+                let msg;
+                try { msg = (await response.json()).error; } catch (_) { msg = `HTTP ${response.status}`; }
+                throw new Error(msg || 'Request failed');
+            }
+            if (response.status === 204) return null;
+            return response.json();
+        }
+
+        function formatDate(value) {
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+        }
+
+        let dictionaries = [];
+
+        async function loadDictionaries() {
+            try {
+                dictionaries = await fetchJson('api/dictionaries');
+                renderList();
+            } catch (e) {
+                document.getElementById('dictList').innerHTML =
+                    `<div class="p-12 text-center text-red-400 text-sm">Failed to load: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        async function uploadDictionary() {
+            const nameInput = document.getElementById('new_dict_name');
+            const fileInput = document.getElementById('new_dict_file');
+            const name = nameInput.value.trim();
+            if (!name) { alert('Please enter a dictionary name.'); return; }
+            if (!fileInput.files.length) { alert('Please select a file.'); return; }
+
+            const uploadBtn = document.getElementById('uploadBtn');
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Uploading...';
+
+            try {
+                const fileContent = await fileInput.files[0].text();
+                await fetchJson(`api/dictionary?name=${encodeURIComponent(name)}`, {
+                    method: 'POST',
+                    body: fileContent
+                });
+                nameInput.value = '';
+                fileInput.value = '';
+                loadDictionaries();
+            } catch (e) { alert(e.message); }
+            finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload';
+            }
+        }
+
+        async function renameDictionary(id) {
+            const dict = dictionaries.find(d => d.id === id);
+            if (!dict) return;
+            const newName = prompt('Rename dictionary:', dict.name);
+            if (!newName || newName.trim() === dict.name) return;
+            try {
+                await fetchJson(`api/dictionary/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName.trim() })
+                });
+                loadDictionaries();
+            } catch (e) { alert(e.message); }
+        }
+
+        async function deleteDictionary(id) {
+            const dict = dictionaries.find(d => d.id === id);
+            if (!dict) return;
+            if (!confirm(`Delete dictionary "${dict.name}" (${dict.word_count.toLocaleString()} words)?`)) return;
+            try {
+                await fetchJson(`api/dictionary/${id}`, { method: 'DELETE' });
+                loadDictionaries();
+            } catch (e) { alert(e.message); }
+        }
+
+        async function togglePreview(id) {
+            const el = document.getElementById(`preview_${id}`);
+            if (!el) return;
+            const visible = !el.classList.contains('hidden');
+            el.classList.toggle('hidden');
+            if (visible) return;
+            el.innerHTML = '<div class="text-center text-gray-400 text-xs italic">Loading preview...</div>';
+            try {
+                const words = await fetchJson(`api/dictionary/${id}/words?offset=0&limit=100`);
+                if (!words || words.length === 0) {
+                    el.innerHTML = '<div class="text-center text-gray-400 text-xs">No words</div>';
+                    return;
+                }
+                el.innerHTML = words.map(w =>
+                    `<span class="inline-block bg-white px-2 py-0.5 rounded text-[11px] font-mono text-gray-700 border border-gray-100 m-0.5">${escapeHtml(w)}</span>`
+                ).join('');
+                if (words.length === 100) {
+                    el.innerHTML += '<div class="text-center text-gray-400 text-[10px] mt-2">Showing first 100 words...</div>';
+                }
+            } catch (e) {
+                el.innerHTML = `<div class="text-center text-gray-400 text-xs">Failed to load preview</div>`;
+            }
+        }
+
+        function renderList() {
+            const container = document.getElementById('dictList');
+            const countEl = document.getElementById('dictCount');
+
+            countEl.textContent = dictionaries.length ? `${dictionaries.length} dictionary entries` : '';
+
+            if (!dictionaries.length) {
+                container.innerHTML = '<div class="p-12 text-center text-gray-300 italic text-sm uppercase tracking-widest">No dictionaries saved</div>';
+                return;
+            }
+
+            container.innerHTML = dictionaries.map(dict => `
+                <div class="p-4 md:p-5 flex justify-between items-start gap-3">
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-black text-gray-700 truncate">${escapeHtml(dict.name)}</span>
+                            <button onclick="renameDictionary('${dict.id}')" class="text-gray-300 hover:text-blue-500 transition-colors shrink-0" title="Rename">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-1">${dict.word_count.toLocaleString()} words</p>
+                        <p class="text-[10px] text-gray-300 mt-0.5">Created: ${formatDate(dict.created_at)}</p>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <button onclick="togglePreview('${dict.id}')" class="px-3 py-1.5 rounded-xl border border-gray-200 bg-white text-[11px] font-bold text-gray-500 hover:text-blue-600 hover:border-blue-200 transition-colors">Preview</button>
+                        <button onclick="deleteDictionary('${dict.id}')" class="p-1.5 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded-lg transition-colors" title="Delete">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div id="preview_${dict.id}" class="hidden bg-gray-50 rounded-xl p-3 mx-4 mb-3 max-h-48 overflow-y-auto custom-scrollbar"></div>
+            `).join('');
+        }
+
+        document.getElementById('uploadBtn').addEventListener('click', uploadDictionary);
+        document.getElementById('refreshBtn').addEventListener('click', loadDictionaries);
+        window.onload = loadDictionaries;
+    </script>
+</body>
+</html>
