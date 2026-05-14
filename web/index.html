@@ -526,8 +526,8 @@
 
                 stream.addEventListener('log', (event) => {
                     const log = JSON.parse(event.data);
-                    if (log.id <= State.lastLogId) return;
-                    State.lastLogId = log.id;
+                    if (log.id > 0 && log.id <= State.lastLogId) return;
+                    if (log.id > 0) State.lastLogId = log.id;
                     statusRows.push(log);
                     if (statusRows.length > 250) statusRows.splice(0, statusRows.length - 250);
                     renderWindow();
@@ -962,8 +962,11 @@
                     }
                 }
 
-                // Auto-trim: keep scanning/queued + recent completed, remove oldest completed when over capacity
-                const MAX_CARDS = 72;
+                // Dynamic capacity: cards that fit the grid viewport
+                const cols = Math.max(2, Math.floor((consoleEl.clientWidth - 32) / 150));
+                const rows = Math.max(3, Math.floor((consoleEl.clientHeight - 16) / 32));
+                const maxCards = cols * rows;
+
                 const completed = [];
                 const active = [];
                 for (const d of domainOrder) {
@@ -974,14 +977,16 @@
                         active.push(d);
                     }
                 }
-                const visibleCompleted = completed.slice(-Math.max(0, MAX_CARDS - active.length));
+                const activeLimit = Math.min(active.length, maxCards);
+                const visibleActive = active.slice(-activeLimit);
+                const remaining = maxCards - activeLimit;
+                const visibleCompleted = completed.slice(-Math.max(0, remaining));
 
                 let html = '';
-                for (const d of active) html += Utils.renderDomainCard(domainStates.get(d));
+                for (const d of visibleActive) html += Utils.renderDomainCard(domainStates.get(d));
                 for (const d of visibleCompleted) html += Utils.renderDomainCard(domainStates.get(d));
                 if (systemLines.length > 0) {
-                    const last = systemLines[systemLines.length - 1];
-                    html += Utils.renderSystemLine(last);
+                    html += Utils.renderSystemLine(systemLines[systemLines.length - 1]);
                 }
 
                 consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>';
