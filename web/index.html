@@ -35,41 +35,56 @@
         @keyframes count-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); color: #059669; } }
         @keyframes domain-chip-in { 0% { opacity: 0; transform: scale(0.85); } 100% { opacity: 1; transform: scale(1); } }
 
-        /* Domain status chips */
-        .domain-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 2px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
-            font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
-            animation: domain-chip-in 0.18s ease-out;
-            white-space: nowrap;
-            line-height: 1.5;
+        /* Domain queue display */
+        .domain-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 4px;
+            align-content: start;
         }
-        .domain-chip .chip-domain { color: #e5e7eb; }
-        .domain-chip .chip-status { margin-left: 1px; }
-        .chip-open { background: rgba(16, 185, 129, 0.15); }
-        .chip-open .chip-status { color: #34d399; }
-        .chip-taken { background: rgba(239, 68, 68, 0.12); }
-        .chip-taken .chip-status { color: #f87171; }
-        .chip-err { background: rgba(245, 158, 11, 0.15); }
-        .chip-err .chip-status { color: #fbbf24; }
-        .chip-scan { background: rgba(96, 165, 250, 0.12); }
-        .chip-scan .chip-status { color: #93c5fd; }
-        .chip-task { background: rgba(139, 92, 246, 0.12); }
-        .chip-task .chip-status { color: #c4b5fd; }
-        .chip-halt { background: rgba(248, 113, 113, 0.1); }
-        .chip-halt .chip-status { color: #fca5a5; }
-        .chip-done { background: rgba(16, 185, 129, 0.12); }
-        .chip-done .chip-status { color: #6ee7b7; }
+        .domain-card {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+            font-size: 12px;
+            font-weight: 600;
+            animation: card-in 0.2s ease-out;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            line-height: 1.4;
+        }
+        .domain-card .card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .domain-card .card-badge {
+            font-size: 9px;
+            padding: 0 4px;
+            border-radius: 2px;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            flex-shrink: 0;
+        }
+        .card-queued { background: rgba(107, 114, 128, 0.15); color: #9ca3af; }
+        .card-queued .card-badge { background: rgba(107, 114, 128, 0.2); color: #d1d5db; }
+        .card-scanning { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
+        .card-scanning .card-badge { background: rgba(59, 130, 246, 0.3); color: #bfdbfe; }
+        .card-open { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
+        .card-open .card-badge { background: rgba(16, 185, 129, 0.25); color: #a7f3d0; }
+        .card-taken { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
+        .card-taken .card-badge { background: rgba(239, 68, 68, 0.2); color: #fecaca; }
+        .card-err { background: rgba(245, 158, 11, 0.15); color: #fde68a; }
+        .card-err .card-badge { background: rgba(245, 158, 11, 0.25); color: #fde68a; }
         .console-break {
-            width: 100%;
-            flex-basis: 100%;
+            grid-column: 1 / -1;
             border-top: 1px solid rgba(75, 85, 99, 0.25);
-            margin: 6px 0 2px 0;
+            margin: 4px 0;
+            padding-top: 4px;
+            font-size: 11px;
+            color: #9ca3af;
+            font-weight: 700;
+            letter-spacing: 0.08em;
         }
         .count-update { animation: count-pulse 0.4s ease-out; }
         
@@ -169,7 +184,7 @@
 
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Format Template</label>
-                            <input id="dict_template" type="text" placeholder="e.g. {0}-{1} or go{0}hq" maxlength="256" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
+                            <input id="dict_template" type="text" value="{0}" placeholder="e.g. {0}-{1} or go{0}hq" maxlength="256" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
                             <p class="text-[9px] text-gray-400">Use {0}, {1}, {2} as placeholders for each dictionary above</p>
                         </div>
 
@@ -274,8 +289,8 @@
                             </button>
                         </div>
                         <div id="logConsoleContainer" class="transition-all duration-500 overflow-hidden">
-                            <div id="logConsole" class="bg-gray-900 rounded-xl p-4 h-48 overflow-y-auto custom-scrollbar shadow-inner flex flex-wrap content-start gap-x-1.5 gap-y-1">
-                                <div class="text-gray-600 text-xs italic w-full">Initializing data synchronization...</div>
+                            <div id="logConsole" class="bg-gray-900 rounded-xl p-4 h-64 overflow-hidden shadow-inner domain-grid">
+                                <div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>
                             </div>
                         </div>
                     </div>
@@ -655,7 +670,7 @@
                                 <p class="text-[9px] font-black mt-1 uppercase text-gray-400">FOUND: <span class="text-green-600">${s.found}</span></p>
                             </div>
                             <div class="text-right">
-                                <span class="${meta.color} text-[9px] font-black uppercase tracking-widest">${meta.label} ${s.status}</span>
+                                <span class="${meta.color} text-[9px] font-black uppercase tracking-widest">${meta.label}</span>
                                 <p class="text-[8px] font-black text-gray-300 mt-1 uppercase">${timeStr}</p>
                                 ${published ? `<a href="${Routes.published(published.slug)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
                                 <div class="flex space-x-2 mt-2 justify-end">
@@ -942,24 +957,34 @@
                         }
                         domainOrder.push(status.domain);
                         domainStates.set(status.domain, status);
-                    } else if (status.tag && !['SCAN'].includes(status.tag)) {
+                    } else if (status.tag && !['SCAN','QUEUED'].includes(status.tag)) {
                         systemLines.push(status);
                     }
                 }
 
-                let html = '';
-                for (const domain of domainOrder) {
-                    html += Utils.renderDomainChip(domainStates.get(domain));
-                }
-                if (systemLines.length > 0) {
-                    html += '<div class="console-break"></div>';
-                    for (const s of systemLines) {
-                        html += Utils.renderSystemChip(s);
+                // Auto-trim: keep scanning/queued + recent completed, remove oldest completed when over capacity
+                const MAX_CARDS = 72;
+                const completed = [];
+                const active = [];
+                for (const d of domainOrder) {
+                    const s = domainStates.get(d);
+                    if (s.tag === 'OPEN' || s.tag === 'TAKEN' || s.tag === 'ERR') {
+                        completed.push(d);
+                    } else {
+                        active.push(d);
                     }
                 }
+                const visibleCompleted = completed.slice(-Math.max(0, MAX_CARDS - active.length));
 
-                consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full">Waiting for domain activity...</div>';
-                consoleEl.scrollTop = consoleEl.scrollHeight;
+                let html = '';
+                for (const d of active) html += Utils.renderDomainCard(domainStates.get(d));
+                for (const d of visibleCompleted) html += Utils.renderDomainCard(domainStates.get(d));
+                if (systemLines.length > 0) {
+                    const last = systemLines[systemLines.length - 1];
+                    html += Utils.renderSystemLine(last);
+                }
+
+                consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>';
             },
 
             getFilteredResults() {
@@ -1249,10 +1274,11 @@
             escapeHtml: v => String(v).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])),
             
             formatScanSummary(s) {
-                if (s.has_domains) return `Manual List: ${s.total || 'pending items'} items`;
+                if (s.has_domains) return `List: ${s.total || '0'} items`;
+                if (s.has_dictionary) return `Dict: ${s.total || '0'} × ${s.suffix || ''}`;
                 const label = { d: '0-9', D: 'a-z', a: 'a-z0-9' }[s.pattern] || '?';
                 const parts = [`${s.length}${s.suffix || ''} (${label})`];
-                if (s.regex) parts.push(`RX: ${s.regex}`);
+                if (s.regex) parts.push(`RX:${s.regex}`);
                 return parts.join(' | ');
             },
 
@@ -1280,27 +1306,31 @@
                         'task.picked': { tag: 'TASK', css: 'chip-task' },
                         'task.cancelled': { tag: 'HALT', css: 'chip-halt' },
                         'task.summary': { tag: 'DONE', css: 'chip-done' },
+                        'domain.queued': { tag: 'QUEUED', css: 'chip-scan' },
                         'domain.scanning': { tag: 'SCAN', css: 'chip-scan' },
                         'domain.available': { tag: 'OPEN', css: 'chip-open' },
                         'domain.registered': { tag: 'TAKEN', css: 'chip-taken' },
                         'domain.error': { tag: 'ERR', css: 'chip-err' }
                     };
                     const meta = chipMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), css: 'chip-task' };
-                    return { tag: meta.tag, domain: parsed.domain, detail: parsed.message || this.formatFields(parsed.fields), chipClass: meta.css };
+                    return { tag: meta.tag, domain: parsed.domain, detail: parsed.message || this.formatFields(parsed.fields), cardClass: meta.css };
                 }
 
                 // Fallback for plain messages
-                return { tag: log.level || 'LOG', domain: log.message, chipClass: 'chip-task' };
+                return { tag: log.level || 'LOG', domain: log.message, cardClass: 'chip-task' };
             },
 
             formatFields: f => f ? Object.entries(f).filter(([_,v])=>v!=null).map(([k,v])=>`${k}=${v}`).join(' | ') : '',
 
-            renderDomainChip(s) {
-                const detail = s.detail ? ` ${Utils.escapeHtml(s.detail)}` : '';
-                return `<span class="domain-chip ${s.chipClass}"><span class="chip-domain">${Utils.escapeHtml(s.domain)}</span><span class="chip-status">[${s.tag}]${detail}</span></span>`;
+            renderDomainCard(s) {
+                const cssMap = { QUEUED: 'card-queued', SCAN: 'card-scanning', OPEN: 'card-open', TAKEN: 'card-taken', ERR: 'card-err' };
+                const cardClass = cssMap[s.tag] || 'card-scanning';
+                const shortTag = s.tag.length > 5 ? s.tag.slice(0,4) : s.tag;
+                return `<div class="domain-card ${cardClass}"><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${s.tag}">${shortTag}</span></div>`;
             },
-            renderSystemChip(s) {
-                return `<span class="domain-chip ${s.chipClass}" style="display:block;width:100%;"><span class="chip-status">[${s.tag}] ${s.domain ? Utils.escapeHtml(s.domain) + ' ' : ''}${s.detail ? Utils.escapeHtml(s.detail) : ''}</span></span>`;
+            renderSystemLine(s) {
+                const detail = s.detail ? Utils.escapeHtml(s.detail) : '';
+                return `<div class="console-break">${s.tag} ${s.domain || ''} ${detail}</div>`;
             }
         };
 

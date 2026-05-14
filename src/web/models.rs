@@ -332,6 +332,7 @@ pub struct ScanSummary {
     pub pattern: String,
     pub regex: Option<String>,
     pub has_domains: bool,
+    pub has_dictionary: bool,
     pub total: i64,
     pub processed: i64,
     pub found: i64,

@@ -157,6 +157,8 @@ pub(super) async fn prepare_job_feeder(
     task_signal: Arc<AtomicU8>,
     task_control: TaskControl,
 ) -> Result<i64, ()> {
+    let scan_stream = streams.sender_for_scan(scan_id).await;
+
     if let Some(domains) = params.domains.clone() {
         let total = domains.len() as i64;
         spawn_domain_feeder(
@@ -168,6 +170,7 @@ pub(super) async fn prepare_job_feeder(
             feeder_done,
             pending_domains,
             task_signal,
+            scan_stream.clone(),
         );
         return Ok(total);
     }
@@ -217,6 +220,7 @@ pub(super) async fn prepare_job_feeder(
                 feeder_done,
                 pending_domains,
                 task_signal,
+                scan_stream.clone(),
             );
             return Ok(total_i64);
         }
@@ -267,6 +271,7 @@ pub(super) async fn prepare_job_feeder(
             feeder_done,
             pending_domains,
             task_signal,
+            scan_stream.clone(),
         );
         return Ok(total);
     }
@@ -291,6 +296,7 @@ pub(super) async fn prepare_job_feeder(
             feeder_done,
             pending_domains,
             task_signal,
+            scan_stream.clone(),
         );
         return Ok(total);
     }
@@ -348,6 +354,7 @@ pub(super) async fn prepare_job_feeder(
         feeder_done,
         pending_domains,
         task_signal,
+        scan_stream.clone(),
     );
     Ok(total)
 }
@@ -361,6 +368,7 @@ fn spawn_domain_feeder(
     feeder_done: Arc<AtomicBool>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
+    scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
         for domain in domains.into_iter().skip(skip) {
@@ -375,7 +383,7 @@ fn spawn_domain_feeder(
                 break;
             }
             pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain).await.is_err() {
+            if jobs_tx.send(domain.clone()).await.is_err() {
                 debug!(
                     target: "domain_scanner::queue",
                     context = "feeder",
@@ -386,6 +394,12 @@ fn spawn_domain_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
+            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
+                id: 0,
+                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
+                level: "INFO".to_string(),
+                created_at: String::new(),
+            }));
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -398,6 +412,7 @@ fn spawn_generator_feeder(
     feeder_done: Arc<AtomicBool>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
+    scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
         let mut generated = domain_gen.domains;
@@ -413,7 +428,7 @@ fn spawn_generator_feeder(
                 break;
             }
             pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain).await.is_err() {
+            if jobs_tx.send(domain.clone()).await.is_err() {
                 debug!(
                     target: "domain_scanner::queue",
                     context = "feeder",
@@ -424,6 +439,12 @@ fn spawn_generator_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
+            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
+                id: 0,
+                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
+                level: "INFO".to_string(),
+                created_at: String::new(),
+            }));
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -437,6 +458,7 @@ fn spawn_combinator_feeder(
     feeder_done: Arc<AtomicBool>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
+    scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
         if skip > 0 {
@@ -455,7 +477,7 @@ fn spawn_combinator_feeder(
                 break;
             }
             pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain).await.is_err() {
+            if jobs_tx.send(domain.clone()).await.is_err() {
                 debug!(
                     target: "domain_scanner::queue",
                     context = "feeder",
@@ -466,6 +488,12 @@ fn spawn_combinator_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
+            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
+                id: 0,
+                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
+                level: "INFO".to_string(),
+                created_at: String::new(),
+            }));
         }
         feeder_done.store(true, Ordering::Relaxed);
     });

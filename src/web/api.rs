@@ -587,6 +587,13 @@ async fn fetch_scan_summaries(db: &sqlx::SqlitePool) -> Result<Vec<ScanSummary>,
                     WHEN p.domains IS NOT NULL AND p.domains != 'null' AND p.domains != '[]' THEN 1
                     ELSE 0
                 END AS has_domains,
+                CASE
+                    WHEN (p.dictionary_ids IS NOT NULL AND p.dictionary_ids != 'null' AND p.dictionary_ids != '[]')
+                      OR (p.dictionary_id IS NOT NULL AND p.dictionary_id != 'null')
+                      OR (p.dictionary_words IS NOT NULL AND p.dictionary_words != 'null' AND p.dictionary_words != '[]')
+                    THEN 1
+                    ELSE 0
+                END AS has_dictionary,
                 s.total,
                 s.processed,
                 s.found,
