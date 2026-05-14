@@ -51,15 +51,9 @@ impl CircuitBreaker {
     /// Record a failed request
     /// Increments failure count, potentially tripping the circuit
     pub fn record_failure(&self) {
-        let _current = self.failures.fetch_add(1, Ordering::Relaxed);
-        // Update timestamp on every failure so the window extends
+        self.failures.fetch_add(1, Ordering::Relaxed);
         self.last_failure_time
             .store(Self::current_time(), Ordering::Relaxed);
-
-        // Optional: Log when circuit trips
-        // if current + 1 == self.fail_threshold {
-        //    println!("Circuit breaker tripped!");
-        // }
     }
 
     fn current_time() -> u64 {

@@ -21,8 +21,6 @@ pub(super) async fn run_scan_logic(
     db: &SqlitePool,
     scan_id: &str,
     params: StartScanRequest,
-    _skip_count: i64,
-    _initial_found: i64,
     registry: Arc<CheckerRegistry>,
     task_control: TaskControl,
     streams: StreamHub,
@@ -254,186 +252,46 @@ pub(super) async fn run_scan_logic(
     flush_scan_buffers(db, &streams, &scan_stream, scan_id, &mut state).await;
     persist_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
 
-    match TaskControl::signal(&task_signal) {
-        TaskSignal::Cancel => {
-            let _ = queue_event_log(
-                &mut state.pending_log_flush,
-                db,
-                &scan_stream,
-                scan_id,
-                "WARN",
-                "task.cancelled",
-                None,
-                Some("Scan cancelled".to_string()),
-                vec![
-                    ("processed", json!(state.processed)),
-                    ("found", json!(state.found)),
-                ],
-            )
-            .await;
-            flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
-            if let Err(err) = sqlx::query(
-                "UPDATE scans SET status = 'cancelled', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-            )
-            .bind(state.processed)
-            .bind(state.found)
-            .bind(scan_id)
-            .execute(db)
-            .await
-            {
-                error!(
-                    target: "domain_scanner::queue",
-                    context = "task_status",
-                    scan_id = %scan_id,
-                    status = "cancelled",
-                    error = %err,
-                    "failed to mark task cancelled"
-                );
-            }
-            publish_scan_status(
-                &scan_stream,
-                scan_id,
-                "cancelled",
-                total,
-                state.processed,
-                state.found,
-                0,
-            )
-            .await;
-            streams.notify_scans();
-            let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
-            streams.cleanup_scan(scan_id).await;
-        }
-        TaskSignal::Pause => {
-            let _ = queue_event_log(
-                &mut state.pending_log_flush,
-                db,
-                &scan_stream,
-                scan_id,
-                "WARN",
-                "task.paused",
-                None,
-                Some("Scan paused".to_string()),
-                vec![
-                    ("processed", json!(state.processed)),
-                    ("found", json!(state.found)),
-                ],
-            )
-            .await;
-            flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
+    let signal = TaskControl::signal(&task_signal);
+    let (status, log_event, log_msg, log_fields) = match signal {
+        TaskSignal::Cancel => ("cancelled", "task.cancelled", "Scan cancelled", vec![("processed", json!(state.processed)), ("found", json!(state.found))]),
+        TaskSignal::Pause => ("paused", "task.paused", "Scan paused", vec![("processed", json!(state.processed)), ("found", json!(state.found))]),
+        TaskSignal::Run => ("finished", "task.summary", "Scan completed", vec![("processed", json!(state.processed)), ("available", json!(state.found))]),
+    };
 
-            if let Err(err) = sqlx::query(
-                "UPDATE scans
-                 SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL
-                 WHERE id = ?",
-            )
-            .bind(state.processed)
-            .bind(state.found)
-            .bind(scan_id)
-            .execute(db)
-            .await
-            {
-                error!(
-                    target: "domain_scanner::queue",
-                    context = "task_status",
-                    scan_id = %scan_id,
-                    status = "paused",
-                    error = %err,
-                    "failed to mark task paused"
-                );
-                let _ = add_event_log(
-                    db,
-                    &streams,
-                    scan_id,
-                    "ERROR",
-                    "task.status_update_failed",
-                    None,
-                    Some("Failed to mark task paused".to_string()),
-                    vec![
-                        ("error", json!(err.to_string())),
-                        ("status", json!("paused")),
-                    ],
-                )
-                .await;
-            }
+    let _ = queue_event_log(
+        &mut state.pending_log_flush, db, &scan_stream, scan_id,
+        if signal == TaskSignal::Run { "INFO" } else { "WARN" },
+        log_event, None, Some(log_msg.to_string()), log_fields,
+    ).await;
 
-            publish_scan_status(
-                &scan_stream,
-                scan_id,
-                "paused",
-                total,
-                state.processed,
-                state.found,
-                0,
-            )
-            .await;
-            streams.notify_scans();
-            let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
-            streams.cleanup_scan(scan_id).await;
-        }
-        TaskSignal::Run => {
-            let _ = queue_event_log(
-                &mut state.pending_log_flush,
-                db,
-                &scan_stream,
-                scan_id,
-                "INFO",
-                "task.summary",
-                None,
-                Some("Scan completed".to_string()),
-                vec![
-                    ("processed", json!(state.processed)),
-                    ("available", json!(state.found)),
-                ],
-            )
-            .await;
-            flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
-            if let Err(err) = sqlx::query(
-                "UPDATE scans
-                 SET status = 'finished', processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP
-                 WHERE id = ?",
-            )
-            .bind(state.processed)
-            .bind(state.found)
-            .bind(scan_id)
-            .execute(db)
-            .await
-            {
-                error!(
-                    target: "domain_scanner::queue",
-                    context = "task_status",
-                    scan_id = %scan_id,
-                    status = "finished",
-                    error = %err,
-                    "failed to mark task finished"
-                );
-                let _ = add_event_log(
-                    db,
-                    &streams,
-                    scan_id,
-                    "ERROR",
-                    "task.status_update_failed",
-                    None,
-                    Some("Failed to mark task finished".to_string()),
-                    vec![("error", json!(err.to_string())), ("status", json!("finished"))],
-                )
-                .await;
-            }
-            publish_scan_status(
-                &scan_stream,
-                scan_id,
-                "finished",
-                total,
-                state.processed,
-                state.found,
-                0,
-            )
-            .await;
-            streams.notify_scans();
-            let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
-            streams.cleanup_scan(scan_id).await;
+    flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
+
+    let stmt = match signal {
+        TaskSignal::Cancel => "UPDATE scans SET status = 'cancelled', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+        TaskSignal::Pause => "UPDATE scans SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL WHERE id = ?",
+        TaskSignal::Run => "UPDATE scans SET status = 'finished', processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+    };
+    if let Err(err) = sqlx::query(stmt)
+        .bind(state.processed)
+        .bind(state.found)
+        .bind(scan_id)
+        .execute(db)
+        .await
+    {
+        error!(target: "domain_scanner::queue", context = "task_status", scan_id = %scan_id, status, error = %err, "failed to mark task {}", status);
+        if signal != TaskSignal::Cancel {
+            let _ = add_event_log(db, &streams, scan_id, "ERROR", "task.status_update_failed", None,
+                Some(format!("Failed to mark task {}", status)),
+                vec![("error", json!(err.to_string())), ("status", json!(status))],
+            ).await;
         }
     }
+
+    publish_scan_status(&scan_stream, scan_id, status, total, state.processed, state.found, 0).await;
+    streams.notify_scans();
+    let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
+    streams.cleanup_scan(scan_id).await;
 
     task_control.unregister(scan_id);
 }

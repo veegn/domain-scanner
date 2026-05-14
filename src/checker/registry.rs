@@ -68,12 +68,6 @@ impl CheckerRegistry {
         registry
     }
 
-    pub fn clone_for_runtime(&self) -> Self {
-        Self {
-            checkers: self.checkers.clone(),
-        }
-    }
-
     /// Add a checker to the registry.
     pub fn add_checker(&mut self, checker: Arc<dyn DomainChecker>) {
         self.checkers.push(checker);

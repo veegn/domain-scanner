@@ -11,8 +11,6 @@ use tracing::{debug, error, info};
 struct PendingScanTask {
     scan_id: String,
     params: StartScanRequest,
-    processed: i64,
-    found: i64,
 }
 
 /// The single task background worker.
@@ -83,8 +81,6 @@ pub async fn start_task_worker(
                 &db,
                 &scan_id,
                 task.params,
-                task.processed,
-                task.found,
                 registry.clone(),
                 task_control.clone(),
                 streams.clone(),
@@ -153,8 +149,6 @@ impl PendingScanTask {
                 prefix: row.try_get("prefix").unwrap_or(None),
                 postfix: row.try_get("postfix").unwrap_or(None),
             },
-            processed: row.try_get("processed").unwrap_or(0),
-            found: row.try_get("found").unwrap_or(0),
         }
     }
 }

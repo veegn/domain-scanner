@@ -359,6 +359,15 @@ pub(super) async fn prepare_job_feeder(
     Ok(total)
 }
 
+fn emit_queued_event(scan_stream: &broadcast::Sender<ScanStreamMessage>, domain: &str) {
+    let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
+        id: 0,
+        message: json!({"event":"domain.queued","domain":domain}).to_string(),
+        level: "INFO".to_string(),
+        created_at: String::new(),
+    }));
+}
+
 fn spawn_domain_feeder(
     domains: Vec<String>,
     skip: usize,
@@ -394,12 +403,7 @@ fn spawn_domain_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
-            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
-                id: 0,
-                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
-                level: "INFO".to_string(),
-                created_at: String::new(),
-            }));
+            emit_queued_event(&scan_stream, &domain);
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -439,12 +443,7 @@ fn spawn_generator_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
-            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
-                id: 0,
-                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
-                level: "INFO".to_string(),
-                created_at: String::new(),
-            }));
+            emit_queued_event(&scan_stream, &domain);
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -488,12 +487,7 @@ fn spawn_combinator_feeder(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
                 break;
             }
-            let _ = scan_stream.send(ScanStreamMessage::Log(ScanLogEvent {
-                id: 0,
-                message: json!({"event":"domain.queued","domain":&domain}).to_string(),
-                level: "INFO".to_string(),
-                created_at: String::new(),
-            }));
+            emit_queued_event(&scan_stream, &domain);
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
