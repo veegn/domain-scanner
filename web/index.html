@@ -962,11 +962,11 @@
                     }
                 }
 
-                // Dynamic capacity: cards that fit the grid viewport
-                const cols = Math.max(1, Math.floor((consoleEl.clientWidth - 28) / 154));
-                const rows = Math.max(1, Math.floor((consoleEl.clientHeight - 28) / 29));
+                // Dynamic capacity: use exact rect, conservative per-card sizes with safety buffer
+                const rect = consoleEl.getBoundingClientRect();
+                const cols = Math.max(1, Math.floor((rect.width - 32) / 160));
+                const rows = Math.max(2, Math.floor((rect.height - 32) / 33) - 1);
                 let maxCards = cols * rows;
-                if (systemLines.length > 0) maxCards = Math.max(0, maxCards - cols);
 
                 const completed = [];
                 const active = [];
