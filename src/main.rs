@@ -47,7 +47,6 @@ async fn main() {
 
     // 3. Seed default TLDs + WHOIS servers on first startup
     web::seed_defaults(&db).await;
-    web::seed_builtin_dictionaries(&db).await;
 
     // 4. Load WHOIS servers from DB, then merge config.json overrides (config wins)
     let mut whois_servers = web::load_whois_servers(&db).await;

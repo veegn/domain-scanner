@@ -1,9 +1,6 @@
-use chrono::Utc;
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
-use std::path::Path;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 
@@ -316,86 +313,6 @@ pub async fn seed_defaults(pool: &SqlitePool) {
             error = %e,
             "seed commit failed"
         ),
-    }
-}
-
-pub async fn seed_builtin_dictionaries(pool: &SqlitePool) {
-    let builtins: &[(&str, &str, i64)] = &[
-        ("Built-in: 3-Letter Words", "gen_letters_3.txt", 416),
-        ("Built-in: 4-Letter Words", "gen_letters_4.txt", 1094),
-        ("Built-in: Repeated Letters", "gen_repeat.txt", 100178),
-        ("Built-in: Common Numbers", "gen_numbers.txt", 163),
-    ];
-
-    for (name, src_filename, word_count) in builtins {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM dictionaries WHERE name = ?)",
-        )
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
-
-        if exists {
-            continue;
-        }
-
-        let src_path = Path::new("seed/dictionaries").join(src_filename);
-        if !src_path.exists() {
-            warn!(
-                target: "domain_scanner::db",
-                context = "seed",
-                dict_name = name,
-                path = %src_path.display(),
-                "built-in dictionary source file not found, skipping"
-            );
-            continue;
-        }
-
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        let dst_path = Path::new("data/dictionaries").join(format!("{}.txt", id));
-
-        if let Err(e) = tokio::fs::copy(&src_path, &dst_path).await {
-            warn!(
-                target: "domain_scanner::db",
-                context = "seed",
-                dict_name = name,
-                error = %e,
-                "failed to copy built-in dictionary file"
-            );
-            continue;
-        }
-
-        if let Err(e) = sqlx::query(
-            "INSERT INTO dictionaries (id, name, word_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(word_count)
-        .bind(&now)
-        .bind(&now)
-        .execute(pool)
-        .await
-        {
-            let _ = tokio::fs::remove_file(&dst_path).await;
-            warn!(
-                target: "domain_scanner::db",
-                context = "seed",
-                dict_name = name,
-                error = %e,
-                "failed to insert built-in dictionary, cleaned up file"
-            );
-        } else {
-            info!(
-                target: "domain_scanner::db",
-                context = "seed",
-                dict_name = name,
-                dict_id = %id,
-                word_count,
-                "seeded built-in dictionary"
-            );
-        }
     }
 }
 

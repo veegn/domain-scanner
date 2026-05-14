@@ -25,8 +25,6 @@ WORKDIR /app
 COPY --from=builder /usr/src/app/target/release/domain-scanner /app/
 # Copy static web assets
 COPY --from=builder /usr/src/app/web /app/web
-# Copy built-in dictionary seed data (NOT in data/ volume, survives mount shadowing)
-COPY --from=builder /usr/src/app/seed /app/seed
 
 # Create empty directories for persistence
 RUN mkdir -p /app/data /app/logs
