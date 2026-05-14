@@ -963,9 +963,10 @@
                 }
 
                 // Dynamic capacity: cards that fit the grid viewport
-                const cols = Math.max(2, Math.floor((consoleEl.clientWidth - 32) / 150));
-                const rows = Math.max(3, Math.floor((consoleEl.clientHeight - 16) / 32));
-                const maxCards = cols * rows;
+                const cols = Math.max(1, Math.floor((consoleEl.clientWidth - 28) / 154));
+                const rows = Math.max(1, Math.floor((consoleEl.clientHeight - 28) / 29));
+                let maxCards = cols * rows;
+                if (systemLines.length > 0) maxCards = Math.max(0, maxCards - cols);
 
                 const completed = [];
                 const active = [];
@@ -982,9 +983,18 @@
                 const remaining = maxCards - activeLimit;
                 const visibleCompleted = completed.slice(-Math.max(0, remaining));
 
+                State.seenDomains = State.seenDomains || new Set();
                 let html = '';
-                for (const d of visibleActive) html += Utils.renderDomainCard(domainStates.get(d));
-                for (const d of visibleCompleted) html += Utils.renderDomainCard(domainStates.get(d));
+                for (const d of visibleActive) {
+                    const isNew = !State.seenDomains.has(d);
+                    if (isNew) State.seenDomains.add(d);
+                    html += Utils.renderDomainCard(domainStates.get(d), isNew);
+                }
+                for (const d of visibleCompleted) {
+                    const isNew = !State.seenDomains.has(d);
+                    if (isNew) State.seenDomains.add(d);
+                    html += Utils.renderDomainCard(domainStates.get(d), isNew);
+                }
                 if (systemLines.length > 0) {
                     html += Utils.renderSystemLine(systemLines[systemLines.length - 1]);
                 }
@@ -1052,6 +1062,7 @@
                 State.currentId = id;
                 State.lastLogId = 0;
                 State.selectedDomains.clear();
+                if (State.seenDomains) State.seenDomains.clear();
                 State.currentResults = [];
                 document.getElementById('currentId').innerText = id;
                 document.getElementById('statusArea').classList.remove('hidden');
@@ -1327,11 +1338,12 @@
 
             formatFields: f => f ? Object.entries(f).filter(([_,v])=>v!=null).map(([k,v])=>`${k}=${v}`).join(' | ') : '',
 
-            renderDomainCard(s) {
+            renderDomainCard(s, animate = false) {
                 const cssMap = { QUEUED: 'card-queued', SCAN: 'card-scanning', OPEN: 'card-open', TAKEN: 'card-taken', ERR: 'card-err' };
                 const cardClass = cssMap[s.tag] || 'card-scanning';
                 const shortTag = s.tag.length > 5 ? s.tag.slice(0,4) : s.tag;
-                return `<div class="domain-card ${cardClass}"><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${s.tag}">${shortTag}</span></div>`;
+                const animStyle = animate ? '' : ' style="animation: none;"';
+                return `<div class="domain-card ${cardClass}"${animStyle}><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${s.tag}">${shortTag}</span></div>`;
             },
             renderSystemLine(s) {
                 const detail = s.detail ? Utils.escapeHtml(s.detail) : '';
