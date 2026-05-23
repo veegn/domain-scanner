@@ -6,7 +6,7 @@ use crate::generator::{self, DictionaryCombinator};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
@@ -150,7 +150,7 @@ pub(super) async fn prepare_job_feeder(
     streams: &StreamHub,
     scan_id: &str,
     params: &StartScanRequest,
-    resume_processed: i64,
+    _resume_processed: i64,
     jobs_tx: &async_channel::Sender<String>,
     feeder_done: Arc<AtomicBool>,
     pending_domains: Arc<AtomicUsize>,
@@ -158,12 +158,35 @@ pub(super) async fn prepare_job_feeder(
     task_control: TaskControl,
 ) -> Result<i64, ()> {
     let scan_stream = streams.sender_for_scan(scan_id).await;
+    let already_processed = match get_processed_domains(db, scan_id).await {
+        Ok(domains) => Arc::new(domains),
+        Err(err) => {
+            let _ = add_event_log(
+                db,
+                streams,
+                scan_id,
+                "ERROR",
+                "storage.resume_state_failed",
+                None,
+                Some("Failed to load processed domains for resume".to_string()),
+                vec![("error", json!(err.to_string()))],
+            )
+            .await;
+            let _ = sqlx::query(
+                "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(scan_id)
+            .execute(db)
+            .await;
+            return Err(());
+        }
+    };
 
     if let Some(domains) = params.domains.clone() {
         let total = domains.len() as i64;
         spawn_domain_feeder(
             domains,
-            resume_processed as usize,
+            already_processed.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "manual",
@@ -177,14 +200,23 @@ pub(super) async fn prepare_job_feeder(
 
     if let Some(dict_ids) = &params.dictionary_ids {
         if !dict_ids.is_empty() {
-            let all_words = match crate::web::dictionary::load_multiple_dictionary_words(dict_ids).await {
+            let all_words = match crate::web::dictionary::load_multiple_dictionary_words(dict_ids)
+                .await
+            {
                 Ok(words) => words,
                 Err(err) => {
                     let _ = add_event_log(
-                        db, streams, scan_id, "ERROR", "dictionary.load_failed",
+                        db,
+                        streams,
+                        scan_id,
+                        "ERROR",
+                        "dictionary.load_failed",
                         None,
                         Some(format!("Failed to load dictionaries: {}", err)),
-                        vec![("dictionary_ids", json!(dict_ids)), ("error", json!(err.to_string()))],
+                        vec![
+                            ("dictionary_ids", json!(dict_ids)),
+                            ("error", json!(err.to_string())),
+                        ],
                     )
                     .await;
                     let _ = sqlx::query(
@@ -214,7 +246,7 @@ pub(super) async fn prepare_job_feeder(
 
             spawn_combinator_feeder(
                 combinator,
-                resume_processed as usize,
+                already_processed.clone(),
                 jobs_tx.clone(),
                 scan_id.to_string(),
                 feeder_done,
@@ -238,7 +270,10 @@ pub(super) async fn prepare_job_feeder(
                     "dictionary.load_failed",
                     None,
                     Some(format!("Failed to load dictionary {}: {}", dict_id, err)),
-                    vec![("dictionary_id", json!(dict_id)), ("error", json!(err.to_string()))],
+                    vec![
+                        ("dictionary_id", json!(dict_id)),
+                        ("error", json!(err.to_string())),
+                    ],
                 )
                 .await;
                 let _ = sqlx::query(
@@ -264,7 +299,7 @@ pub(super) async fn prepare_job_feeder(
 
         spawn_domain_feeder(
             domains,
-            resume_processed as usize,
+            already_processed.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "dictionary",
@@ -281,7 +316,7 @@ pub(super) async fn prepare_job_feeder(
         let prefix = params.prefix.clone().unwrap_or_default();
         let postfix = params.postfix.clone().unwrap_or_default();
         let suffix = params.suffix.clone();
-        
+
         let domains: Vec<String> = dict_words
             .into_iter()
             .map(|word| format!("{}{}{}{}", prefix, word, postfix, suffix))
@@ -289,7 +324,7 @@ pub(super) async fn prepare_job_feeder(
 
         spawn_domain_feeder(
             domains,
-            resume_processed as usize,
+            already_processed.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "dictionary",
@@ -308,7 +343,7 @@ pub(super) async fn prepare_job_feeder(
         params.regex.clone().unwrap_or_default(),
         "".to_string(),
         params.priority_words.clone().unwrap_or_default(),
-        resume_processed,
+        0,
     ) {
         Ok(generator) => generator,
         Err(err) => {
@@ -349,6 +384,7 @@ pub(super) async fn prepare_job_feeder(
     let total = domain_gen.total_count as i64;
     spawn_generator_feeder(
         domain_gen,
+        already_processed,
         jobs_tx.clone(),
         scan_id.to_string(),
         feeder_done,
@@ -370,7 +406,7 @@ fn emit_queued_event(scan_stream: &broadcast::Sender<ScanStreamMessage>, domain:
 
 fn spawn_domain_feeder(
     domains: Vec<String>,
-    skip: usize,
+    already_processed: Arc<HashSet<String>>,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     source: &'static str,
@@ -380,7 +416,10 @@ fn spawn_domain_feeder(
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
-        for domain in domains.into_iter().skip(skip) {
+        for domain in domains {
+            if already_processed.contains(&domain) {
+                continue;
+            }
             if TaskControl::signal(&task_signal) != TaskSignal::Run {
                 debug!(
                     target: "domain_scanner::queue",
@@ -411,6 +450,7 @@ fn spawn_domain_feeder(
 
 fn spawn_generator_feeder(
     domain_gen: generator::DomainGenerator,
+    already_processed: Arc<HashSet<String>>,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     feeder_done: Arc<AtomicBool>,
@@ -421,6 +461,9 @@ fn spawn_generator_feeder(
     tokio::spawn(async move {
         let mut generated = domain_gen.domains;
         while let Some(domain) = generated.recv().await {
+            if already_processed.contains(&domain) {
+                continue;
+            }
             if TaskControl::signal(&task_signal) != TaskSignal::Run {
                 debug!(
                     target: "domain_scanner::queue",
@@ -451,7 +494,7 @@ fn spawn_generator_feeder(
 
 fn spawn_combinator_feeder(
     mut combinator: DictionaryCombinator,
-    skip: usize,
+    already_processed: Arc<HashSet<String>>,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     feeder_done: Arc<AtomicBool>,
@@ -460,11 +503,10 @@ fn spawn_combinator_feeder(
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
-        if skip > 0 {
-            combinator.skip_to(skip);
-        }
-
         while let Some(domain) = combinator.next() {
+            if already_processed.contains(&domain) {
+                continue;
+            }
             if TaskControl::signal(&task_signal) != TaskSignal::Run {
                 debug!(
                     target: "domain_scanner::queue",
@@ -634,6 +676,18 @@ pub(super) async fn get_result_counts(
     ))
 }
 
+async fn get_processed_domains(
+    db: &SqlitePool,
+    scan_id: &str,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, String>("SELECT domain FROM results WHERE scan_id = ?")
+        .bind(scan_id)
+        .fetch_all(db)
+        .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
 pub(super) async fn flush_pending_state_logs(
     db: &SqlitePool,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
@@ -688,11 +742,13 @@ pub(super) async fn flush_pending_results(
             .push_bind(&result.expiration_date)
             .push_bind(&result.signatures);
     });
-    builder.push(
-        " RETURNING rowid as event_id, domain, available, expiration_date, signatures",
-    );
+    builder.push(" RETURNING rowid as event_id, domain, available, expiration_date, signatures");
 
-    match builder.build_query_as::<ScanResultEvent>().fetch_all(db).await {
+    match builder
+        .build_query_as::<ScanResultEvent>()
+        .fetch_all(db)
+        .await
+    {
         Ok(rows) => {
             for row in rows {
                 if row.available {
@@ -747,11 +803,7 @@ async fn flush_pending_logs(
     });
     builder.push(" RETURNING id, message, level, created_at");
 
-    match builder
-        .build_query_as::<ScanLogEvent>()
-        .fetch_all(db)
-        .await
-    {
+    match builder.build_query_as::<ScanLogEvent>().fetch_all(db).await {
         Ok(inserted) => {
             for log in inserted {
                 let _ = scan_stream.send(ScanStreamMessage::Log(log));

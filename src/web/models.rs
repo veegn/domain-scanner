@@ -181,6 +181,13 @@ impl StartScanRequest {
         }
 
         if let Some(domains) = &self.domains {
+            if self.dictionary_id.is_some()
+                || self.dictionary_ids.is_some()
+                || self.dictionary_words.is_some()
+            {
+                return Err("Cannot combine explicit domains with dictionary inputs".to_string());
+            }
+
             if domains.is_empty() {
                 return Err("Domains list cannot be empty".to_string());
             }
@@ -200,11 +207,13 @@ impl StartScanRequest {
         }
 
         if let Some(_dict_id) = &self.dictionary_id {
-            if self.dictionary_words.is_some() {
-                return Err("Cannot provide both dictionary_id and dictionary_words".to_string());
+            if self.dictionary_words.is_some() || self.dictionary_ids.is_some() {
+                return Err("Cannot combine dictionary_id with other dictionary inputs".to_string());
             }
 
             validate_suffix(&self.suffix)?;
+            validate_optional_fragment("prefix", self.prefix.as_deref())?;
+            validate_optional_fragment("postfix", self.postfix.as_deref())?;
             return Ok(());
         }
 
@@ -217,17 +226,21 @@ impl StartScanRequest {
             }
 
             validate_suffix(&self.suffix)?;
+            validate_optional_fragment("prefix", self.prefix.as_deref())?;
+            validate_optional_fragment("postfix", self.postfix.as_deref())?;
 
             if let Some(template) = &self.format_template {
                 if template.len() > 256 {
                     return Err("Format template must be at most 256 characters".to_string());
                 }
+                validate_template(template, dict_ids.len())?;
             }
 
             if let Some(sep) = &self.separator {
                 if sep.len() > 8 {
                     return Err("Separator must be at most 8 characters".to_string());
                 }
+                validate_separator(sep)?;
             }
 
             return Ok(());
@@ -246,11 +259,14 @@ impl StartScanRequest {
             }
 
             validate_suffix(&self.suffix)?;
-            
+
             let prefix = self.prefix.as_deref().unwrap_or("");
             let postfix = self.postfix.as_deref().unwrap_or("");
+            validate_optional_fragment("prefix", self.prefix.as_deref())?;
+            validate_optional_fragment("postfix", self.postfix.as_deref())?;
 
             for word in dict_words {
+                validate_domain_fragment("dictionary word", word)?;
                 let domain = format!("{}{}{}{}", prefix, word, postfix, self.suffix);
                 validate_domain(&domain)?;
             }
@@ -440,7 +456,7 @@ pub struct ReorderRequest {
     pub direction: String,
 }
 
-fn validate_domain(domain: &str) -> Result<(), String> {
+pub(crate) fn validate_domain(domain: &str) -> Result<(), String> {
     let domain = domain.trim();
     if domain.is_empty() {
         return Err("Domain cannot be empty".to_string());
@@ -494,6 +510,99 @@ fn validate_suffix(suffix: &str) -> Result<(), String> {
     validate_domain(&format!("example{}", suffix))
 }
 
+pub(crate) fn validate_domain_fragment(label: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+
+    if value.len() > MAX_PRIORITY_WORD_LENGTH {
+        return Err(format!(
+            "{label} '{}' exceeds max length {}",
+            value, MAX_PRIORITY_WORD_LENGTH
+        ));
+    }
+
+    if value.starts_with('-') || value.ends_with('-') {
+        return Err(format!("{label} '{}' cannot start or end with '-'", value));
+    }
+
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(format!("{label} '{}' contains invalid characters", value));
+    }
+
+    Ok(())
+}
+
+fn validate_optional_fragment(label: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+        validate_domain_fragment(label, value)?;
+    }
+    Ok(())
+}
+
+fn validate_separator(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("Separator contains invalid characters".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_template(template: &str, dict_count: usize) -> Result<(), String> {
+    if !template.is_ascii() {
+        return Err("Format template must contain only ASCII characters".to_string());
+    }
+
+    let mut referenced = vec![false; dict_count];
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                let Some(end) = bytes[i + 1..].iter().position(|&b| b == b'}') else {
+                    return Err("Format template has an unmatched '{'".to_string());
+                };
+                let idx_raw = &template[i + 1..i + 1 + end];
+                let idx = idx_raw
+                    .parse::<usize>()
+                    .map_err(|_| "Format template placeholders must be numeric".to_string())?;
+                if idx >= dict_count {
+                    return Err(format!(
+                        "Format template placeholder {{{idx}}} has no matching dictionary"
+                    ));
+                }
+                referenced[idx] = true;
+                i += end + 2;
+            }
+            b'}' => return Err("Format template has an unmatched '}'".to_string()),
+            b'a'..=b'z' | b'0'..=b'9' | b'-' => i += 1,
+            _ => {
+                return Err(
+                    "Format template literals may only contain lowercase letters, digits, and '-'"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if referenced.iter().any(|seen| !seen) {
+        return Err("Format template must reference every selected dictionary".to_string());
+    }
+
+    Ok(())
+}
+
 fn validate_priority_word(word: &str) -> Result<(), String> {
     let word = word.trim();
     if word.is_empty() {
@@ -518,4 +627,64 @@ fn validate_priority_word(word: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_multi_dictionary_request() -> StartScanRequest {
+        StartScanRequest {
+            length: 0,
+            suffix: ".com".to_string(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: None,
+            dictionary_id: None,
+            dictionary_ids: Some(vec!["dict-a".to_string(), "dict-b".to_string()]),
+            separator: None,
+            format_template: Some("{0}-{1}".to_string()),
+            prefix: None,
+            postfix: None,
+        }
+    }
+
+    #[test]
+    fn multi_dictionary_template_must_reference_known_dictionaries() {
+        let mut req = base_multi_dictionary_request();
+        req.format_template = Some("{0}-{2}".to_string());
+
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn multi_dictionary_template_rejects_invalid_literals() {
+        let mut req = base_multi_dictionary_request();
+        req.format_template = Some("{0}_{1}".to_string());
+
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn dictionary_words_validate_rendered_domains() {
+        let req = StartScanRequest {
+            length: 0,
+            suffix: ".com".to_string(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: Some(vec!["bad_word".to_string()]),
+            dictionary_id: None,
+            dictionary_ids: None,
+            separator: None,
+            format_template: None,
+            prefix: None,
+            postfix: None,
+        };
+
+        assert!(req.validate().is_err());
+    }
 }

@@ -3,6 +3,7 @@ use tracing::{error, warn};
 
 #[derive(Debug, Default)]
 pub struct StartupRecovery {
+    pub recovered_running: u64,
     pub recovered_cancelling: u64,
     pub recovered_pausing: u64,
     pub repaired_counters: u64,
@@ -16,16 +17,40 @@ impl StartupRecovery {
 }
 
 pub async fn recover_startup_tasks(db: &SqlitePool) -> StartupRecovery {
+    let recovered_running = mark_stale_running_as_pending(db).await;
     let recovered_cancelling = mark_stale_cancelling_as_cancelled(db).await;
     let recovered_pausing = mark_stale_pausing_as_paused(db).await;
     let repaired_counters = repair_scan_counters(db).await;
     let ready_scan_ids = fetch_ready_scan_ids(db).await;
 
     StartupRecovery {
+        recovered_running,
         recovered_cancelling,
         recovered_pausing,
         repaired_counters,
         ready_scan_ids,
+    }
+}
+
+async fn mark_stale_running_as_pending(db: &SqlitePool) -> u64 {
+    match sqlx::query(
+        "UPDATE scans
+         SET status = 'pending'
+         WHERE status = 'running'",
+    )
+    .execute(db)
+    .await
+    {
+        Ok(result) => result.rows_affected(),
+        Err(err) => {
+            error!(
+                target: "domain_scanner::recovery",
+                context = "startup",
+                error = %err,
+                "failed to recover stale running scans"
+            );
+            0
+        }
     }
 }
 
@@ -119,7 +144,7 @@ async fn fetch_ready_scan_ids(db: &SqlitePool) -> Vec<String> {
     match sqlx::query(
         "SELECT id
          FROM scans
-         WHERE status IN ('pending', 'running')
+         WHERE status = 'pending'
            AND (retry_not_before IS NULL OR retry_not_before <= strftime('%s','now'))
          ORDER BY priority DESC, created_at ASC",
     )
@@ -208,6 +233,7 @@ mod tests {
         let recovery = recover_startup_tasks(&pool).await;
 
         assert_eq!(recovery.recovered_cancelling, 1);
+        assert_eq!(recovery.recovered_running, 1);
         assert_eq!(recovery.recovered_pausing, 1);
         assert_eq!(recovery.repaired_counters, 3);
         assert_eq!(recovery.ready_scan_ids, vec!["run-1", "pending-1"]);

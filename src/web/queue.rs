@@ -160,7 +160,7 @@ async fn fetch_next_ready_task(db: &SqlitePool) -> Option<sqlx::sqlite::SqliteRo
                p.priority_words, p.domains, p.dictionary_words, p.prefix, p.postfix, p.dictionary_id, p.dictionary_ids, p.separator, p.format_template
         FROM scans s
         LEFT JOIN scan_payloads p ON s.id = p.scan_id
-        WHERE s.status IN ('pending', 'running')
+        WHERE s.status = 'pending'
           AND (s.retry_not_before IS NULL OR s.retry_not_before <= ?)
         ORDER BY s.priority DESC, s.created_at ASC LIMIT 1
     ",

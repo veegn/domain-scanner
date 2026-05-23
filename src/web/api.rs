@@ -56,7 +56,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scan/:id/reorder", post(reorder_scan))
         .route("/api/dictionary", post(upload_dictionary))
         .route("/api/dictionaries", get(list_dictionaries))
-        .route("/api/dictionary/:id", get(get_dictionary).put(rename_dictionary).delete(delete_dictionary))
+        .route(
+            "/api/dictionary/:id",
+            get(get_dictionary)
+                .put(rename_dictionary)
+                .delete(delete_dictionary),
+        )
         .route("/api/dictionary/:id/words", get(get_dictionary_words))
         .with_state(state)
 }
@@ -65,6 +70,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 struct PublicDomainSearchQuery {
     q: Option<String>,
     limit: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct ResultsQuery {
+    offset: Option<i64>,
+    limit: Option<i64>,
 }
 
 async fn start_scan(
@@ -194,8 +205,14 @@ async fn get_scan_status(
     }
 }
 
-async fn get_results(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
-    let rows = match fetch_scan_results(&state.db, &id, 0).await {
+async fn get_results(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<ResultsQuery>,
+) -> ApiResponse {
+    let offset = query.offset.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(500).clamp(1, 5_000);
+    let rows = match fetch_scan_results_page(&state.db, &id, offset, limit).await {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -238,6 +255,8 @@ async fn publish_scan(
                 StatusCode::NOT_FOUND
             } else if message.contains("publish title cannot be empty") {
                 StatusCode::BAD_REQUEST
+            } else if message.contains("only finished scans can be published") {
+                StatusCode::CONFLICT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -313,6 +332,21 @@ async fn search_public_domains(
     let needle = query.q.unwrap_or_default().trim().to_string();
     if needle.is_empty() {
         return Json(Vec::<PublishedDomainHit>::new()).into_response();
+    }
+    if needle.len() > 253 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "search query must be at most 253 characters".to_string(),
+        );
+    }
+    if !needle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "search query may only contain letters, digits, '-' and '.'".to_string(),
+        );
     }
 
     let limit = query.limit.unwrap_or(50).clamp(1, 1000) as i64;
@@ -662,6 +696,26 @@ async fn fetch_scan_results(
     .await
 }
 
+async fn fetch_scan_results_page(
+    db: &sqlx::SqlitePool,
+    id: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<ResultRow>, sqlx::Error> {
+    sqlx::query_as::<_, ResultRow>(
+        "SELECT rowid as event_id, domain, available, expiration_date, signatures
+         FROM results
+         WHERE scan_id = ? AND available = 1
+         ORDER BY rowid ASC
+         LIMIT ? OFFSET ?",
+    )
+    .bind(id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(db)
+    .await
+}
+
 async fn fetch_published_scan_summaries(
     db: &sqlx::SqlitePool,
 ) -> Result<Vec<PublishedScanSummary>, sqlx::Error> {
@@ -715,7 +769,7 @@ async fn fetch_public_domain_hits(
     needle: &str,
     limit: i64,
 ) -> Result<Vec<PublishedDomainHit>, sqlx::Error> {
-    let pattern = format!("%{needle}%");
+    let pattern = format!("{needle}%");
     sqlx::query_as::<_, PublishedDomainHit>(
         "SELECT pd.domain,
                 pd.available,
@@ -851,9 +905,18 @@ async fn delete_scan(
     let (status, total, processed, found) = row;
     let has_live_task = state.task_control.contains(&id);
 
-    if has_live_task && matches!(status.as_str(), "pending" | "running" | "cancelling") {
-        state.task_control.cancel(&id);
-        match sqlx::query("UPDATE scans SET status = 'cancelling' WHERE id = ?")
+    if matches!(status.as_str(), "running" | "pausing" | "cancelling") {
+        if has_live_task {
+            state.task_control.cancel(&id);
+        }
+        let next_status = if has_live_task {
+            "cancelling"
+        } else {
+            "cancelled"
+        };
+        match sqlx::query("UPDATE scans SET status = ?, finished_at = CASE WHEN ? = 'cancelled' THEN COALESCE(finished_at, CURRENT_TIMESTAMP) ELSE finished_at END WHERE id = ?")
+            .bind(next_status)
+            .bind(next_status)
             .bind(&id)
             .execute(&state.db)
             .await
@@ -866,7 +929,7 @@ async fn delete_scan(
                         &id,
                         ScanStreamMessage::Status(ScanStatus {
                             id: id.clone(),
-                            status: "cancelling".to_string(),
+                            status: next_status.to_string(),
                             total,
                             processed,
                             found,
@@ -874,7 +937,11 @@ async fn delete_scan(
                         }),
                     )
                     .await;
-                StatusCode::ACCEPTED.into_response()
+                if has_live_task {
+                    StatusCode::ACCEPTED.into_response()
+                } else {
+                    StatusCode::OK.into_response()
+                }
             }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1059,10 +1126,16 @@ async fn upload_dictionary(
 ) -> ApiResponse {
     let name = params.name.unwrap_or_default().trim().to_string();
     if name.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "dictionary name is required".to_string());
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "dictionary name is required".to_string(),
+        );
     }
     if body.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "dictionary body cannot be empty".to_string());
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "dictionary body cannot be empty".to_string(),
+        );
     }
 
     match dictionary::create_dictionary(&state.db, &name, &body).await {
@@ -1086,10 +1159,7 @@ async fn list_dictionaries(State(state): State<Arc<AppState>>) -> ApiResponse {
     }
 }
 
-async fn get_dictionary(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResponse {
+async fn get_dictionary(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match dictionary::get_dictionary(&state.db, &id).await {
         Ok(Some(detail)) => Json(detail).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),

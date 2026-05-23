@@ -45,6 +45,7 @@ pub struct PublishedDomainFileRow {
 #[derive(Debug, Clone, FromRow)]
 struct ScanPublicationSource {
     id: String,
+    status: String,
     suffix: String,
     pattern: String,
     length: i64,
@@ -63,7 +64,7 @@ pub async fn create_published_scan(
     }
 
     let scan = sqlx::query_as::<_, ScanPublicationSource>(
-        "SELECT id, suffix, pattern, length, finished_at, created_at
+        "SELECT id, status, suffix, pattern, length, finished_at, created_at
          FROM scans
          WHERE id = ?",
     )
@@ -72,6 +73,10 @@ pub async fn create_published_scan(
     .await
     .context("failed to load scan for publication")?
     .ok_or_else(|| anyhow!("scan not found"))?;
+
+    if scan.status != "finished" {
+        bail!("only finished scans can be published");
+    }
 
     let domains = sqlx::query_as::<_, PublishedDomainFileRow>(
         "SELECT domain, available, expiration_date, signatures
@@ -189,7 +194,8 @@ pub async fn update_published_scan(
     .await
     .context("failed to load published scan for update")?;
 
-    let Some((scan_id, slug, suffix, pattern, length, published_at, static_dir, finished_at)) = row else {
+    let Some((scan_id, slug, suffix, pattern, length, published_at, static_dir, finished_at)) = row
+    else {
         return Ok(None);
     };
 

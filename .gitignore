@@ -50,4 +50,8 @@ data/scans.db*
 .playwright-cli/
 logs/
 data/published/
+web/published/
+data/dictionaries/
 .agents/
+.claude/
+tmpclaude-*

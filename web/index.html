@@ -498,7 +498,7 @@
             async loadResults() {
                 if (!State.currentId) return;
                 try {
-                    State.currentResults = await this.fetchJson(`api/scan/${State.currentId}/results`);
+                    State.currentResults = await this.fetchJson(`api/scan/${State.currentId}/results?limit=5000`);
                     UI.renderResults();
                 } catch (e) { console.error('Data pull failed:', e); }
             },
@@ -780,7 +780,7 @@
                     openBtn.classList.add('inline-flex');
                 } else if (
                     currentScan.found > 0 &&
-                    ['finished', 'paused', 'cancelled'].includes(currentScan.status)
+                    currentScan.status === 'finished'
                 ) {
                     publishBtn.classList.remove('hidden');
                     publishBtn.classList.add('inline-flex');
@@ -938,6 +938,11 @@
 
                 if (filtered.length > 500) {
                     html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Viewing limited to 500 entries (Total Available: ${filtered.length})</td></tr>`;
+                } else {
+                    const currentScan = State.scans.find(item => item.id === State.currentId);
+                    if (currentScan && currentScan.found > State.currentResults.length) {
+                        html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Loaded ${State.currentResults.length} of ${currentScan.found} available domains</td></tr>`;
+                    }
                 }
 
                 tableBody.innerHTML = html;
@@ -1194,6 +1199,10 @@
                 if (!scan) return;
                 if (scan.found <= 0) {
                     alert('No available domains to publish.');
+                    return;
+                }
+                if (scan.status !== 'finished') {
+                    alert('Only finished scans can be published.');
                     return;
                 }
 

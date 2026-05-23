@@ -6,6 +6,8 @@ use std::path::Path;
 use tokio::fs;
 use uuid::Uuid;
 
+use super::models::validate_domain_fragment;
+
 const DICTIONARY_ROOT: &str = "data/dictionaries";
 const MAX_DICTIONARY_WORDS: usize = 2_000_000;
 
@@ -33,10 +35,10 @@ pub async fn create_dictionary(
         anyhow::bail!("dictionary name cannot be empty");
     }
 
-    let text = String::from_utf8(body.to_vec())
-        .context("dictionary file is not valid UTF-8")?;
+    let text = String::from_utf8(body.to_vec()).context("dictionary file is not valid UTF-8")?;
 
-    let words: Vec<&str> = text.lines()
+    let words: Vec<&str> = text
+        .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
@@ -51,6 +53,10 @@ pub async fn create_dictionary(
             words.len(),
             MAX_DICTIONARY_WORDS
         );
+    }
+
+    for word in &words {
+        validate_domain_fragment("dictionary word", word).map_err(anyhow::Error::msg)?;
     }
 
     let id = Uuid::new_v4().to_string();
@@ -112,11 +118,7 @@ pub async fn get_dictionary(
     .await
 }
 
-pub async fn get_dictionary_words(
-    id: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Vec<String>> {
+pub async fn get_dictionary_words(id: &str, offset: usize, limit: usize) -> Result<Vec<String>> {
     let file_path = Path::new(DICTIONARY_ROOT).join(format!("{}.txt", id));
     let text = fs::read_to_string(&file_path)
         .await
@@ -171,21 +173,21 @@ pub async fn rename_dictionary(
     }
 
     let now = Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "UPDATE dictionaries SET name = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(name)
-    .bind(&now)
-    .bind(id)
-    .execute(db)
-    .await
-    .context("failed to rename dictionary")?;
+    let result = sqlx::query("UPDATE dictionaries SET name = ?, updated_at = ? WHERE id = ?")
+        .bind(name)
+        .bind(&now)
+        .bind(id)
+        .execute(db)
+        .await
+        .context("failed to rename dictionary")?;
 
     if result.rows_affected() == 0 {
         return Ok(None);
     }
 
-    get_dictionary(db, id).await.map_err(|e| anyhow!("failed to fetch renamed dictionary: {}", e))
+    get_dictionary(db, id)
+        .await
+        .map_err(|e| anyhow!("failed to fetch renamed dictionary: {}", e))
 }
 
 pub async fn delete_dictionary(db: &SqlitePool, id: &str) -> Result<bool> {
@@ -201,9 +203,12 @@ pub async fn delete_dictionary(db: &SqlitePool, id: &str) -> Result<bool> {
 
     let file_path = Path::new(DICTIONARY_ROOT).join(format!("{}.txt", id));
     if file_path.exists() {
-        fs::remove_file(&file_path)
-            .await
-            .with_context(|| format!("deleted db row but failed to remove dictionary file '{}'", file_path.display()))?;
+        fs::remove_file(&file_path).await.with_context(|| {
+            format!(
+                "deleted db row but failed to remove dictionary file '{}'",
+                file_path.display()
+            )
+        })?;
     }
 
     Ok(true)

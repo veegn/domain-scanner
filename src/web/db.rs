@@ -1,14 +1,15 @@
-use sqlx::sqlite::SqlitePool;
+use anyhow::{Context, Result};
+use sqlx::{Row, sqlite::SqlitePool};
 use std::collections::HashMap;
 use tracing::{info, warn};
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 
-pub async fn init_db() -> SqlitePool {
-    let _ = std::fs::create_dir_all("data");
+pub async fn init_db() -> Result<SqlitePool> {
+    std::fs::create_dir_all("data").context("failed to create data directory")?;
     let pool = SqlitePool::connect("sqlite:data/scans.db?mode=rwc")
         .await
-        .unwrap();
+        .context("failed to open SQLite database at data/scans.db")?;
 
     let pragmas = [
         "PRAGMA foreign_keys = ON;",
@@ -18,7 +19,10 @@ pub async fn init_db() -> SqlitePool {
         "PRAGMA temp_store = MEMORY;",
     ];
     for pragma in pragmas {
-        let _ = sqlx::query(pragma).execute(&pool).await;
+        sqlx::query(pragma)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("failed to apply database pragma: {pragma}"))?;
     }
 
     sqlx::query(
@@ -41,10 +45,8 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
-    let _ = sqlx::query("ALTER TABLE scans ADD COLUMN retry_not_before INTEGER")
-        .execute(&pool)
-        .await;
+    .context("failed to create scans table")?;
+    add_column_if_missing(&pool, "scans", "retry_not_before", "INTEGER").await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scan_payloads (
@@ -59,15 +61,15 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create scan_payloads table")?;
 
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_words TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN prefix TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN postfix TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_id TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN dictionary_ids TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN separator TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE scan_payloads ADD COLUMN format_template TEXT").execute(&pool).await;
+    add_column_if_missing(&pool, "scan_payloads", "dictionary_words", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "prefix", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "postfix", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "dictionary_id", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "dictionary_ids", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "separator", "TEXT").await?;
+    add_column_if_missing(&pool, "scan_payloads", "format_template", "TEXT").await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dictionaries (
@@ -80,7 +82,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create dictionaries table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS results (
@@ -95,7 +97,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create results table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scan_logs (
@@ -109,7 +111,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create scan_logs table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS tlds (
@@ -119,7 +121,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create tlds table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS whois_servers (
@@ -130,7 +132,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create whois_servers table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS published_scans (
@@ -149,7 +151,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create published_scans table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS published_domains (
@@ -165,7 +167,7 @@ pub async fn init_db() -> SqlitePool {
     )
     .execute(&pool)
     .await
-    .unwrap();
+    .context("failed to create published_domains table")?;
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_results_scan_id ON results(scan_id)")
         .execute(&pool)
@@ -178,11 +180,9 @@ pub async fn init_db() -> SqlitePool {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_scan_id ON scan_logs(scan_id)")
         .execute(&pool)
         .await;
-    let _ = sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_logs_scan_id_id ON scan_logs(scan_id, id)",
-    )
-    .execute(&pool)
-    .await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_scan_id_id ON scan_logs(scan_id, id)")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_scans_status_priority ON scans(status, priority DESC, created_at ASC)",
     )
@@ -228,7 +228,36 @@ pub async fn init_db() -> SqlitePool {
     .execute(&pool)
     .await;
 
-    pool
+    Ok(pool)
+}
+
+async fn add_column_if_missing(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let exists: bool = sqlx::query(&pragma)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to inspect table '{table}'"))?
+        .into_iter()
+        .any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == column)
+        });
+
+    if exists {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    sqlx::query(&sql)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to add column '{column}' to table '{table}'"))?;
+    Ok(())
 }
 
 pub async fn seed_defaults(pool: &SqlitePool) {

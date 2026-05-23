@@ -1,7 +1,7 @@
 use super::models::{ScanStreamMessage, StartScanRequest, StreamHub, TaskControl, TaskSignal};
 use super::scan_runtime_support::{
     COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, STATUS_PUBLISH_INTERVAL,
-    WORKER_COUNT, WORKER_DELAY_MS, ScanRuntimeState, flush_pending_results,
+    ScanRuntimeState, WORKER_COUNT, WORKER_DELAY_MS, flush_pending_results,
     flush_pending_state_logs, flush_scan_buffers, get_result_counts, initialize_scan_counters,
     is_whois_rate_limited, prepare_job_feeder, publish_scan_status, queue_event_log,
 };
@@ -66,7 +66,11 @@ pub(super) async fn run_scan_logic(
     .await
     {
         Ok(total) => total,
-        Err(()) => return,
+        Err(()) => {
+            streams.cleanup_scan(scan_id).await;
+            task_control.unregister(scan_id);
+            return;
+        }
     };
     let mut jobs_tx = Some(jobs_tx);
 
@@ -185,7 +189,8 @@ pub(super) async fn run_scan_logic(
         match msg {
             crate::WorkerMessage::Scanning(domain) => {
                 // SSE-only broadcast: scanning status notification without DB persistence
-                let payload = serde_json::json!({"event":"domain.scanning","domain":&domain}).to_string();
+                let payload =
+                    serde_json::json!({"event":"domain.scanning","domain":&domain}).to_string();
                 let _ = scan_stream.send(crate::web::models::ScanStreamMessage::Log(
                     crate::web::models::ScanLogEvent {
                         id: 0,
@@ -254,23 +259,64 @@ pub(super) async fn run_scan_logic(
 
     let signal = TaskControl::signal(&task_signal);
     let (status, log_event, log_msg, log_fields) = match signal {
-        TaskSignal::Cancel => ("cancelled", "task.cancelled", "Scan cancelled", vec![("processed", json!(state.processed)), ("found", json!(state.found))]),
-        TaskSignal::Pause => ("paused", "task.paused", "Scan paused", vec![("processed", json!(state.processed)), ("found", json!(state.found))]),
-        TaskSignal::Run => ("finished", "task.summary", "Scan completed", vec![("processed", json!(state.processed)), ("available", json!(state.found))]),
+        TaskSignal::Cancel => (
+            "cancelled",
+            "task.cancelled",
+            "Scan cancelled",
+            vec![
+                ("processed", json!(state.processed)),
+                ("found", json!(state.found)),
+            ],
+        ),
+        TaskSignal::Pause => (
+            "paused",
+            "task.paused",
+            "Scan paused",
+            vec![
+                ("processed", json!(state.processed)),
+                ("found", json!(state.found)),
+            ],
+        ),
+        TaskSignal::Run => (
+            "finished",
+            "task.summary",
+            "Scan completed",
+            vec![
+                ("processed", json!(state.processed)),
+                ("available", json!(state.found)),
+            ],
+        ),
     };
 
     let _ = queue_event_log(
-        &mut state.pending_log_flush, db, &scan_stream, scan_id,
-        if signal == TaskSignal::Run { "INFO" } else { "WARN" },
-        log_event, None, Some(log_msg.to_string()), log_fields,
-    ).await;
+        &mut state.pending_log_flush,
+        db,
+        &scan_stream,
+        scan_id,
+        if signal == TaskSignal::Run {
+            "INFO"
+        } else {
+            "WARN"
+        },
+        log_event,
+        None,
+        Some(log_msg.to_string()),
+        log_fields,
+    )
+    .await;
 
     flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
 
     let stmt = match signal {
-        TaskSignal::Cancel => "UPDATE scans SET status = 'cancelled', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-        TaskSignal::Pause => "UPDATE scans SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL WHERE id = ?",
-        TaskSignal::Run => "UPDATE scans SET status = 'finished', processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+        TaskSignal::Cancel => {
+            "UPDATE scans SET status = 'cancelled', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+        TaskSignal::Pause => {
+            "UPDATE scans SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL WHERE id = ?"
+        }
+        TaskSignal::Run => {
+            "UPDATE scans SET status = 'finished', processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
     };
     if let Err(err) = sqlx::query(stmt)
         .bind(state.processed)
@@ -281,14 +327,30 @@ pub(super) async fn run_scan_logic(
     {
         error!(target: "domain_scanner::queue", context = "task_status", scan_id = %scan_id, status, error = %err, "failed to mark task {}", status);
         if signal != TaskSignal::Cancel {
-            let _ = add_event_log(db, &streams, scan_id, "ERROR", "task.status_update_failed", None,
+            let _ = add_event_log(
+                db,
+                &streams,
+                scan_id,
+                "ERROR",
+                "task.status_update_failed",
+                None,
                 Some(format!("Failed to mark task {}", status)),
                 vec![("error", json!(err.to_string())), ("status", json!(status))],
-            ).await;
+            )
+            .await;
         }
     }
 
-    publish_scan_status(&scan_stream, scan_id, status, total, state.processed, state.found, 0).await;
+    publish_scan_status(
+        &scan_stream,
+        scan_id,
+        status,
+        total,
+        state.processed,
+        state.found,
+        0,
+    )
+    .await;
     streams.notify_scans();
     let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
     streams.cleanup_scan(scan_id).await;
@@ -296,10 +358,7 @@ pub(super) async fn run_scan_logic(
     task_control.unregister(scan_id);
 }
 
-fn should_handle_drained_feeder(
-    feeder_done: &AtomicBool,
-    pending_domains: &AtomicUsize,
-) -> bool {
+fn should_handle_drained_feeder(feeder_done: &AtomicBool, pending_domains: &AtomicUsize) -> bool {
     feeder_done.load(Ordering::Relaxed) && pending_domains.load(Ordering::Relaxed) == 0
 }
 
@@ -390,7 +449,9 @@ async fn handle_retryable_result(
                     "WHOIS rate limit detected; pausing task and reducing worker concurrency"
                         .to_string()
                 }
-                None => "WHOIS rate limit detected; pausing task and reducing scan speed".to_string(),
+                None => {
+                    "WHOIS rate limit detected; pausing task and reducing scan speed".to_string()
+                }
             }),
             {
                 let mut fields = vec![
@@ -512,9 +573,7 @@ async fn handle_completed_result(
             signatures: res.signatures.join(","),
         });
 
-    if state.pending_result_flush.len()
-        >= super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE
-    {
+    if state.pending_result_flush.len() >= super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE {
         flush_pending_results(
             db,
             streams,

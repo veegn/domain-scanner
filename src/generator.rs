@@ -13,7 +13,11 @@ pub struct DomainGenerator {
 }
 
 fn normalized_skip_count(skip_count: i64) -> usize {
-    if skip_count < 0 { 0 } else { skip_count as usize }
+    if skip_count < 0 {
+        0
+    } else {
+        skip_count as usize
+    }
 }
 
 pub fn generate_domains(
@@ -287,7 +291,9 @@ fn exact_combination_count(charset: &str, length: usize, priority_set: &HashSet<
 
     let duplicate_priority_count = priority_set
         .iter()
-        .filter(|word| word.len() == length && word.bytes().all(|b| charset.as_bytes().contains(&b)))
+        .filter(|word| {
+            word.len() == length && word.bytes().all(|b| charset.as_bytes().contains(&b))
+        })
         .count();
 
     total + priority_set.len().saturating_sub(duplicate_priority_count)
@@ -400,25 +406,33 @@ impl DictionaryCombinator {
             return None;
         }
 
-        // Render template by replacing {N} placeholders with current dict words
+        // Render template by replacing {N} placeholders with current dict words.
+        // Request validation keeps templates ASCII, but char iteration keeps this
+        // renderer correct if it is used directly in tests or future code.
         let mut domain = String::new();
-        let template_bytes = self.format_template.as_bytes();
-        let mut i = 0;
-        while i < template_bytes.len() {
-            if template_bytes[i] == b'{' {
-                if let Some(end) = template_bytes[i..].iter().position(|&b| b == b'}') {
-                    let idx_str = &self.format_template[i + 1..i + end];
-                    if let Ok(idx) = idx_str.parse::<usize>() {
-                        if let Some(list) = self.word_lists.get(idx) {
-                            domain.push_str(&list[self.indices[idx]]);
-                            i += end + 1;
-                            continue;
-                        }
+        let mut chars = self.format_template.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                let mut idx_str = String::new();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '}' {
+                        break;
+                    }
+                    idx_str.push(next);
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    if let Some(list) = self.word_lists.get(idx) {
+                        domain.push_str(&list[self.indices[idx]]);
+                        continue;
                     }
                 }
+                domain.push('{');
+                domain.push_str(&idx_str);
+                domain.push('}');
+            } else {
+                domain.push(ch);
             }
-            domain.push(template_bytes[i] as char);
-            i += 1;
         }
         domain.push_str(&self.suffix);
 
@@ -501,11 +515,7 @@ mod tests {
             vec!["red".to_string(), "blue".to_string()],
             vec!["fox".to_string(), "bird".to_string()],
         ];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "{0}{1}".into(),
-            ".io".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "{0}{1}".into(), ".io".into());
         assert_eq!(c.total_combinations(), 4);
         assert_eq!(c.next(), Some("redfox.io".to_string()));
         assert_eq!(c.next(), Some("redbird.io".to_string()));
@@ -520,11 +530,7 @@ mod tests {
             vec!["go".to_string()],
             vec!["app".to_string(), "tech".to_string()],
         ];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "{0}-{1}".into(),
-            ".com".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "{0}-{1}".into(), ".com".into());
         assert_eq!(c.next(), Some("go-app.com".to_string()));
         assert_eq!(c.next(), Some("go-tech.com".to_string()));
         assert_eq!(c.next(), None);
@@ -536,11 +542,7 @@ mod tests {
             vec!["app".to_string(), "web".to_string()],
             vec!["dev".to_string()],
         ];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "my{0}-{1}hq".into(),
-            ".xyz".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "my{0}-{1}hq".into(), ".xyz".into());
         assert_eq!(c.next(), Some("myapp-devhq.xyz".to_string()));
         assert_eq!(c.next(), Some("myweb-devhq.xyz".to_string()));
         assert_eq!(c.next(), None);
@@ -552,11 +554,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
             vec!["x".to_string(), "y".to_string()],
         ];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "{0}{1}".into(),
-            ".com".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "{0}{1}".into(), ".com".into());
         c.skip_to(2);
         assert_eq!(c.current_position(), 2);
         assert_eq!(c.next(), Some("bx.com".to_string()));
@@ -569,11 +567,7 @@ mod tests {
     #[test]
     fn test_combinator_empty_dict() {
         let dicts = vec![vec!["a".to_string()], vec![]];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "{0}{1}".into(),
-            ".com".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "{0}{1}".into(), ".com".into());
         assert_eq!(c.total_combinations(), 0);
         assert_eq!(c.next(), None);
     }
@@ -585,11 +579,7 @@ mod tests {
             "beta".to_string(),
             "gamma".to_string(),
         ]];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "{0}".into(),
-            ".net".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "{0}".into(), ".net".into());
         assert_eq!(c.next(), Some("alpha.net".to_string()));
         assert_eq!(c.next(), Some("beta.net".to_string()));
         assert_eq!(c.next(), Some("gamma.net".to_string()));
@@ -602,13 +592,7 @@ mod tests {
             vec!["app".to_string(), "web".to_string()],
             vec!["dev".to_string()],
         ];
-        let mut c = DictionaryCombinator::from_parts(
-            dicts,
-            "go",
-            "-",
-            "hq",
-            ".xyz".into(),
-        );
+        let mut c = DictionaryCombinator::from_parts(dicts, "go", "-", "hq", ".xyz".into());
         assert_eq!(c.next(), Some("goapp-devhq.xyz".to_string()));
         assert_eq!(c.next(), Some("goweb-devhq.xyz".to_string()));
         assert_eq!(c.next(), None);
@@ -617,11 +601,7 @@ mod tests {
     #[test]
     fn test_combinator_template_placeholder() {
         let dicts = vec![vec!["a".to_string(), "b".to_string()]];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "just-text-{0}nope".into(),
-            ".com".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "just-text-{0}nope".into(), ".com".into());
         assert_eq!(c.next(), Some("just-text-anope.com".to_string()));
         assert_eq!(c.next(), Some("just-text-bnope.com".to_string()));
         assert_eq!(c.next(), None);
@@ -630,11 +610,7 @@ mod tests {
     #[test]
     fn test_combinator_template_oob_kept() {
         let dicts = vec![vec!["a".to_string()]];
-        let mut c = DictionaryCombinator::new(
-            dicts,
-            "pre-{99}-literal".into(),
-            ".com".into(),
-        );
+        let mut c = DictionaryCombinator::new(dicts, "pre-{99}-literal".into(), ".com".into());
         assert_eq!(c.next(), Some("pre-{99}-literal.com".to_string()));
         assert_eq!(c.next(), None);
     }

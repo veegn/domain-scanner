@@ -43,7 +43,18 @@ async fn main() {
     );
 
     // 2. Initialize DB (creates schema if needed)
-    let db = web::init_db().await;
+    let db = match web::init_db().await {
+        Ok(db) => db,
+        Err(err) => {
+            error!(
+                target: "domain_scanner::main",
+                context = "database",
+                error = %err,
+                "failed to initialize database"
+            );
+            std::process::exit(1);
+        }
+    };
 
     // 3. Seed default TLDs + WHOIS servers on first startup
     web::seed_defaults(&db).await;
@@ -110,6 +121,7 @@ async fn main() {
         target: "domain_scanner::main",
         context = "task_resume",
         resumable_tasks = recovery.ready_scan_ids.len(),
+        recovered_running = recovery.recovered_running,
         recovered_cancelling = recovery.recovered_cancelling,
         recovered_pausing = recovery.recovered_pausing,
         repaired_counters = recovery.repaired_counters,
@@ -131,7 +143,10 @@ async fn main() {
 
     // 10. Build router and start server
     let app = web::router(state)
-        .nest_service("/published", tower_http::services::ServeDir::new("data/published"))
+        .nest_service(
+            "/published",
+            tower_http::services::ServeDir::new("data/published"),
+        )
         .fallback_service(tower_http::services::ServeDir::new("web"));
 
     info!(
@@ -141,9 +156,19 @@ async fn main() {
         local_url = %format!("http://localhost:{}", args.port),
         "server listening"
     );
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port))
-        .await
-        .unwrap();
+    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            error!(
+                target: "domain_scanner::main",
+                context = "startup",
+                port = args.port,
+                error = %err,
+                "failed to bind web server listener"
+            );
+            std::process::exit(1);
+        }
+    };
     if let Err(err) = axum::serve(listener, app).await {
         error!(
             target: "domain_scanner::main",
