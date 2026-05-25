@@ -823,10 +823,13 @@ async fn flush_pending_logs(
 }
 
 pub(super) fn is_whois_rate_limited(res: &crate::DomainResult) -> bool {
-    res.trace.iter().any(|step| step.starts_with("WHOIS: "))
+    res.trace.iter().any(|step| step.starts_with("WHOIS: ") || step.starts_with("RDAP: "))
         || res
             .error
             .as_deref()
-            .map(|err| err.to_ascii_uppercase().contains("WHOIS"))
+            .map(|err| {
+                let err = err.to_ascii_uppercase();
+                err.contains("WHOIS") || err.contains("RDAP")
+            })
             .unwrap_or(false)
 }
