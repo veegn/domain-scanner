@@ -1447,3 +1447,44 @@ async fn test_generator_length2_letters() {
     assert_eq!(domains[675], "zz.com");
 }
 
+#[tokio::test]
+async fn test_load_tlds_and_idx_from_db() {
+    let pool = sqlx::sqlite::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::query(
+        "CREATE TABLE tlds (
+            suffix TEXT PRIMARY KEY,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "CREATE TABLE scans (
+            id TEXT PRIMARY KEY,
+            suffix TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Create the suffix index
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_suffix ON scans(suffix)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO tlds (suffix) VALUES ('com'), ('xyz')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let tlds = domain_scanner::web::db::load_tlds(&pool).await;
+    assert_eq!(tlds.len(), 2);
+    assert!(tlds.contains(&"com".to_string()));
+    assert!(tlds.contains(&"xyz".to_string()));
+}
+
+

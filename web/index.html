@@ -148,7 +148,7 @@
                             </div>
                             <div class="space-y-1">
                                 <label class="text-[10px] font-black text-gray-500 uppercase">Suffix</label>
-                                <input id="suffix" type="text" value=".xyz" placeholder=".com" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                                <input id="suffix" type="text" value=".xyz" placeholder=".com" list="suffix-list" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
                             </div>
                         </div>
 
@@ -190,7 +190,7 @@
 
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Suffix</label>
-                            <input id="dict_suffix" type="text" value=".xyz" placeholder=".com" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                            <input id="dict_suffix" type="text" value=".xyz" placeholder=".com" list="suffix-list" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
                         </div>
 
                         <div id="dictEstimate" class="text-[10px] font-black text-gray-400 text-center hidden">
@@ -376,6 +376,9 @@
         </div>
     </footer>
 
+    <!-- Suffix Autocomplete Data List -->
+    <datalist id="suffix-list"></datalist>
+
     <script>
         /**
          * Core Application State
@@ -472,6 +475,18 @@
 
             async listDictionaries() {
                 return this.fetchJson('api/dictionaries');
+            },
+
+            async loadTlds() {
+                try {
+                    const tlds = await this.fetchJson('api/tlds');
+                    const datalist = document.getElementById('suffix-list');
+                    if (datalist && tlds) {
+                        datalist.innerHTML = tlds.map(tld => `<option value=".${tld}">`).join('');
+                    }
+                } catch (e) {
+                    console.error('Failed to load TLDs:', e);
+                }
             },
 
             async deleteScan(id) {
@@ -1367,6 +1382,7 @@
             });
             API.loadRecentScans();
             API.openScansStream();
+            API.loadTlds().catch(() => {});
             API.listDictionaries().then(dicts => {
                 State.dictionaries = dicts;
                 UI.populateDictionarySelect();

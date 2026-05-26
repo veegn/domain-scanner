@@ -198,6 +198,9 @@ pub async fn init_db() -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_suffix ON scans(suffix)")
+        .execute(&pool)
+        .await;
     let _ =
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_published_scans_published_at ON published_scans(published_at DESC)")
             .execute(&pool)

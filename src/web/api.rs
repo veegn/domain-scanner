@@ -35,6 +35,7 @@ type ApiResponse = axum::response::Response;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/scans", get(get_scans))
+        .route("/api/tlds", get(get_tlds))
         .route("/api/scans/stream", get(stream_scans))
         .route("/api/scan", post(start_scan))
         .route("/api/scan/:id", get(get_scan_status).delete(delete_scan))
@@ -227,6 +228,11 @@ async fn get_scans(State(state): State<Arc<AppState>>) -> ApiResponse {
     };
 
     Json(rows).into_response()
+}
+
+async fn get_tlds(State(state): State<Arc<AppState>>) -> ApiResponse {
+    let tlds = super::db::load_tlds(&state.db).await;
+    Json(tlds).into_response()
 }
 
 async fn publish_scan(
