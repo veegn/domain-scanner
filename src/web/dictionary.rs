@@ -6,7 +6,7 @@ use std::path::Path;
 use tokio::fs;
 use uuid::Uuid;
 
-use super::models::validate_domain_fragment;
+use super::models::{validate_domain, validate_domain_fragment};
 
 const DICTIONARY_ROOT: &str = "data/dictionaries";
 const MAX_DICTIONARY_WORDS: usize = 2_000_000;
@@ -56,7 +56,11 @@ pub async fn create_dictionary(
     }
 
     for word in &words {
-        validate_domain_fragment("dictionary word", word).map_err(anyhow::Error::msg)?;
+        if word.contains('.') {
+            validate_domain(word).map_err(anyhow::Error::msg)?;
+        } else {
+            validate_domain_fragment("dictionary word", word).map_err(anyhow::Error::msg)?;
+        }
     }
 
     let id = Uuid::new_v4().to_string();

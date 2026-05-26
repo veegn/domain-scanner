@@ -211,7 +211,9 @@ impl StartScanRequest {
                 return Err("Cannot combine dictionary_id with other dictionary inputs".to_string());
             }
 
-            validate_suffix(&self.suffix)?;
+            if !self.suffix.is_empty() {
+                validate_suffix(&self.suffix)?;
+            }
             validate_optional_fragment("prefix", self.prefix.as_deref())?;
             validate_optional_fragment("postfix", self.postfix.as_deref())?;
             return Ok(());
@@ -225,7 +227,9 @@ impl StartScanRequest {
                 return Err("Cannot provide both dictionary_ids and dictionary_words".to_string());
             }
 
-            validate_suffix(&self.suffix)?;
+            if !self.suffix.is_empty() {
+                validate_suffix(&self.suffix)?;
+            }
             validate_optional_fragment("prefix", self.prefix.as_deref())?;
             validate_optional_fragment("postfix", self.postfix.as_deref())?;
 
@@ -258,7 +262,12 @@ impl StartScanRequest {
                 ));
             }
 
-            validate_suffix(&self.suffix)?;
+            let has_fragments = dict_words.iter().any(|w| !w.contains('.'));
+            if has_fragments {
+                validate_suffix(&self.suffix)?;
+            } else if !self.suffix.is_empty() {
+                validate_suffix(&self.suffix)?;
+            }
 
             let prefix = self.prefix.as_deref().unwrap_or("");
             let postfix = self.postfix.as_deref().unwrap_or("");
@@ -266,9 +275,14 @@ impl StartScanRequest {
             validate_optional_fragment("postfix", self.postfix.as_deref())?;
 
             for word in dict_words {
-                validate_domain_fragment("dictionary word", word)?;
-                let domain = format!("{}{}{}{}", prefix, word, postfix, self.suffix);
-                validate_domain(&domain)?;
+                if word.contains('.') {
+                    // Full-domain entry — validate as-is, skip suffix
+                    validate_domain(word)?;
+                } else {
+                    validate_domain_fragment("dictionary word", word)?;
+                    let domain = format!("{}{}{}{}", prefix, word, postfix, self.suffix);
+                    validate_domain(&domain)?;
+                }
             }
 
             return Ok(());
@@ -686,5 +700,99 @@ mod tests {
         };
 
         assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn dictionary_words_full_domain_no_suffix() {
+        // All words contain dots — suffix can be empty.
+        let req = StartScanRequest {
+            length: 0,
+            suffix: String::new(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: Some(vec![
+                "example.com".to_string(),
+                "test.org".to_string(),
+            ]),
+            dictionary_id: None,
+            dictionary_ids: None,
+            separator: None,
+            format_template: None,
+            prefix: None,
+            postfix: None,
+        };
+
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn dictionary_words_mixed_requires_suffix() {
+        // Mix of fragment and full-domain — suffix is required for fragments.
+        let req = StartScanRequest {
+            length: 0,
+            suffix: ".xyz".to_string(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: Some(vec![
+                "example.com".to_string(),
+                "hello".to_string(),
+            ]),
+            dictionary_id: None,
+            dictionary_ids: None,
+            separator: None,
+            format_template: None,
+            prefix: None,
+            postfix: None,
+        };
+
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn dictionary_words_fragment_empty_suffix_rejected() {
+        // Fragment words with empty suffix should fail validation.
+        let req = StartScanRequest {
+            length: 0,
+            suffix: String::new(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: Some(vec!["hello".to_string()]),
+            dictionary_id: None,
+            dictionary_ids: None,
+            separator: None,
+            format_template: None,
+            prefix: None,
+            postfix: None,
+        };
+
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn dictionary_ids_accept_empty_suffix() {
+        // dictionary_ids path should accept empty suffix (validated at runtime).
+        let req = StartScanRequest {
+            length: 0,
+            suffix: String::new(),
+            pattern: String::new(),
+            regex: None,
+            priority_words: None,
+            domains: None,
+            dictionary_words: None,
+            dictionary_id: None,
+            dictionary_ids: Some(vec!["dict-a".to_string()]),
+            separator: None,
+            format_template: Some("{0}".to_string()),
+            prefix: None,
+            postfix: None,
+        };
+
+        assert!(req.validate().is_ok());
     }
 }

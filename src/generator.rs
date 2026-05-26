@@ -89,7 +89,11 @@ pub fn generate_domains(
             // Priority Phase
             for word in priority_lines {
                 if current_idx >= skip {
-                    let domain = format!("{}{}", word, suffix);
+                    let domain = if word.contains('.') {
+                        word
+                    } else {
+                        format!("{}{}", word, suffix)
+                    };
                     if tx.send(domain).await.is_err() {
                         return;
                     }
@@ -112,7 +116,11 @@ pub fn generate_domains(
                 }
 
                 if current_idx >= skip {
-                    let domain = format!("{}{}", word, suffix);
+                    let domain = if word.contains('.') {
+                        word.to_string()
+                    } else {
+                        format!("{}{}", word, suffix)
+                    };
                     if tx.send(domain).await.is_err() {
                         break;
                     }
@@ -434,7 +442,10 @@ impl DictionaryCombinator {
                 domain.push(ch);
             }
         }
-        domain.push_str(&self.suffix);
+        // Only append suffix if the rendered domain doesn't already contain a TLD.
+        if !domain.contains('.') {
+            domain.push_str(&self.suffix);
+        }
 
         // Advance odometer (least significant = last dict)
         for i in (0..self.indices.len()).rev() {
@@ -612,6 +623,47 @@ mod tests {
         let dicts = vec![vec!["a".to_string()]];
         let mut c = DictionaryCombinator::new(dicts, "pre-{99}-literal".into(), ".com".into());
         assert_eq!(c.next(), Some("pre-{99}-literal.com".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_full_domain_words() {
+        // When all dictionary words already contain a TLD (dot), suffix should NOT be appended.
+        let dicts = vec![vec![
+            "example.com".to_string(),
+            "test.org".to_string(),
+            "hello.xyz".to_string(),
+        ]];
+        let mut c = DictionaryCombinator::new(dicts, "{0}".into(), ".net".into());
+        assert_eq!(c.next(), Some("example.com".to_string()));
+        assert_eq!(c.next(), Some("test.org".to_string()));
+        assert_eq!(c.next(), Some("hello.xyz".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_mixed_words() {
+        // Mixed dictionary: words with dots keep their TLD, words without get suffix.
+        let dicts = vec![vec![
+            "example.com".to_string(),
+            "hello".to_string(),
+        ]];
+        let mut c = DictionaryCombinator::new(dicts, "{0}".into(), ".xyz".into());
+        assert_eq!(c.next(), Some("example.com".to_string()));
+        assert_eq!(c.next(), Some("hello.xyz".to_string()));
+        assert_eq!(c.next(), None);
+    }
+
+    #[test]
+    fn test_combinator_full_domain_empty_suffix() {
+        // When all words are full domains and suffix is empty, should work fine.
+        let dicts = vec![vec![
+            "a.com".to_string(),
+            "b.org".to_string(),
+        ]];
+        let mut c = DictionaryCombinator::new(dicts, "{0}".into(), String::new());
+        assert_eq!(c.next(), Some("a.com".to_string()));
+        assert_eq!(c.next(), Some("b.org".to_string()));
         assert_eq!(c.next(), None);
     }
 }

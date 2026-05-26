@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Domain Explorer - High Performance Suite</title>
-    <meta name="description" content="A high-performance domain scanner and queue system. Bulk search, regex matching, and queue management for .xyz, .com and other domains.">
+    <meta name="description"
+        content="A high-performance domain scanner and queue system. Bulk search, regex matching, and queue management for .xyz, .com and other domains.">
     <meta name="keywords" content="domain scanner, bulk domain search, xyz domains, domain regex, find domains">
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Cpath d='M45 43l-8-8m2-7a10 10 0 11-20 0 10 10 0 0120 0z' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Cpath d='M45 43l-8-8m2-7a10 10 0 11-20 0 10 10 0 0120 0z' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         :root {
@@ -21,19 +24,86 @@
         }
 
         /* Status Colors */
-        .status-pending { color: var(--status-pending); font-weight: bold; }
-        .status-running { color: var(--status-running); font-weight: bold; animation: pulse 2s infinite; }
-        .status-finished { color: var(--status-finished); font-weight: bold; }
-        .status-failed { color: var(--status-failed); font-weight: bold; }
-        .status-paused { color: var(--status-paused); font-weight: bold; }
-        .status-pausing { color: var(--status-pausing); font-weight: bold; animation: pulse 2s infinite; }
-        .status-cancelled { color: var(--status-cancelled); font-weight: bold; }
-        .status-cancelling { color: var(--status-cancelling); font-weight: bold; animation: pulse 2s infinite; }
+        .status-pending {
+            color: var(--status-pending);
+            font-weight: bold;
+        }
+
+        .status-running {
+            color: var(--status-running);
+            font-weight: bold;
+            animation: pulse 2s infinite;
+        }
+
+        .status-finished {
+            color: var(--status-finished);
+            font-weight: bold;
+        }
+
+        .status-failed {
+            color: var(--status-failed);
+            font-weight: bold;
+        }
+
+        .status-paused {
+            color: var(--status-paused);
+            font-weight: bold;
+        }
+
+        .status-pausing {
+            color: var(--status-pausing);
+            font-weight: bold;
+            animation: pulse 2s infinite;
+        }
+
+        .status-cancelled {
+            color: var(--status-cancelled);
+            font-weight: bold;
+        }
+
+        .status-cancelling {
+            color: var(--status-cancelling);
+            font-weight: bold;
+            animation: pulse 2s infinite;
+        }
 
         /* Animations */
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        @keyframes count-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); color: #059669; } }
-        @keyframes domain-chip-in { 0% { opacity: 0; transform: scale(0.85); } 100% { opacity: 1; transform: scale(1); } }
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        @keyframes count-pulse {
+
+            0%,
+            100% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.15);
+                color: #059669;
+            }
+        }
+
+        @keyframes domain-chip-in {
+            0% {
+                opacity: 0;
+                transform: scale(0.85);
+            }
+
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
 
         /* Domain queue display */
         .domain-grid {
@@ -42,6 +112,7 @@
             gap: 4px;
             align-content: start;
         }
+
         .domain-card {
             padding: 4px 8px;
             border-radius: 4px;
@@ -57,7 +128,14 @@
             gap: 6px;
             line-height: 1.4;
         }
-        .domain-card .card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+        .domain-card .card-name {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         .domain-card .card-badge {
             font-size: 9px;
             padding: 0 4px;
@@ -66,16 +144,57 @@
             letter-spacing: 0.05em;
             flex-shrink: 0;
         }
-        .card-queued { background: rgba(107, 114, 128, 0.15); color: #9ca3af; }
-        .card-queued .card-badge { background: rgba(107, 114, 128, 0.2); color: #d1d5db; }
-        .card-scanning { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
-        .card-scanning .card-badge { background: rgba(59, 130, 246, 0.3); color: #bfdbfe; }
-        .card-open { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
-        .card-open .card-badge { background: rgba(16, 185, 129, 0.25); color: #a7f3d0; }
-        .card-taken { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
-        .card-taken .card-badge { background: rgba(239, 68, 68, 0.2); color: #fecaca; }
-        .card-err { background: rgba(245, 158, 11, 0.15); color: #fde68a; }
-        .card-err .card-badge { background: rgba(245, 158, 11, 0.25); color: #fde68a; }
+
+        .card-queued {
+            background: rgba(107, 114, 128, 0.15);
+            color: #9ca3af;
+        }
+
+        .card-queued .card-badge {
+            background: rgba(107, 114, 128, 0.2);
+            color: #d1d5db;
+        }
+
+        .card-scanning {
+            background: rgba(59, 130, 246, 0.18);
+            color: #93c5fd;
+        }
+
+        .card-scanning .card-badge {
+            background: rgba(59, 130, 246, 0.3);
+            color: #bfdbfe;
+        }
+
+        .card-open {
+            background: rgba(16, 185, 129, 0.18);
+            color: #6ee7b7;
+        }
+
+        .card-open .card-badge {
+            background: rgba(16, 185, 129, 0.25);
+            color: #a7f3d0;
+        }
+
+        .card-taken {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+        }
+
+        .card-taken .card-badge {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fecaca;
+        }
+
+        .card-err {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fde68a;
+        }
+
+        .card-err .card-badge {
+            background: rgba(245, 158, 11, 0.25);
+            color: #fde68a;
+        }
+
         .console-break {
             grid-column: 1 / -1;
             border-top: 1px solid rgba(75, 85, 99, 0.25);
@@ -86,43 +205,77 @@
             font-weight: 700;
             letter-spacing: 0.08em;
         }
-        .count-update { animation: count-pulse 0.4s ease-out; }
-        
+
+        .count-update {
+            animation: count-pulse 0.4s ease-out;
+        }
+
         /* UI Components */
-        .scan-item { cursor: pointer; transition: all 0.2s; border-left: 4px solid transparent; }
-        .scan-item:hover { background-color: #f8fafc; border-left-color: #cbd5e1; }
-        .scan-item.active { border-left-color: #3b82f6; background-color: #eff6ff; }
+        .scan-item {
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 4px solid transparent;
+        }
+
+        .scan-item:hover {
+            background-color: #f8fafc;
+            border-left-color: #cbd5e1;
+        }
+
+        .scan-item.active {
+            border-left-color: #3b82f6;
+            background-color: #eff6ff;
+        }
 
         /* Scrollbars */
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
     </style>
 </head>
+
 <body class="bg-gray-50 p-4 md:p-8 flex flex-col min-h-screen text-gray-800">
     <div class="max-w-7xl mx-auto w-full flex-grow">
         <!-- Header Section -->
         <header class="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div class="flex items-center space-x-4">
                 <div class="bg-blue-600 text-white p-2.5 rounded-xl shadow-lg ring-4 ring-blue-50">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
                     </svg>
                 </div>
                 <div>
                     <h1 class="text-3xl font-black text-gray-900 tracking-tight">Domain Explorer</h1>
                     <p class="text-xs text-gray-400 font-bold uppercase tracking-widest flex items-center mt-1">
-                        <span class="inline-block w-2.5 h-2.5 bg-green-500 rounded-full mr-2 animate-pulse shadow-sm shadow-green-200"></span>
-                        VEEGN Core System Online
+                        <span
+                            class="inline-block w-2.5 h-2.5 bg-green-500 rounded-full mr-2 animate-pulse shadow-sm shadow-green-200"></span>
+                        Ultra-Fast Domain Discovery Engine
                     </p>
                 </div>
             </div>
-            <div class="hidden md:flex items-center space-x-2 text-xs font-mono text-gray-400 bg-white px-3 py-1.5 rounded-full border border-gray-100 shadow-sm">
+            <div
+                class="hidden md:flex items-center space-x-2 text-xs font-mono text-gray-400 bg-white px-3 py-1.5 rounded-full border border-gray-100 shadow-sm">
                 <span>API Status:</span>
                 <span class="text-green-600 font-bold">STABLE</span>
             </div>
-            <a href="published.html" class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
+            <a href="published.html"
+                class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
                 Public Releases
             </a>
         </header>
@@ -135,26 +288,34 @@
                     <div class="flex items-center justify-between mb-4">
                         <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Queue New Task</h2>
                         <div class="flex bg-gray-50 p-1 rounded-lg border border-gray-100">
-                            <button onclick="UI.switchTaskMode('combinatorial')" id="btnTabCombo" class="px-3 py-1 text-[10px] font-black uppercase rounded-md bg-white shadow-sm text-blue-600 transition-all">Generator</button>
-                            <button onclick="UI.switchTaskMode('dictionary')" id="btnTabDict" class="px-3 py-1 text-[10px] font-black uppercase rounded-md text-gray-400 hover:text-gray-600 transition-all">Dictionary</button>
+                            <button onclick="UI.switchTaskMode('combinatorial')" id="btnTabCombo"
+                                class="px-3 py-1 text-[10px] font-black uppercase rounded-md bg-white shadow-sm text-blue-600 transition-all">Generator</button>
+                            <button onclick="UI.switchTaskMode('dictionary')" id="btnTabDict"
+                                class="px-3 py-1 text-[10px] font-black uppercase rounded-md text-gray-400 hover:text-gray-600 transition-all">Dictionary</button>
                         </div>
                     </div>
-                    
+
                     <div id="formCombinatorial" class="space-y-4 transition-all">
                         <div class="grid grid-cols-2 gap-4">
                             <div class="space-y-1">
                                 <label class="text-[10px] font-black text-gray-500 uppercase">Length</label>
-                                <input id="length" type="number" value="3" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                                <input id="length" type="number" value="3"
+                                    class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
                             </div>
                             <div class="space-y-1">
                                 <label class="text-[10px] font-black text-gray-500 uppercase">Suffix</label>
-                                <input id="suffix" type="text" value=".xyz" placeholder=".com" list="suffix-list" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                                <div class="relative w-full">
+                                    <input id="suffix" type="text" value=".xyz" placeholder=".com" autocomplete="off"
+                                        class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                                    <div id="suffix-dropdown" class="hidden absolute left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto pr-1 custom-scrollbar text-xs font-semibold divide-y divide-gray-50"></div>
+                                </div>
                             </div>
                         </div>
 
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Pattern</label>
-                            <select id="pattern" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
+                            <select id="pattern"
+                                class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
                                 <option value="d">Pure Numeric (0-9)</option>
                                 <option value="D">Pure Alphabetic (a-z)</option>
                                 <option value="a">Alphanumeric (Mix of a-z and 0-9)</option>
@@ -167,30 +328,42 @@
                         <div id="dictSlotsContainer" class="space-y-3">
                             <div class="dict-slot space-y-1" data-slot="0">
                                 <label class="text-[10px] font-black text-gray-500 uppercase">Dictionary 1</label>
-                                <select class="dict-select w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
+                                <select
+                                    class="dict-select w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold cursor-pointer">
                                     <option value="">-- Select a dictionary --</option>
                                 </select>
                             </div>
                         </div>
 
                         <div class="flex gap-2">
-                            <button type="button" onclick="UI.addDictSlot()" class="flex-1 text-[10px] bg-blue-50 hover:bg-blue-100 text-blue-600 py-2 rounded-xl font-black uppercase tracking-widest transition-all border border-dashed border-blue-200">
+                            <button type="button" onclick="UI.addDictSlot()"
+                                class="flex-1 text-[10px] bg-blue-50 hover:bg-blue-100 text-blue-600 py-2 rounded-xl font-black uppercase tracking-widest transition-all border border-dashed border-blue-200">
                                 + Add Dictionary
                             </button>
-                            <a href="dictionaries.html" class="flex-1 text-center text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-xl font-black uppercase tracking-widest transition-all">
+                            <a href="dictionaries.html"
+                                class="flex-1 text-center text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-xl font-black uppercase tracking-widest transition-all">
                                 Manage
                             </a>
                         </div>
 
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Format Template</label>
-                            <input id="dict_template" type="text" value="{0}" placeholder="e.g. {0}-{1} or go{0}hq" maxlength="256" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
-                            <p class="text-[9px] text-gray-400">Use {0}, {1}, {2} as placeholders for each dictionary above</p>
+                            <input id="dict_template" type="text" value="{0}" placeholder="e.g. {0}-{1} or go{0}hq"
+                                maxlength="256"
+                                class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-mono">
+                            <p class="text-[9px] text-gray-400">Use {0}, {1}, {2} as placeholders for each dictionary
+                                above</p>
                         </div>
 
                         <div class="space-y-1">
                             <label class="text-[10px] font-black text-gray-500 uppercase">Suffix</label>
-                            <input id="dict_suffix" type="text" value=".xyz" placeholder=".com" list="suffix-list" class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                            <div class="relative w-full">
+                                <input id="dict_suffix" type="text" value="" placeholder=".com" autocomplete="off"
+                                    class="w-full border border-gray-200 p-2.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold">
+                                <div id="dict_suffix-dropdown" class="hidden absolute left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto pr-1 custom-scrollbar text-xs font-semibold divide-y divide-gray-50"></div>
+                            </div>
+                            <p class="text-[9px] text-gray-400">Leave empty if dictionary entries already include TLDs
+                                (e.g. example.com)</p>
                         </div>
 
                         <div id="dictEstimate" class="text-[10px] font-black text-gray-400 text-center hidden">
@@ -199,7 +372,9 @@
                     </div>
 
                     <div class="mt-6">
-                        <button onclick="Handlers.startScan()" class="w-full bg-blue-600 text-white py-3 rounded-xl hover:bg-blue-700 active:scale-95 transition-all font-black shadow-lg shadow-blue-100 uppercase tracking-widest text-xs">Start Operation</button>
+                        <button onclick="Handlers.startScan()"
+                            class="w-full bg-blue-600 text-white py-3 rounded-xl hover:bg-blue-700 active:scale-95 transition-all font-black shadow-lg shadow-blue-100 uppercase tracking-widest text-xs">Start
+                            Operation</button>
                     </div>
                 </section>
 
@@ -207,14 +382,21 @@
                 <section class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Recent Scans</h2>
-                        <button onclick="API.loadRecentScans()" class="text-[10px] font-black text-blue-500 hover:text-blue-700 uppercase tracking-widest">Refresh</button>
+                        <button onclick="API.loadRecentScans()"
+                            class="text-[10px] font-black text-blue-500 hover:text-blue-700 uppercase tracking-widest">Refresh</button>
                     </div>
                     <div class="mb-4 flex flex-wrap items-center gap-2">
-                        <button onclick="Handlers.setScanFilter('all')" data-scan-filter="all" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">All</button>
-                        <button onclick="Handlers.setScanFilter('active')" data-scan-filter="active" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Active</button>
-                        <button onclick="Handlers.setScanFilter('paused')" data-scan-filter="paused" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Paused</button>
-                        <button onclick="Handlers.setScanFilter('terminal')" data-scan-filter="terminal" class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Terminal</button>
-                        <button onclick="Handlers.clearTerminalScans()" class="ml-auto rounded-full border border-red-100 bg-red-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-red-500 transition-colors hover:bg-red-100 hover:text-red-600">Clear Terminal</button>
+                        <button onclick="Handlers.setScanFilter('all')" data-scan-filter="all"
+                            class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">All</button>
+                        <button onclick="Handlers.setScanFilter('active')" data-scan-filter="active"
+                            class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Active</button>
+                        <button onclick="Handlers.setScanFilter('paused')" data-scan-filter="paused"
+                            class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Paused</button>
+                        <button onclick="Handlers.setScanFilter('terminal')" data-scan-filter="terminal"
+                            class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 transition-colors hover:border-blue-200 hover:text-blue-600">Terminal</button>
+                        <button onclick="Handlers.clearTerminalScans()"
+                            class="ml-auto rounded-full border border-red-100 bg-red-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-red-500 transition-colors hover:bg-red-100 hover:text-red-600">Clear
+                            Terminal</button>
                     </div>
                     <div id="recentScansList" class="space-y-3 max-h-[480px] overflow-y-auto pr-2 custom-scrollbar">
                         <div class="py-12 text-center text-gray-300 italic text-xs">Loading operations...</div>
@@ -224,10 +406,13 @@
                 <section class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Published Releases</h2>
-                        <a href="published.html" class="text-[10px] font-black text-emerald-600 hover:text-emerald-700 uppercase tracking-widest">Open Public</a>
+                        <a href="published.html"
+                            class="text-[10px] font-black text-emerald-600 hover:text-emerald-700 uppercase tracking-widest">Open
+                            Public</a>
                     </div>
                     <div id="publishedList" class="space-y-3 max-h-[320px] overflow-y-auto pr-2 custom-scrollbar">
-                        <div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No published releases</div>
+                        <div class="py-10 text-center text-gray-300 italic text-xs uppercase tracking-widest">No
+                            published releases</div>
                     </div>
                 </section>
             </aside>
@@ -235,17 +420,24 @@
             <!-- Main Panel: Status & Table -->
             <div class="lg:col-span-8 space-y-6">
                 <!-- Overview: Dynamic Status -->
-                <section id="statusArea" class="hidden bg-white p-6 rounded-2xl shadow-sm border border-gray-100 border-l-4 border-l-blue-500 transition-all">
+                <section id="statusArea"
+                    class="hidden bg-white p-6 rounded-2xl shadow-sm border border-gray-100 border-l-4 border-l-blue-500 transition-all">
                     <div class="flex justify-between items-start mb-6">
                         <div>
-                            <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Current Operation Progress</h2>
+                            <h2 class="text-sm font-black text-gray-400 uppercase tracking-widest">Current Operation
+                                Progress</h2>
                             <p class="text-[10px] font-mono text-gray-300 mt-1" id="currentId">REF-0000-0000</p>
                         </div>
                         <div class="flex items-center gap-3">
-                            <a id="btnOpenPublished" href="#" target="_blank" rel="noopener noreferrer" class="hidden h-8 items-center bg-emerald-50 border border-emerald-100 px-4 rounded-full text-[10px] font-black tracking-widest text-emerald-700 hover:bg-emerald-100 transition-colors">OPEN PUBLISHED</a>
-                            <button id="btnPublishCurrent" onclick="Handlers.publishCurrent()" class="hidden h-8 items-center bg-blue-50 border border-blue-100 px-4 rounded-full text-[10px] font-black tracking-widest text-blue-700 hover:bg-blue-100 transition-colors">PUBLISH</button>
-                            <button id="btnPauseCurrent" onclick="Handlers.pauseScan(State.currentId)" class="hidden h-8 items-center bg-amber-50 border border-amber-100 px-4 rounded-full text-[10px] font-black tracking-widest text-amber-700 hover:bg-amber-100 transition-colors">PAUSE</button>
-                            <button id="btnResumeCurrent" onclick="Handlers.resumeScan(State.currentId)" class="hidden h-8 items-center bg-violet-50 border border-violet-100 px-4 rounded-full text-[10px] font-black tracking-widest text-violet-700 hover:bg-violet-100 transition-colors">RESUME</button>
+                            <a id="btnOpenPublished" href="#" target="_blank" rel="noopener noreferrer"
+                                class="hidden h-8 items-center bg-emerald-50 border border-emerald-100 px-4 rounded-full text-[10px] font-black tracking-widest text-emerald-700 hover:bg-emerald-100 transition-colors">OPEN
+                                PUBLISHED</a>
+                            <button id="btnPublishCurrent" onclick="Handlers.publishCurrent()"
+                                class="hidden h-8 items-center bg-blue-50 border border-blue-100 px-4 rounded-full text-[10px] font-black tracking-widest text-blue-700 hover:bg-blue-100 transition-colors">PUBLISH</button>
+                            <button id="btnPauseCurrent" onclick="Handlers.pauseScan(State.currentId)"
+                                class="hidden h-8 items-center bg-amber-50 border border-amber-100 px-4 rounded-full text-[10px] font-black tracking-widest text-amber-700 hover:bg-amber-100 transition-colors">PAUSE</button>
+                            <button id="btnResumeCurrent" onclick="Handlers.resumeScan(State.currentId)"
+                                class="hidden h-8 items-center bg-violet-50 border border-violet-100 px-4 rounded-full text-[10px] font-black tracking-widest text-violet-700 hover:bg-violet-100 transition-colors">RESUME</button>
                             <div class="h-8 flex items-center bg-gray-50 border border-gray-100 px-4 rounded-full">
                                 <span id="statusText" class="text-[10px] font-black tracking-widest">STANDBY</span>
                             </div>
@@ -256,7 +448,9 @@
                     <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
                         <div class="p-4 bg-gray-50 rounded-2xl flex flex-col items-center">
                             <span class="text-[9px] font-black text-gray-400 uppercase mb-2">Processed</span>
-                            <div class="font-mono"><span id="progress" class="text-xl font-black">0</span><span class="text-gray-300 mx-1">/</span><span id="total" class="text-gray-400">0</span></div>
+                            <div class="font-mono"><span id="progress" class="text-xl font-black">0</span><span
+                                    class="text-gray-300 mx-1">/</span><span id="total" class="text-gray-400">0</span>
+                            </div>
                         </div>
                         <div class="p-4 bg-green-50 rounded-2xl border border-green-100 flex flex-col items-center">
                             <span class="text-[9px] font-black text-green-500 uppercase mb-2">Detected Available</span>
@@ -275,22 +469,31 @@
                     <!-- Progress Bar & Console -->
                     <div class="bg-gray-50 p-6 rounded-2xl border border-gray-100">
                         <div class="flex justify-between items-center mb-4">
-                            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Stream Output</span>
-                            <span class="text-[10px] font-mono text-gray-400"><span id="progressInline">0</span> / <span id="totalInline">0</span> | <span id="percentageInline" class="font-bold text-blue-600">0</span>%</span>
+                            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Stream
+                                Output</span>
+                            <span class="text-[10px] font-mono text-gray-400"><span id="progressInline">0</span> / <span
+                                    id="totalInline">0</span> | <span id="percentageInline"
+                                    class="font-bold text-blue-600">0</span>%</span>
                         </div>
                         <div class="w-full bg-white rounded-full h-1.5 shadow-inner mb-6">
-                            <div class="bg-blue-600 h-1.5 rounded-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(37,99,235,0.4)]" id="progressBar" style="width: 0%"></div>
+                            <div class="bg-blue-600 h-1.5 rounded-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(37,99,235,0.4)]"
+                                id="progressBar" style="width: 0%"></div>
                         </div>
-                        
+
                         <div class="flex justify-between items-center mb-2">
                             <button onclick="UI.toggleConsole()" class="flex items-center group">
-                                <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest group-hover:text-gray-600 transition-colors">Log Stream window</span>
-                                <span id="consoleToggle" class="ml-2 text-[8px] font-black bg-white px-2 py-0.5 rounded border border-gray-200 text-gray-300 group-hover:border-gray-400 group-hover:text-gray-500">HIDE</span>
+                                <span
+                                    class="text-[10px] font-black text-gray-400 uppercase tracking-widest group-hover:text-gray-600 transition-colors">Log
+                                    Stream window</span>
+                                <span id="consoleToggle"
+                                    class="ml-2 text-[8px] font-black bg-white px-2 py-0.5 rounded border border-gray-200 text-gray-300 group-hover:border-gray-400 group-hover:text-gray-500">HIDE</span>
                             </button>
                         </div>
                         <div id="logConsoleContainer" class="transition-all duration-500 overflow-hidden">
-                            <div id="logConsole" class="bg-gray-900 rounded-xl p-4 h-64 overflow-hidden shadow-inner domain-grid">
-                                <div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>
+                            <div id="logConsole"
+                                class="bg-gray-900 rounded-xl p-4 h-64 overflow-hidden shadow-inner domain-grid">
+                                <div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for
+                                    domain activity...</div>
                             </div>
                         </div>
                     </div>
@@ -303,23 +506,43 @@
                         <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
                             <h2 class="text-xl font-black text-gray-900">Available Domains</h2>
                             <div class="flex flex-wrap gap-2">
-                                <button onclick="Handlers.rescanTask()" id="btnRescan" class="hidden text-[10px] bg-orange-500 hover:bg-orange-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-orange-100">Rescan Available</button>
-                                <button onclick="Handlers.exportResults()" class="text-[10px] bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-100">Export All</button>
+                                <button onclick="Handlers.rescanTask()" id="btnRescan"
+                                    class="hidden text-[10px] bg-orange-500 hover:bg-orange-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-orange-100">Rescan
+                                    Available</button>
+                                <button onclick="Handlers.exportResults()"
+                                    class="text-[10px] bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-100">Export
+                                    All</button>
                             </div>
                         </div>
-                        
+
                         <div class="flex flex-col xl:flex-row justify-between xl:items-center gap-4">
                             <div class="flex flex-wrap gap-2 items-center">
                                 <span class="text-[9px] font-black text-gray-300 uppercase mr-1">Quick Select:</span>
-                                <button onclick="UI.applySearch('^1')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">STARTS WITH 1</button>
-                                <button onclick="UI.applySearch('88\\.')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">ENDS WITH 88</button>
-                                <button onclick="UI.applySearch('(\\d)\\1(\\d)\\2')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">AABB PATTERN</button>
-                                <button onclick="UI.applySearch('(\\d)\\1{2}')" class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">TRIPLE AAA</button>
+                                <button onclick="UI.applySearch('^1')"
+                                    class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">STARTS
+                                    WITH 1</button>
+                                <button onclick="UI.applySearch('88\\.')"
+                                    class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">ENDS
+                                    WITH 88</button>
+                                <button onclick="UI.applySearch('(\\d)\\1(\\d)\\2')"
+                                    class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">AABB
+                                    PATTERN</button>
+                                <button onclick="UI.applySearch('(\\d)\\1{2}')"
+                                    class="text-[9px] font-bold bg-gray-50 hover:bg-blue-600 hover:text-white text-gray-500 px-3 py-1 rounded-full transition-all border border-gray-100">TRIPLE
+                                    AAA</button>
                             </div>
                             <div class="relative group w-full xl:w-64 shrink-0">
-                                <input type="text" id="domainSearch" placeholder="Filter with Regex..." class="w-full border border-gray-200 p-2.5 pl-4 pr-10 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold placeholder:font-normal placeholder:text-gray-400" onkeyup="UI.debouncedRender()">
-                                <button onclick="UI.applySearch('')" class="absolute right-3 top-2.5 text-gray-300 hover:text-red-500 transition-colors" title="Clear Filter">
-                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" /></svg>
+                                <input type="text" id="domainSearch" placeholder="Filter with Regex..."
+                                    class="w-full border border-gray-200 p-2.5 pl-4 pr-10 rounded-xl bg-gray-50 focus:bg-white focus:ring-4 focus:ring-blue-50 outline-none transition-all text-sm font-bold placeholder:font-normal placeholder:text-gray-400"
+                                    onkeyup="UI.debouncedRender()">
+                                <button onclick="UI.applySearch('')"
+                                    class="absolute right-3 top-2.5 text-gray-300 hover:text-red-500 transition-colors"
+                                    title="Clear Filter">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                        viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3"
+                                            d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
                                 </button>
                             </div>
                         </div>
@@ -330,16 +553,22 @@
                         <table class="w-full text-left border-collapse relative">
                             <thead class="sticky top-0 bg-white shadow-sm border-b border-gray-100 z-10">
                                 <tr class="bg-white">
-                                    <th class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest w-12 text-center">
-                                        <input type="checkbox" id="selectAll" onchange="UI.toggleSelectAll()" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
+                                    <th
+                                        class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest w-12 text-center">
+                                        <input type="checkbox" id="selectAll" onchange="UI.toggleSelectAll()"
+                                            class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
                                     </th>
-                                    <th class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest cursor-pointer group" onclick="UI.toggleSort()">
+                                    <th class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest cursor-pointer group"
+                                        onclick="UI.toggleSort()">
                                         <div class="flex items-center">
                                             Domain Identifier
-                                            <span id="sortIcon" class="ml-2 text-blue-400 transition-transform duration-300">▼</span>
+                                            <span id="sortIcon"
+                                                class="ml-2 text-blue-400 transition-transform duration-300">▼</span>
                                         </div>
                                     </th>
-                                    <th class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest text-center w-32">Operations</th>
+                                    <th
+                                        class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest text-center w-32">
+                                        Operations</th>
                                 </tr>
                             </thead>
                             <tbody id="resultsTable" class="divide-y divide-gray-50">
@@ -347,11 +576,15 @@
                                     <td colspan="3" class="p-20 text-center">
                                         <div class="flex flex-col items-center space-y-4">
                                             <div class="text-gray-200">
-                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16" fill="none"
+                                                    viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        stroke-width="1"
+                                                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                                 </svg>
                                             </div>
-                                            <p class="text-xs text-gray-300 font-bold uppercase tracking-widest">Awaiting operation selection</p>
+                                            <p class="text-xs text-gray-300 font-bold uppercase tracking-widest">
+                                                Awaiting operation selection</p>
                                         </div>
                                     </td>
                                 </tr>
@@ -365,13 +598,16 @@
 
     <!-- Footer -->
     <footer class="max-w-7xl mx-auto mt-12 pb-8 w-full border-t border-gray-200 pt-8 opacity-60">
-        <div class="flex flex-col md:flex-row justify-between items-center text-[10px] font-black text-gray-400 uppercase tracking-widest gap-4">
-            <p>&copy; 2026 Core Intelligence Lab. VEEGN Environment.</p>
+        <div
+            class="flex flex-col md:flex-row justify-between items-center text-[10px] font-black text-gray-400 uppercase tracking-widest gap-4">
+            <p>&copy; 2026 VEEGN • MADE WITH ❤️ FOR RUST</p>
             <div class="flex items-center space-x-4">
                 <span>Preferred Registrars:</span>
-                <a href="https://porkbun.com/" class="text-blue-500 hover:text-blue-700 transition-colors" target="_blank">Porkbun</a>
+                <a href="https://porkbun.com/" class="text-blue-500 hover:text-blue-700 transition-colors"
+                    target="_blank">Porkbun</a>
                 <span class="text-gray-200">/</span>
-                <a href="https://www.namecheap.com/" class="text-blue-500 hover:text-blue-700 transition-colors" target="_blank">Namecheap</a>
+                <a href="https://www.namecheap.com/" class="text-blue-500 hover:text-blue-700 transition-colors"
+                    target="_blank">Namecheap</a>
             </div>
         </div>
     </footer>
@@ -404,6 +640,7 @@
             taskMode: 'combinatorial',
             dictSlots: 1,
             dictionaries: [],
+            tlds: [],
             config: {}
         };
 
@@ -480,9 +717,12 @@
             async loadTlds() {
                 try {
                     const tlds = await this.fetchJson('api/tlds');
-                    const datalist = document.getElementById('suffix-list');
-                    if (datalist && tlds) {
-                        datalist.innerHTML = tlds.map(tld => `<option value=".${tld}">`).join('');
+                    if (tlds) {
+                        State.tlds = tlds.map(tld => `.${tld}`);
+                        const datalist = document.getElementById('suffix-list');
+                        if (datalist) {
+                            datalist.innerHTML = tlds.map(tld => `<option value=".${tld}">`).join('');
+                        }
                     }
                 } catch (e) {
                     console.error('Failed to load TLDs:', e);
@@ -635,10 +875,10 @@
                 State.taskMode = mode;
                 document.getElementById('formCombinatorial').classList.toggle('hidden', mode !== 'combinatorial');
                 document.getElementById('formDictionary').classList.toggle('hidden', mode !== 'dictionary');
-                
+
                 const btnCombo = document.getElementById('btnTabCombo');
                 const btnDict = document.getElementById('btnTabDict');
-                
+
                 if (mode === 'combinatorial') {
                     btnCombo.className = "px-3 py-1 text-[10px] font-black uppercase rounded-md bg-white shadow-sm text-blue-600 transition-all";
                     btnDict.className = "px-3 py-1 text-[10px] font-black uppercase rounded-md text-gray-400 hover:text-gray-600 transition-all";
@@ -676,7 +916,7 @@
                     const activeStyle = State.currentId === s.id ? 'active' : '';
                     const published = State.publishedByScanId[s.id];
                     const timeStr = s.finished_at ? s.finished_at.split('.')[0].replace('T', ' ') : (isPaused ? 'PAUSED' : 'ACTIVE...');
-                    
+
                     return `
                         <div onclick="Handlers.selectScan('${s.id}')" class="scan-item bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-center group ${activeStyle}">
                             <div class="overflow-hidden">
@@ -884,12 +1124,12 @@
                 document.getElementById('total').innerText = data.total;
                 document.getElementById('progressInline').innerText = data.processed;
                 document.getElementById('totalInline').innerText = data.total;
-                
+
                 const foundEl = document.getElementById('found');
                 const oldFound = parseInt(foundEl.innerText);
                 if (data.found > oldFound) {
                     foundEl.classList.remove('count-update');
-                    void foundEl.offsetWidth; 
+                    void foundEl.offsetWidth;
                     foundEl.classList.add('count-update');
                 }
                 foundEl.innerText = data.found;
@@ -903,7 +1143,7 @@
                 document.getElementById('percentage').innerText = pct;
                 document.getElementById('percentageInline').innerText = pct;
                 document.getElementById('progressBar').style.width = pct + '%';
-                
+
                 if (['finished', 'failed', 'paused', 'cancelled'].includes(data.status)) {
                     if (data.status === 'finished' && data.found > 0) document.getElementById('btnRescan').classList.remove('hidden');
                     if (!State.isConsoleCollapsed) this.setConsoleState(true);
@@ -977,7 +1217,7 @@
                         }
                         domainOrder.push(status.domain);
                         domainStates.set(status.domain, status);
-                    } else if (status.tag && !['SCAN','QUEUED'].includes(status.tag)) {
+                    } else if (status.tag && !['SCAN', 'QUEUED'].includes(status.tag)) {
                         systemLines.push(status);
                     }
                 }
@@ -1025,7 +1265,7 @@
             getFilteredResults() {
                 const query = document.getElementById('domainSearch').value.trim();
                 let filtered = [...State.currentResults];
-                
+
                 if (query) {
                     const re = Utils.compileSearchRegex(query);
                     filtered = re ? filtered.filter(r => re.test(r.domain)) : filtered.filter(r => r.domain.toLowerCase().includes(query.toLowerCase()));
@@ -1099,7 +1339,7 @@
 
             async startScan() {
                 let payload = {};
-                
+
                 if (State.taskMode === 'combinatorial') {
                     payload = {
                         length: parseInt(document.getElementById('length').value),
@@ -1130,7 +1370,7 @@
                 try {
                     const newId = await API.fetchJson('api/scan', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
                     });
                     this.selectScan(newId);
@@ -1142,7 +1382,7 @@
                 try {
                     const newId = await API.fetchJson('api/scan', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ domains: State.currentResults.map(r => r.domain) })
                     });
                     this.selectScan(newId);
@@ -1153,7 +1393,7 @@
                 try {
                     await API.fetchJson(`api/scan/${id}/reorder`, {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ direction })
                     });
                     API.loadRecentScans();
@@ -1236,7 +1476,7 @@
                 try {
                     const published = await API.fetchJson(`api/scan/${id}/publish`, {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             title: title.trim(),
                             description: description.trim() || null
@@ -1311,8 +1551,8 @@
          * Utilities and Logic
          */
         const Utils = {
-            escapeHtml: v => String(v).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])),
-            
+            escapeHtml: v => String(v).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])),
+
             formatScanSummary(s) {
                 if (s.has_domains) return `List: ${s.total || '0'} items`;
                 if (s.has_dictionary) return `Dict: ${s.total || '0'} × ${s.suffix || ''}`;
@@ -1339,7 +1579,7 @@
 
             formatLogMessage(log) {
                 let parsed = null;
-                try { parsed = JSON.parse(log.message); } catch (_) {}
+                try { parsed = JSON.parse(log.message); } catch (_) { }
 
                 if (parsed && parsed.event) {
                     const chipMap = {
@@ -1360,12 +1600,12 @@
                 return { tag: log.level || 'LOG', domain: log.message, cardClass: 'chip-task' };
             },
 
-            formatFields: f => f ? Object.entries(f).filter(([_,v])=>v!=null).map(([k,v])=>`${k}=${v}`).join(' | ') : '',
+            formatFields: f => f ? Object.entries(f).filter(([_, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(' | ') : '',
 
             renderDomainCard(s, animate = false) {
                 const cssMap = { QUEUED: 'card-queued', SCAN: 'card-scanning', OPEN: 'card-open', TAKEN: 'card-taken', ERR: 'card-err' };
                 const cardClass = cssMap[s.tag] || 'card-scanning';
-                const shortTag = s.tag.length > 5 ? s.tag.slice(0,4) : s.tag;
+                const shortTag = s.tag.length > 5 ? s.tag.slice(0, 4) : s.tag;
                 const animStyle = animate ? '' : ' style="animation: none;"';
                 return `<div class="domain-card ${cardClass}"${animStyle}><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${s.tag}">${shortTag}</span></div>`;
             },
@@ -1375,6 +1615,99 @@
             }
         };
 
+        function setupSuffixAutocomplete(inputId, dropdownId) {
+            const input = document.getElementById(inputId);
+            const dropdown = document.getElementById(dropdownId);
+            if (!input || !dropdown) return;
+
+            let activeIndex = -1;
+            let currentMatches = [];
+
+            function renderMatches(matches) {
+                currentMatches = matches;
+                if (matches.length === 0) {
+                    dropdown.classList.add('hidden');
+                    return;
+                }
+
+                dropdown.innerHTML = matches.map((match, idx) => {
+                    const activeClass = idx === activeIndex ? 'bg-blue-50 text-blue-600' : 'text-gray-700 hover:bg-gray-50';
+                    return `
+                        <div class="px-4 py-2 cursor-pointer transition-colors text-xs font-bold uppercase tracking-wider ${activeClass}" 
+                             data-index="${idx}">
+                            ${match}
+                        </div>
+                    `;
+                }).join('');
+                dropdown.classList.remove('hidden');
+            }
+
+            function selectMatch(match) {
+                input.value = match;
+                dropdown.classList.add('hidden');
+                input.dispatchEvent(new Event('input'));
+                input.dispatchEvent(new Event('change'));
+            }
+
+            function filter() {
+                const val = input.value.trim().toLowerCase();
+                let matches = State.tlds || [];
+                if (val) {
+                    const cleanQuery = val.startsWith('.') ? val.slice(1) : val;
+                    matches = matches.filter(tld => {
+                        const cleanTld = tld.startsWith('.') ? tld.slice(1) : tld;
+                        return cleanTld.toLowerCase().includes(cleanQuery.toLowerCase());
+                    });
+                }
+                
+                // Limit to 10 candidates
+                matches = matches.slice(0, 10);
+                activeIndex = -1;
+                renderMatches(matches);
+            }
+
+            input.addEventListener('focus', filter);
+            input.addEventListener('input', filter);
+
+            dropdown.addEventListener('click', (e) => {
+                const item = e.target.closest('[data-index]');
+                if (item) {
+                    const idx = parseInt(item.getAttribute('data-index'));
+                    const match = currentMatches[idx];
+                    if (match !== undefined) {
+                        selectMatch(match);
+                    }
+                }
+            });
+
+            input.addEventListener('keydown', (e) => {
+                if (dropdown.classList.contains('hidden')) return;
+
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    activeIndex = (activeIndex + 1) % currentMatches.length;
+                    renderMatches(currentMatches);
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    activeIndex = (activeIndex - 1 + currentMatches.length) % currentMatches.length;
+                    renderMatches(currentMatches);
+                } else if (e.key === 'Enter') {
+                    if (activeIndex >= 0 && activeIndex < currentMatches.length) {
+                        e.preventDefault();
+                        selectMatch(currentMatches[activeIndex]);
+                    }
+                } else if (e.key === 'Escape') {
+                    dropdown.classList.add('hidden');
+                }
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!input.contains(e.target) && !dropdown.contains(e.target)) {
+                    dropdown.classList.add('hidden');
+                }
+            });
+        }
+
         // Entry Point
         window.onload = () => {
             document.querySelectorAll('a[href="published.html"]').forEach(anchor => {
@@ -1382,12 +1715,16 @@
             });
             API.loadRecentScans();
             API.openScansStream();
-            API.loadTlds().catch(() => {});
+            API.loadTlds().catch(() => { });
             API.listDictionaries().then(dicts => {
                 State.dictionaries = dicts;
                 UI.populateDictionarySelect();
-            }).catch(() => {});
+            }).catch(() => { });
+
+            setupSuffixAutocomplete('suffix', 'suffix-dropdown');
+            setupSuffixAutocomplete('dict_suffix', 'dict_suffix-dropdown');
         };
     </script>
 </body>
+
 </html>

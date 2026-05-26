@@ -294,7 +294,13 @@ pub(super) async fn prepare_job_feeder(
 
         let domains: Vec<String> = dict_words
             .into_iter()
-            .map(|word| format!("{}{}{}{}", prefix, word, postfix, suffix))
+            .map(|word| {
+                if word.contains('.') {
+                    word
+                } else {
+                    format!("{}{}{}{}", prefix, word, postfix, suffix)
+                }
+            })
             .collect();
 
         spawn_domain_feeder(
@@ -319,7 +325,13 @@ pub(super) async fn prepare_job_feeder(
 
         let domains: Vec<String> = dict_words
             .into_iter()
-            .map(|word| format!("{}{}{}{}", prefix, word, postfix, suffix))
+            .map(|word| {
+                if word.contains('.') {
+                    word
+                } else {
+                    format!("{}{}{}{}", prefix, word, postfix, suffix)
+                }
+            })
             .collect();
 
         spawn_domain_feeder(

@@ -1190,6 +1190,67 @@ async fn test_generator_dictionary_with_skip() {
 }
 
 // =============================================================================
+// 8b. Generator Dictionary Full-Domain Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_generator_dictionary_full_domain() {
+    let dict_path = std::env::temp_dir().join("test_dict_full_domain.txt");
+    std::fs::write(&dict_path, "example.com\ntest.org\nhello.xyz\n").unwrap();
+    let dg = generator::generate_domains(
+        0,
+        ".net".to_string(), // suffix should be ignored for full-domain entries
+        "D".to_string(),
+        "".to_string(),
+        dict_path.to_str().unwrap().to_string(),
+        vec![],
+        0,
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
+    let mut rx = dg.domains;
+    while let Some(d) = rx.recv().await {
+        domains.push(d);
+    }
+    // Full-domain words should NOT have suffix appended
+    assert!(domains.contains(&"example.com".to_string()));
+    assert!(domains.contains(&"test.org".to_string()));
+    assert!(domains.contains(&"hello.xyz".to_string()));
+    // Should NOT contain doubled suffixes
+    assert!(!domains.contains(&"example.com.net".to_string()));
+    assert!(!domains.contains(&"test.org.net".to_string()));
+    let _ = std::fs::remove_file(&dict_path);
+}
+
+#[tokio::test]
+async fn test_generator_dictionary_mixed_domain() {
+    let dict_path = std::env::temp_dir().join("test_dict_mixed_domain.txt");
+    std::fs::write(&dict_path, "example.com\nhello\ntest.org\nworld\n").unwrap();
+    let dg = generator::generate_domains(
+        0,
+        ".xyz".to_string(),
+        "D".to_string(),
+        "".to_string(),
+        dict_path.to_str().unwrap().to_string(),
+        vec![],
+        0,
+    )
+    .unwrap();
+    let mut domains: Vec<String> = Vec::new();
+    let mut rx = dg.domains;
+    while let Some(d) = rx.recv().await {
+        domains.push(d);
+    }
+    // Full-domain words: used as-is
+    assert!(domains.contains(&"example.com".to_string()));
+    assert!(domains.contains(&"test.org".to_string()));
+    // Fragment words: suffix appended
+    assert!(domains.contains(&"hello.xyz".to_string()));
+    assert!(domains.contains(&"world.xyz".to_string()));
+    let _ = std::fs::remove_file(&dict_path);
+}
+
+// =============================================================================
 // 9. AppConfig Tests
 // =============================================================================
 
