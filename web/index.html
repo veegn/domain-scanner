@@ -398,7 +398,7 @@
                             class="ml-auto rounded-full border border-red-100 bg-red-50 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-red-500 transition-colors hover:bg-red-100 hover:text-red-600">Clear
                             Terminal</button>
                     </div>
-                    <div id="recentScansList" class="space-y-3 max-h-[480px] overflow-y-auto pr-2 custom-scrollbar">
+                    <div id="recentScansList" class="space-y-2 max-h-[640px] overflow-y-auto pr-2 custom-scrollbar">
                         <div class="py-12 text-center text-gray-300 italic text-xs">Loading operations...</div>
                     </div>
                 </section>
@@ -643,6 +643,8 @@
             tlds: [],
             config: {}
         };
+
+        const LOG_STREAM_WINDOW_SIZE = 40;
 
         /**
          * API Interaction Layer
@@ -891,7 +893,7 @@
             renderScanList(scans) {
                 const listEl = document.getElementById('recentScansList');
                 this.syncScanFilterButtons();
-                const filteredScans = scans.filter(scan => this.matchesScanFilter(scan));
+                const filteredScans = this.sortScansForDisplay(scans.filter(scan => this.matchesScanFilter(scan)));
                 if (filteredScans.length === 0) {
                     listEl.innerHTML = '<div class="py-12 text-center text-gray-300 italic text-xs uppercase tracking-widest">No operation history found</div>';
                     return;
@@ -900,38 +902,57 @@
                 listEl.innerHTML = filteredScans.map(s => {
                     const isRunning = s.status === 'running';
                     const isPending = s.status === 'pending';
-                    const isFinished = s.status === 'finished';
                     const isPaused = s.status === 'paused';
                     const statusMeta = {
-                        running: { label: 'RUN', color: 'text-blue-500' },
-                        pending: { label: 'WAIT', color: 'text-orange-500' },
-                        pausing: { label: 'PAUSE', color: 'text-violet-500' },
-                        paused: { label: 'HOLD', color: 'text-violet-500' },
-                        cancelling: { label: 'STOP', color: 'text-orange-500' },
-                        cancelled: { label: 'HALT', color: 'text-gray-500' },
-                        failed: { label: 'FAIL', color: 'text-red-500' },
-                        finished: { label: 'DONE', color: 'text-green-500' }
+                        running: { label: 'RUN', color: 'text-blue-600', bg: 'bg-blue-50', bar: 'bg-blue-500' },
+                        pending: { label: 'WAIT', color: 'text-orange-600', bg: 'bg-orange-50', bar: 'bg-orange-400' },
+                        pausing: { label: 'PAUSE', color: 'text-violet-600', bg: 'bg-violet-50', bar: 'bg-violet-500' },
+                        paused: { label: 'HOLD', color: 'text-violet-600', bg: 'bg-violet-50', bar: 'bg-violet-500' },
+                        cancelling: { label: 'STOP', color: 'text-orange-600', bg: 'bg-orange-50', bar: 'bg-orange-500' },
+                        cancelled: { label: 'HALT', color: 'text-gray-500', bg: 'bg-gray-50', bar: 'bg-gray-400' },
+                        failed: { label: 'FAIL', color: 'text-red-600', bg: 'bg-red-50', bar: 'bg-red-500' },
+                        finished: { label: 'DONE', color: 'text-green-600', bg: 'bg-green-50', bar: 'bg-green-500' }
                     };
-                    const meta = statusMeta[s.status] || { label: 'TASK', color: 'text-gray-500' };
+                    const meta = statusMeta[s.status] || { label: 'TASK', color: 'text-gray-500', bg: 'bg-gray-50', bar: 'bg-gray-400' };
                     const activeStyle = State.currentId === s.id ? 'active' : '';
                     const published = State.publishedByScanId[s.id];
-                    const timeStr = s.finished_at ? s.finished_at.split('.')[0].replace('T', ' ') : (isPaused ? 'PAUSED' : 'ACTIVE...');
+                    const total = Math.max(0, Number(s.total) || 0);
+                    const processed = Math.max(0, Number(s.processed) || 0);
+                    const progress = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+                    const timeStr = Utils.formatScanTime(s);
+                    const summary = Utils.formatScanSummary(s);
 
                     return `
-                        <div onclick="Handlers.selectScan('${s.id}')" class="scan-item bg-white p-4 border border-gray-100 rounded-2xl flex justify-between items-center group ${activeStyle}">
-                            <div class="overflow-hidden">
-                                <p class="text-[9px] font-mono text-gray-300 truncate w-32">${s.id.split('-')[0]}...</p>
-                                <p class="text-[10px] font-black text-gray-600 truncate mt-1">${Utils.escapeHtml(Utils.formatScanSummary(s))}</p>
-                                <p class="text-[9px] font-black mt-1 uppercase text-gray-400">FOUND: <span class="text-green-600">${s.found}</span></p>
+                        <div onclick="Handlers.selectScan('${s.id}')" class="scan-item bg-white px-3 py-2 border border-gray-100 rounded-lg group ${activeStyle}">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0 flex-1">
+                                    <div class="flex items-center gap-2 min-w-0">
+                                        <span class="${meta.bg} ${meta.color} px-2 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest shrink-0">${meta.label}</span>
+                                        <p class="text-[9px] font-mono text-gray-400 truncate">${s.id.split('-')[0]}</p>
+                                    </div>
+                                    <p class="text-[10px] font-black text-gray-700 truncate mt-1" title="${Utils.escapeHtml(summary)}">${Utils.escapeHtml(summary)}</p>
+                                </div>
+                                <div class="shrink-0 text-right">
+                                    <p class="text-[10px] font-black text-emerald-600">${Number(s.found || 0).toLocaleString()}</p>
+                                    <p class="text-[8px] font-black text-gray-300 uppercase tracking-widest">hits</p>
+                                </div>
                             </div>
-                            <div class="text-right">
-                                <span class="${meta.color} text-[9px] font-black uppercase tracking-widest">${meta.label}</span>
-                                <p class="text-[8px] font-black text-gray-300 mt-1 uppercase">${timeStr}</p>
-                                ${published ? `<a href="${Routes.published(published.slug)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="inline-flex mt-2 text-[8px] font-black uppercase tracking-[0.22em] text-emerald-600 hover:text-emerald-700">Published</a>` : ''}
-                                <div class="flex space-x-2 mt-2 justify-end">
+
+                            <div class="mt-1.5 grid grid-cols-[1fr_auto] items-center gap-2">
+                                <div class="min-w-0">
+                                    <div class="h-1 rounded-full bg-gray-100 overflow-hidden">
+                                        <div class="${meta.bar} h-full rounded-full" style="width:${progress}%"></div>
+                                    </div>
+                                    <div class="mt-0.5 flex items-center justify-between gap-2 text-[8px] font-bold text-gray-400">
+                                        <span>${processed.toLocaleString()} / ${total.toLocaleString()}</span>
+                                        <span>${progress}%</span>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-1 justify-end">
+                                    ${published ? `<a href="${Routes.published(published.slug)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="p-1 hover:bg-emerald-50 text-emerald-500 rounded" title="Open published page"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 17L17 7M17 7H9m8 0v8"/></svg></a>` : ''}
                                     ${isPending ? `
-                                        <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'up')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7"/></svg></button>
-                                        <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'down')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg></button>
+                                        <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'up')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded" title="Move up"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7"/></svg></button>
+                                        <button onclick="event.stopPropagation(); Handlers.reorderScan('${s.id}', 'down')" class="p-1 hover:bg-blue-50 text-gray-300 hover:text-blue-500 rounded" title="Move down"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg></button>
                                     ` : ''}
                                     ${isRunning ? `
                                         <button onclick="event.stopPropagation(); Handlers.pauseScan('${s.id}')" class="p-1 hover:bg-amber-50 text-gray-300 hover:text-amber-600 rounded" title="Pause scan"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></button>
@@ -939,12 +960,44 @@
                                     ${isPaused ? `
                                         <button onclick="event.stopPropagation(); Handlers.resumeScan('${s.id}')" class="p-1 hover:bg-violet-50 text-gray-300 hover:text-violet-600 rounded" title="Resume scan"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
                                     ` : ''}
-                                    <button onclick="event.stopPropagation(); API.deleteScan('${s.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
+                                    <button onclick="event.stopPropagation(); API.deleteScan('${s.id}')" class="p-1 hover:bg-red-50 text-gray-300 hover:text-red-500 rounded" title="Delete scan"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                                 </div>
+                            </div>
+
+                            <div class="mt-1 flex items-center justify-between gap-2 text-[8px] font-black uppercase tracking-wider text-gray-300">
+                                <span>${Utils.escapeHtml(timeStr)}</span>
+                                <span>${total > 0 ? Utils.escapeHtml(s.status) : 'queued'}</span>
                             </div>
                         </div>
                     `;
                 }).join('');
+            },
+
+            sortScansForDisplay(scans) {
+                const rank = {
+                    running: 0,
+                    pausing: 1,
+                    cancelling: 2,
+                    paused: 3,
+                    pending: 4,
+                    failed: 5,
+                    finished: 6,
+                    cancelled: 7
+                };
+                return [...scans].sort((a, b) => {
+                    const rankDiff = (rank[a.status] ?? 8) - (rank[b.status] ?? 8);
+                    if (rankDiff !== 0) return rankDiff;
+                    if (a.status === 'pending' && b.status === 'pending') {
+                        const priorityDiff = (Number(b.priority) || 0) - (Number(a.priority) || 0);
+                        if (priorityDiff !== 0) return priorityDiff;
+                        const aCreated = new Date(a.created_at || 0).getTime() || 0;
+                        const bCreated = new Date(b.created_at || 0).getTime() || 0;
+                        return aCreated - bCreated;
+                    }
+                    const aTime = new Date(a.finished_at || a.started_at || a.created_at || 0).getTime() || 0;
+                    const bTime = new Date(b.finished_at || b.started_at || b.created_at || 0).getTime() || 0;
+                    return bTime - aTime;
+                });
             },
 
             matchesScanFilter(scan) {
@@ -1222,41 +1275,21 @@
                     }
                 }
 
-                // Dynamic capacity: use exact rect, conservative per-card sizes with safety buffer
-                const rect = consoleEl.getBoundingClientRect();
-                const cols = Math.max(1, Math.floor((rect.width - 32) / 160));
-                const rows = Math.max(2, Math.floor((rect.height - 32) / 33) - 1);
-                let maxCards = cols * rows;
-
-                const completed = [];
-                const active = [];
-                for (const d of domainOrder) {
-                    const s = domainStates.get(d);
-                    if (s.tag === 'OPEN' || s.tag === 'TAKEN' || s.tag === 'ERR') {
-                        completed.push(d);
-                    } else {
-                        active.push(d);
-                    }
-                }
-                const activeLimit = Math.min(active.length, maxCards);
-                const visibleActive = active.slice(-activeLimit);
-                const remaining = maxCards - activeLimit;
-                const visibleCompleted = completed.slice(-Math.max(0, remaining));
+                const latestSystemLine = systemLines[systemLines.length - 1];
+                const maxDomainCards = latestSystemLine
+                    ? Math.max(0, LOG_STREAM_WINDOW_SIZE - 1)
+                    : LOG_STREAM_WINDOW_SIZE;
+                const visibleDomains = domainOrder.slice(-maxDomainCards);
 
                 State.seenDomains = State.seenDomains || new Set();
                 let html = '';
-                for (const d of visibleActive) {
+                for (const d of visibleDomains) {
                     const isNew = !State.seenDomains.has(d);
                     if (isNew) State.seenDomains.add(d);
                     html += Utils.renderDomainCard(domainStates.get(d), isNew);
                 }
-                for (const d of visibleCompleted) {
-                    const isNew = !State.seenDomains.has(d);
-                    if (isNew) State.seenDomains.add(d);
-                    html += Utils.renderDomainCard(domainStates.get(d), isNew);
-                }
-                if (systemLines.length > 0) {
-                    html += Utils.renderSystemLine(systemLines[systemLines.length - 1]);
+                if (latestSystemLine) {
+                    html += Utils.renderSystemLine(latestSystemLine);
                 }
 
                 consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>';
@@ -1560,6 +1593,12 @@
                 const parts = [`${s.length}${s.suffix || ''} (${label})`];
                 if (s.regex) parts.push(`RX:${s.regex}`);
                 return parts.join(' | ');
+            },
+
+            formatScanTime(s) {
+                const value = s.finished_at || s.started_at || s.created_at;
+                if (!value) return s.status === 'pending' ? 'QUEUED' : 'ACTIVE';
+                return String(value).split('.')[0].replace('T', ' ');
             },
 
             buildPublishTitle(scan) {

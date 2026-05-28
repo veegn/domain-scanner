@@ -634,14 +634,30 @@ async fn fetch_scan_summaries(db: &sqlx::SqlitePool) -> Result<Vec<ScanSummary>,
                     THEN 1
                     ELSE 0
                 END AS has_dictionary,
+                s.priority,
                 s.total,
                 s.processed,
                 s.found,
+                s.created_at,
+                s.started_at,
                 s.finished_at
          FROM scans s
          LEFT JOIN scan_payloads p ON s.id = p.scan_id
-         ORDER BY COALESCE(s.finished_at, s.started_at, s.created_at) DESC
-         LIMIT 20",
+         ORDER BY CASE s.status
+                    WHEN 'running' THEN 0
+                    WHEN 'pausing' THEN 1
+                    WHEN 'cancelling' THEN 2
+                    WHEN 'paused' THEN 3
+                    WHEN 'pending' THEN 4
+                    WHEN 'failed' THEN 5
+                    WHEN 'finished' THEN 6
+                    WHEN 'cancelled' THEN 7
+                    ELSE 8
+                  END,
+                  CASE WHEN s.status = 'pending' THEN s.priority ELSE 0 END DESC,
+                  CASE WHEN s.status = 'pending' THEN s.created_at END ASC,
+                  COALESCE(s.finished_at, s.started_at, s.created_at) DESC
+         LIMIT 60",
     )
     .fetch_all(db)
     .await
