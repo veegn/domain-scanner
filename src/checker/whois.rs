@@ -43,6 +43,7 @@ fn retry_after_regexes() -> &'static Vec<regex::Regex> {
             r"(?i)retry\s+after[:\s]+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)",
             r"(?i)wait\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)",
             r"(?i)try\s+again\s+in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)",
+            r"(?i)replenished\s+in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)",
         ]
         .iter()
         .filter_map(|p| regex::Regex::new(p).ok())
@@ -401,6 +402,8 @@ impl WhoisChecker {
         let lower = response.to_lowercase();
         let strong_signal = lower.contains("limit exceeded")
             || lower.contains("quota exceeded")
+            || lower.contains("quota has been exceeded")
+            || lower.contains("query quota")
             || lower.contains("too many requests")
             || lower.contains("rate limit")
             || lower.contains("query limit")
@@ -794,6 +797,19 @@ mod tests {
 
         assert_eq!(hint.retry_after, Some(Duration::from_secs(300)));
         assert_eq!(hint.min_interval, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_nominet_quota_response_is_rate_limited_with_retry_after() {
+        let checker = WhoisChecker::new();
+        let response = "Error for \"4tk.uk\".\n\nthe WHOIS query quota for 192.227.236.250 has been exceeded\nand will be replenished in 9156 second";
+        let hint = checker.sniff_rate_limit_hint(response);
+
+        assert!(checker.is_rate_limited(response));
+        assert_eq!(hint.retry_after, Some(Duration::from_secs(9156)));
+        assert_eq!(hint.min_interval, None);
+        assert!(!checker.is_available(response));
+        assert!(!checker.is_registered(response));
     }
 
     #[test]
