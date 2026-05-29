@@ -204,6 +204,26 @@ impl DohChecker {
         }
     }
 
+    async fn is_server_ready(&self, server: &str) -> bool {
+        let throttle = self.throttle_for_server(server).await;
+        let guard = throttle.lock().await;
+        guard.next_allowed_at <= Instant::now()
+    }
+
+    async fn select_server(&self) -> &str {
+        let len = self.servers.len();
+        let start = self.current_idx.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            let server = &self.servers[idx];
+            if self.is_server_ready(server).await {
+                return server;
+            }
+        }
+
+        &self.servers[start % len]
+    }
+
     async fn record_success(&self, server: &str) {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
@@ -244,7 +264,7 @@ impl DohChecker {
         let mut guard = throttle.lock().await;
         let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
             .max(1_000)
-            .min(30_000);
+            .min(300_000);
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
@@ -288,9 +308,8 @@ impl DomainChecker for DohChecker {
                 .with_trace("DoH: no servers available");
         }
 
-        // Round Robin selection
-        let idx = self.current_idx.fetch_add(1, Ordering::Relaxed) % self.servers.len();
-        let server = &self.servers[idx];
+        // Prefer a currently ready provider, falling back to round-robin when all are cooling down.
+        let server = self.select_server().await;
         self.wait_for_turn(server).await;
 
         let url = format!("{}?name={}.&type=NS", server, domain);
@@ -304,6 +323,7 @@ impl DomainChecker for DohChecker {
             Ok(r) => r,
             Err(e) => {
                 self.cb.record_failure();
+                let retry_after = self.record_transient_failure(server, None).await;
                 debug!(
                     target: "domain_scanner::checker::doh",
                     context = "request",
@@ -312,8 +332,11 @@ impl DomainChecker for DohChecker {
                     error = %e,
                     "DoH request failed"
                 );
-                return CheckResult::error(format!("DoH request failed: {}", e))
-                    .with_trace(format!("DoH: request error via {}", server));
+                return CheckResult::retryable_error(
+                    format!("DoH request failed: {}", e),
+                    Some(retry_after.as_secs().max(1)),
+                )
+                .with_trace(format!("DoH: request error via {}", server));
             }
         };
 

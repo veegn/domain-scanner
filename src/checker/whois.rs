@@ -221,7 +221,7 @@ impl WhoisChecker {
         let mut guard = throttle.lock().await;
         let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
             .max(1_000)
-            .min(30_000);
+            .min(transient_backoff_cap_ms(reason));
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after = Duration::from_secs(30).max(guard.min_interval);
         guard.next_allowed_at = Instant::now() + retry_after;
@@ -379,6 +379,8 @@ impl WhoisChecker {
             || lower.contains("no matching record")
             || lower.contains("is available for registration")
             || lower.contains("available for registration")
+            || lower.contains("currently available for application")
+            || lower.contains("available for application")
     }
 
     fn is_registered(&self, response: &str) -> bool {
@@ -659,6 +661,18 @@ fn transient_whois_error_reason(error: &str) -> Option<&'static str> {
     }
 }
 
+fn transient_backoff_cap_ms(reason: &str) -> u64 {
+    match reason {
+        "connection_reset"
+        | "broken_pipe"
+        | "connection_refused"
+        | "connection_aborted"
+        | "unexpected_eof"
+        | "temporarily_unavailable" => 300_000,
+        _ => 30_000,
+    }
+}
+
 fn duration_from_unit(value: u64, unit: &str) -> Duration {
     let lower = unit.to_ascii_lowercase();
     let secs = if lower.starts_with("hour") || lower.starts_with("hr") {
@@ -807,6 +821,15 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_digital_dropzone_response_detected_as_available() {
+        let checker = WhoisChecker::new();
+        let response = "This domain is currently available for application via the Identity Digital Dropzone service.\n>>> Last update of WHOIS database";
+
+        assert!(checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
     fn test_sniff_rate_limit_hint_parses_retry_after_and_qpm() {
         let checker = WhoisChecker::new();
         let hint = checker.sniff_rate_limit_hint(
@@ -855,6 +878,13 @@ mod tests {
             Some("unexpected_eof")
         );
         assert_eq!(transient_whois_error_reason("Invalid domain syntax"), None);
+    }
+
+    #[test]
+    fn test_connection_reset_uses_longer_transient_backoff_cap() {
+        assert_eq!(transient_backoff_cap_ms("connection_reset"), 300_000);
+        assert_eq!(transient_backoff_cap_ms("unexpected_eof"), 300_000);
+        assert_eq!(transient_backoff_cap_ms("timeout"), 30_000);
     }
 
     #[test]
