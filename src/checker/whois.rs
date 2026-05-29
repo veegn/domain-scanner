@@ -376,6 +376,8 @@ impl WhoisChecker {
             || lower.contains("status: free")
             || lower.contains("domain not found")
             || lower.contains("no matching record")
+            || lower.contains("is available for registration")
+            || lower.contains("available for registration")
     }
 
     fn is_registered(&self, response: &str) -> bool {
@@ -772,6 +774,15 @@ mod tests {
         let checker = WhoisChecker::new();
         assert!(checker.is_available("No match for domain \"4TB.UK\""));
         assert!(!checker.is_registered("No match for domain \"4TB.UK\""));
+    }
+
+    #[test]
+    fn test_radix_available_response_detected_as_available() {
+        let checker = WhoisChecker::new();
+        let response = ">>> Domain asi.fun is available for registration\n\n>>> Please visit https://rdap.radix.host/registrars/ for a list of accredited registrars";
+
+        assert!(checker.is_available(response));
+        assert!(!checker.is_registered(response));
     }
 
     #[test]
