@@ -4,8 +4,8 @@
 //! without making any network requests. It's the fastest checker.
 
 use async_trait::async_trait;
-use std::sync::LazyLock;
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
 

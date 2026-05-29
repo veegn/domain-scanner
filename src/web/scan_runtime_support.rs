@@ -9,12 +9,12 @@ use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 
 pub(super) const MAX_EXCEPTION_REPLAY_ROUNDS: u32 = 3;
-pub(super) const WORKER_COUNT: usize = 10;
-pub(super) const WORKER_DELAY_MS: u64 = 500;
+pub(super) const WORKER_DELAY_MS: u64 = 1_000;
 pub(super) const COUNTER_PERSIST_INTERVAL: i64 = 50;
 pub(super) const STATUS_PUBLISH_INTERVAL: i64 = 10;
 pub(super) const RESULT_FLUSH_BATCH_SIZE: usize = 50;
@@ -52,6 +52,7 @@ pub(super) struct ScanRuntimeState {
     pub(super) pending_result_flush: Vec<PendingResultPersist>,
     pub(super) pending_log_flush: Vec<PendingLogPersist>,
     pub(super) deferred_retries: HashMap<String, crate::DomainResult>,
+    pub(super) deferred_retry_ready_at: HashMap<String, Instant>,
     pub(super) replay_round: u32,
 }
 
@@ -66,6 +67,7 @@ impl ScanRuntimeState {
             pending_result_flush: Vec::with_capacity(RESULT_FLUSH_BATCH_SIZE),
             pending_log_flush: Vec::with_capacity(LOG_FLUSH_BATCH_SIZE),
             deferred_retries: HashMap::new(),
+            deferred_retry_ready_at: HashMap::new(),
             replay_round: 0,
         }
     }
@@ -834,14 +836,25 @@ async fn flush_pending_logs(
     }
 }
 
-pub(super) fn is_whois_rate_limited(res: &crate::DomainResult) -> bool {
-    res.trace.iter().any(|step| step.starts_with("WHOIS: ") || step.starts_with("RDAP: "))
-        || res
-            .error
-            .as_deref()
-            .map(|err| {
-                let err = err.to_ascii_uppercase();
-                err.contains("WHOIS") || err.contains("RDAP")
-            })
-            .unwrap_or(false)
+pub(super) fn rate_limited_service(res: &crate::DomainResult) -> Option<&'static str> {
+    if res.trace.iter().any(|step| step.starts_with("WHOIS: ")) {
+        return Some("whois");
+    }
+    if res.trace.iter().any(|step| step.starts_with("RDAP: ")) {
+        return Some("rdap");
+    }
+    if res.trace.iter().any(|step| step.starts_with("DoH: ")) {
+        return Some("doh");
+    }
+
+    let err = res.error.as_deref()?.to_ascii_uppercase();
+    if err.contains("WHOIS") {
+        Some("whois")
+    } else if err.contains("RDAP") {
+        Some("rdap")
+    } else if err.contains("DOH") {
+        Some("doh")
+    } else {
+        None
+    }
 }

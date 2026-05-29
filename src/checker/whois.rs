@@ -101,13 +101,13 @@ struct WhoisRateLimitCacheEntry {
 impl WhoisServerThrottle {
     fn new() -> Self {
         Self {
-            min_interval: Duration::from_millis(250),
+            min_interval: Duration::from_millis(1_000),
             next_allowed_at: Instant::now(),
         }
     }
 
     fn from_cache(entry: &WhoisRateLimitCacheEntry) -> Self {
-        let min_interval = Duration::from_millis(entry.min_interval_ms.max(250));
+        let min_interval = Duration::from_millis(entry.min_interval_ms.max(1_000));
         let mut next_allowed_at = Instant::now();
         if let Some(cooldown_until_epoch_secs) = entry.cooldown_until_epoch_secs {
             let remaining_secs = cooldown_until_epoch_secs.saturating_sub(now_epoch_secs());
@@ -198,7 +198,7 @@ impl WhoisChecker {
     async fn record_success(&self, server: &str) {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
-        let floor_ms = 250;
+        let floor_ms = 1_000;
         let mut changed = false;
         if guard.min_interval.as_millis() as u64 > floor_ms {
             let reduced_ms = ((guard.min_interval.as_millis() as u64) * 8 / 10).max(floor_ms);
@@ -224,6 +224,8 @@ impl WhoisChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after = Duration::from_secs(30).max(guard.min_interval);
         guard.next_allowed_at = Instant::now() + retry_after;
+        let min_interval = guard.min_interval;
+        let next_allowed_at = guard.next_allowed_at;
         warn!(
             target: "domain_scanner::checker::whois",
             context = "backoff",
@@ -233,6 +235,9 @@ impl WhoisChecker {
             retry_after_secs = retry_after.as_secs(),
             "WHOIS timeout backoff updated"
         );
+        drop(guard);
+        self.persist_rate_limit_cache(server, min_interval, next_allowed_at)
+            .await;
         retry_after
     }
 
@@ -392,11 +397,23 @@ impl WhoisChecker {
 
     fn is_rate_limited(&self, response: &str) -> bool {
         let lower = response.to_lowercase();
-        lower.contains("limit exceeded")
+        let strong_signal = lower.contains("limit exceeded")
             || lower.contains("quota exceeded")
             || lower.contains("too many requests")
-            || lower.contains("blacklist")
-            || lower.contains("access denied")
+            || lower.contains("rate limit")
+            || lower.contains("query limit")
+            || lower.contains("queries per")
+            || lower.contains("try again later")
+            || lower.contains("try again in");
+        let access_blocked = lower.contains("blacklist") || lower.contains("access denied");
+        let transient_context = lower.contains("limit")
+            || lower.contains("quota")
+            || lower.contains("rate")
+            || lower.contains("temporar")
+            || lower.contains("try again")
+            || lower.contains("too many");
+
+        strong_signal || (access_blocked && transient_context)
     }
 
     fn sniff_rate_limit_hint(&self, response: &str) -> RateLimitHint {
@@ -738,7 +755,8 @@ mod tests {
     #[test]
     fn test_registered_response_requires_markers() {
         let checker = WhoisChecker::new();
-        let response = "Domain Name: GOOGLE.COM\nRegistrar: MarkMonitor Inc.\nName Server: NS1.GOOGLE.COM";
+        let response =
+            "Domain Name: GOOGLE.COM\nRegistrar: MarkMonitor Inc.\nName Server: NS1.GOOGLE.COM";
         assert!(checker.is_registered(response));
     }
 
@@ -765,6 +783,16 @@ mod tests {
 
         assert_eq!(hint.retry_after, Some(Duration::from_secs(300)));
         assert_eq!(hint.min_interval, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_rate_limit_detection_uses_strong_or_contextual_signals() {
+        let checker = WhoisChecker::new();
+
+        assert!(checker.is_rate_limited("Too many requests. Retry after 60 seconds."));
+        assert!(checker.is_rate_limited("Access denied: query rate limit exceeded."));
+        assert!(!checker.is_rate_limited("Access denied for malformed query."));
+        assert!(!checker.is_rate_limited("This domain is not present in the registry."));
     }
 
     #[test]

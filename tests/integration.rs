@@ -6,6 +6,7 @@ use axum::extract::Path as AxumPath;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use domain_scanner::DomainResult;
 use domain_scanner::checker::circuit_breaker::CircuitBreaker;
 use domain_scanner::checker::{
     CheckResult, CheckerPriority, CheckerRegistry, DohChecker, DomainChecker, LocalReservedChecker,
@@ -13,7 +14,6 @@ use domain_scanner::checker::{
 };
 use domain_scanner::config::AppConfig;
 use domain_scanner::generator;
-use domain_scanner::DomainResult;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -1261,6 +1261,9 @@ fn test_config_default() {
     assert!(config.whois_servers.is_empty());
     assert!(config.rdap_servers.is_empty());
     assert!(config.rdap_bootstrap_url.is_none());
+    assert_eq!(config.scheduler.max_parallel_tlds, 3);
+    assert_eq!(config.scheduler.workers_per_scan, 10);
+    assert_eq!(config.scheduler.max_global_checks, 20);
 }
 
 #[test]
@@ -1272,7 +1275,7 @@ fn test_config_load_nonexistent_file() {
 #[test]
 fn test_config_load_valid_file() {
     let path = std::env::temp_dir().join("test_config_valid_integ.json");
-    let content = r#"{"doh_servers":["https://dns.google/resolve"],"whois_servers":{"com":"whois.verisign-grs.com"},"rdap_servers":{"com":"https://rdap.example.test/"},"rdap_bootstrap_url":"https://data.iana.org/rdap/dns.json"}"#;
+    let content = r#"{"doh_servers":["https://dns.google/resolve"],"whois_servers":{"com":"whois.verisign-grs.com"},"rdap_servers":{"com":"https://rdap.example.test/"},"rdap_bootstrap_url":"https://data.iana.org/rdap/dns.json","scheduler":{"max_parallel_tlds":4,"workers_per_scan":6,"max_global_checks":12}}"#;
     std::fs::write(&path, content).unwrap();
     let config = AppConfig::load_from_file(path.to_str().unwrap());
     assert_eq!(config.doh_servers.len(), 1);
@@ -1289,6 +1292,9 @@ fn test_config_load_valid_file() {
         config.rdap_bootstrap_url.as_deref(),
         Some("https://data.iana.org/rdap/dns.json")
     );
+    assert_eq!(config.scheduler.max_parallel_tlds, 4);
+    assert_eq!(config.scheduler.workers_per_scan, 6);
+    assert_eq!(config.scheduler.max_global_checks, 12);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1510,7 +1516,9 @@ async fn test_generator_length2_letters() {
 
 #[tokio::test]
 async fn test_load_tlds_and_idx_from_db() {
-    let pool = sqlx::sqlite::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::sqlite::SqlitePool::connect("sqlite::memory:")
+        .await
+        .unwrap();
     sqlx::query(
         "CREATE TABLE tlds (
             suffix TEXT PRIMARY KEY,
@@ -1547,5 +1555,3 @@ async fn test_load_tlds_and_idx_from_db() {
     assert!(tlds.contains(&"com".to_string()));
     assert!(tlds.contains(&"xyz".to_string()));
 }
-
-

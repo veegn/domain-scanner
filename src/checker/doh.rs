@@ -4,11 +4,13 @@
 //! If a domain has NS records, it's very likely registered.
 
 use async_trait::async_trait;
-use std::sync::LazyLock;
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
@@ -54,6 +56,13 @@ pub struct DohChecker {
     pub current_idx: AtomicUsize,
     /// Circuit breaker to prevent cascading failures
     pub cb: Arc<CircuitBreaker>,
+    throttle_map: Arc<RwLock<std::collections::HashMap<String, Arc<Mutex<DohServerThrottle>>>>>,
+}
+
+#[derive(Debug)]
+struct DohServerThrottle {
+    min_interval: Duration,
+    next_allowed_at: Instant,
 }
 
 impl DohChecker {
@@ -142,7 +151,113 @@ impl DohChecker {
             servers: final_servers,
             current_idx: AtomicUsize::new(0),
             cb: Arc::new(CircuitBreaker::new(20, 30)),
+            throttle_map: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    async fn throttle_for_server(&self, server: &str) -> Arc<Mutex<DohServerThrottle>> {
+        {
+            let guard = self.throttle_map.read().await;
+            if let Some(existing) = guard.get(server) {
+                return existing.clone();
+            }
+        }
+
+        let mut guard = self.throttle_map.write().await;
+        guard
+            .entry(server.to_string())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(DohServerThrottle {
+                    min_interval: Duration::from_millis(1_000),
+                    next_allowed_at: Instant::now(),
+                }))
+            })
+            .clone()
+    }
+
+    async fn wait_for_turn(&self, server: &str) {
+        let throttle = self.throttle_for_server(server).await;
+        loop {
+            let sleep_for = {
+                let mut guard = throttle.lock().await;
+                let now = Instant::now();
+                if guard.next_allowed_at <= now {
+                    guard.next_allowed_at = now + guard.min_interval;
+                    None
+                } else {
+                    Some(guard.next_allowed_at - now)
+                }
+            };
+
+            if let Some(delay) = sleep_for {
+                debug!(
+                    target: "domain_scanner::checker::doh",
+                    context = "throttle",
+                    server,
+                    delay_ms = delay.as_millis() as u64,
+                    "waiting for DoH throttle window"
+                );
+                tokio::time::sleep(delay).await;
+            } else {
+                break;
+            }
+        }
+    }
+
+    async fn record_success(&self, server: &str) {
+        let throttle = self.throttle_for_server(server).await;
+        let mut guard = throttle.lock().await;
+        let floor_ms = 1_000;
+        if guard.min_interval.as_millis() as u64 > floor_ms {
+            let reduced_ms = ((guard.min_interval.as_millis() as u64) * 8 / 10).max(floor_ms);
+            guard.min_interval = Duration::from_millis(reduced_ms);
+        }
+    }
+
+    async fn record_rate_limit(&self, server: &str, retry_after: Option<Duration>) -> Duration {
+        let throttle = self.throttle_for_server(server).await;
+        let mut guard = throttle.lock().await;
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
+            .max(2_000)
+            .min(60_000);
+        guard.min_interval = Duration::from_millis(next_ms);
+        let retry_after =
+            retry_after.unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
+        guard.next_allowed_at = Instant::now() + retry_after;
+        warn!(
+            target: "domain_scanner::checker::doh",
+            context = "backoff",
+            server,
+            min_interval_ms = guard.min_interval.as_millis() as u64,
+            retry_after_secs = retry_after.as_secs(),
+            "DoH rate-limit backoff updated"
+        );
+        retry_after
+    }
+
+    async fn record_transient_failure(
+        &self,
+        server: &str,
+        retry_after: Option<Duration>,
+    ) -> Duration {
+        let throttle = self.throttle_for_server(server).await;
+        let mut guard = throttle.lock().await;
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
+            .max(1_000)
+            .min(30_000);
+        guard.min_interval = Duration::from_millis(next_ms);
+        let retry_after =
+            retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
+        guard.next_allowed_at = Instant::now() + retry_after;
+        warn!(
+            target: "domain_scanner::checker::doh",
+            context = "backoff",
+            server,
+            min_interval_ms = guard.min_interval.as_millis() as u64,
+            retry_after_secs = retry_after.as_secs(),
+            "DoH transient failure backoff updated"
+        );
+        retry_after
     }
 }
 
@@ -176,6 +291,7 @@ impl DomainChecker for DohChecker {
         // Round Robin selection
         let idx = self.current_idx.fetch_add(1, Ordering::Relaxed) % self.servers.len();
         let server = &self.servers[idx];
+        self.wait_for_turn(server).await;
 
         let url = format!("{}?name={}.&type=NS", server, domain);
 
@@ -201,9 +317,12 @@ impl DomainChecker for DohChecker {
             }
         };
 
+        let retry_after = retry_after_from_headers(resp.headers());
         if !resp.status().is_success() {
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 self.cb.record_failure();
+                let retry_after = self.record_rate_limit(server, retry_after).await;
                 warn!(
                     target: "domain_scanner::checker::doh",
                     context = "request",
@@ -211,8 +330,20 @@ impl DomainChecker for DohChecker {
                     server,
                     "DoH rate limited"
                 );
-                return CheckResult::rate_limited("DoH rate limit exceeded (HTTP 429)")
-                    .with_trace(format!("DoH: HTTP 429 via {}", server));
+                return CheckResult::rate_limited_with_retry(
+                    "DoH rate limit exceeded (HTTP 429)",
+                    Some(retry_after.as_secs().max(1)),
+                )
+                .with_trace(format!("DoH: HTTP 429 via {}", server));
+            }
+            if status.is_server_error() {
+                self.cb.record_failure();
+                let retry_after = self.record_transient_failure(server, retry_after).await;
+                return CheckResult::retryable_error(
+                    format!("DoH returned transient HTTP {}", status),
+                    Some(retry_after.as_secs().max(1)),
+                )
+                .with_trace(format!("DoH: HTTP {} via {}", status, server));
             }
             self.cb.record_failure();
             debug!(
@@ -230,6 +361,7 @@ impl DomainChecker for DohChecker {
         }
 
         self.cb.record_success();
+        self.record_success(server).await;
 
         let result: DohResponse = match resp.json().await {
             Ok(r) => r,
@@ -273,6 +405,25 @@ impl DomainChecker for DohChecker {
         // If DNS NOT found (Available=True), continue to other checkers (WHOIS).
         !result.available
     }
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs.max(1)));
+    }
+
+    let parsed = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let now = chrono::Utc::now();
+    let secs = parsed
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(now)
+        .num_seconds();
+    Some(Duration::from_secs(secs.max(1) as u64))
 }
 
 #[cfg(test)]

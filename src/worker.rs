@@ -4,6 +4,7 @@ use async_channel::Receiver;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -122,6 +123,7 @@ pub async fn worker(
     throttle: Arc<WorkerThrottle>,
     registry: Arc<CheckerRegistry>,
     stop_signal: Arc<AtomicU8>,
+    global_check_permits: Arc<Semaphore>,
 ) {
     loop {
         if stop_signal.load(Ordering::Relaxed) != 0 {
@@ -163,14 +165,27 @@ pub async fn worker(
                     break;
                 }
 
+                let permit = match global_check_permits.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            target: "domain_scanner::worker",
+                            context = "throttle",
+                            worker_id = id,
+                            "global checker semaphore closed"
+                        );
+                        break;
+                    }
+                };
+
                 // Use the registry to check the domain
                 let check_result: CheckResult = registry.check(&domain).await;
+                drop(permit);
 
                 // Determine if WHOIS/RDAP was reached (for adaptive delay)
-                let reached_rate_limited_service = check_result
-                    .trace
-                    .iter()
-                    .any(|s| s.starts_with("WHOIS: ") || s.starts_with("RDAP: "));
+                let reached_rate_limited_service = check_result.trace.iter().any(|s| {
+                    s.starts_with("WHOIS: ") || s.starts_with("RDAP: ") || s.starts_with("DoH: ")
+                });
 
                 let result = DomainResult {
                     domain,

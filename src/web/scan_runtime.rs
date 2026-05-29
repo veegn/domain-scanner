@@ -1,9 +1,9 @@
 use super::models::{ScanStreamMessage, StartScanRequest, StreamHub, TaskControl, TaskSignal};
 use super::scan_runtime_support::{
     COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, STATUS_PUBLISH_INTERVAL,
-    ScanRuntimeState, WORKER_COUNT, WORKER_DELAY_MS, flush_pending_results,
-    flush_pending_state_logs, flush_scan_buffers, get_result_counts, initialize_scan_counters,
-    is_whois_rate_limited, prepare_job_feeder, publish_scan_status, queue_event_log,
+    ScanRuntimeState, WORKER_DELAY_MS, flush_pending_results, flush_pending_state_logs,
+    flush_scan_buffers, get_result_counts, initialize_scan_counters, prepare_job_feeder,
+    publish_scan_status, queue_event_log, rate_limited_service,
 };
 pub(super) use super::scan_runtime_support::{add_event_log, mark_scan_running};
 use crate::checker::CheckerRegistry;
@@ -13,7 +13,8 @@ use serde_json::json;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tokio::sync::{broadcast, mpsc};
 use tracing::error;
 
@@ -23,18 +24,20 @@ pub(super) async fn run_scan_logic(
     params: StartScanRequest,
     registry: Arc<CheckerRegistry>,
     task_control: TaskControl,
-    streams: StreamHub,
+    streams: &StreamHub,
+    workers_per_scan: usize,
+    global_check_permits: Arc<Semaphore>,
 ) {
     let task_signal = task_control.register(scan_id);
     let scan_stream = streams.sender_for_scan(scan_id).await;
-    mark_scan_running(db, &streams, scan_id).await;
+    mark_scan_running(db, streams, scan_id).await;
 
     let counts = get_result_counts(db, scan_id).await.unwrap_or((0, 0));
     let resume_processed = counts.0;
     let resume_found = counts.1;
     let _ = add_event_log(
         db,
-        &streams,
+        streams,
         scan_id,
         "INFO",
         "task.resume",
@@ -53,7 +56,7 @@ pub(super) async fn run_scan_logic(
 
     let total = match prepare_job_feeder(
         db,
-        &streams,
+        streams,
         scan_id,
         &params,
         resume_processed,
@@ -76,14 +79,14 @@ pub(super) async fn run_scan_logic(
 
     let _ = add_event_log(
         db,
-        &streams,
+        streams,
         scan_id,
         "INFO",
         "worker.pool",
         None,
         Some("Spawning worker threads".to_string()),
         vec![
-            ("size", json!(WORKER_COUNT)),
+            ("size", json!(workers_per_scan)),
             ("delay_ms", json!(WORKER_DELAY_MS)),
             ("total", json!(total)),
         ],
@@ -95,7 +98,7 @@ pub(super) async fn run_scan_logic(
     {
         let _ = add_event_log(
             db,
-            &streams,
+            streams,
             scan_id,
             "ERROR",
             "storage.counters_init_failed",
@@ -111,17 +114,18 @@ pub(super) async fn run_scan_logic(
     let (tx_results, mut rx_results) = mpsc::channel(100);
     let worker_throttle = Arc::new(worker::WorkerThrottle::new(
         Duration::from_millis(WORKER_DELAY_MS),
-        WORKER_COUNT,
+        workers_per_scan,
     ));
 
-    for id in 1..=WORKER_COUNT {
+    for id in 1..=workers_per_scan {
         let jobs = jobs_rx.clone();
         let tx = tx_results.clone();
         let throttle = worker_throttle.clone();
         let reg = registry.clone();
         let signal_clone = task_signal.clone();
+        let permits = global_check_permits.clone();
         tokio::spawn(async move {
-            worker::worker(id, jobs, tx, throttle, reg, signal_clone).await;
+            worker::worker(id, jobs, tx, throttle, reg, signal_clone, permits).await;
         });
     }
     drop(tx_results);
@@ -172,7 +176,7 @@ pub(super) async fn run_scan_logic(
             jobs_tx.take();
             let _ = add_event_log(
                 db,
-                &streams,
+                streams,
                 scan_id,
                 "WARN",
                 "task.signal_changed",
@@ -234,7 +238,7 @@ pub(super) async fn run_scan_logic(
 
                 handle_completed_result(
                     db,
-                    &streams,
+                    streams,
                     &scan_stream,
                     scan_id,
                     total,
@@ -254,7 +258,7 @@ pub(super) async fn run_scan_logic(
         }
     }
 
-    flush_scan_buffers(db, &streams, &scan_stream, scan_id, &mut state).await;
+    flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await;
     persist_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
 
     let signal = TaskControl::signal(&task_signal);
@@ -329,7 +333,7 @@ pub(super) async fn run_scan_logic(
         if signal != TaskSignal::Cancel {
             let _ = add_event_log(
                 db,
-                &streams,
+                streams,
                 scan_id,
                 "ERROR",
                 "task.status_update_failed",
@@ -372,10 +376,25 @@ async fn handle_drained_feeder(
     state: &mut ScanRuntimeState,
 ) {
     if !state.deferred_retries.is_empty() && state.replay_round < MAX_EXCEPTION_REPLAY_ROUNDS {
+        let now = Instant::now();
+        let domains: Vec<String> = state
+            .deferred_retries
+            .keys()
+            .filter(|domain| {
+                state
+                    .deferred_retry_ready_at
+                    .get(*domain)
+                    .map(|ready_at| *ready_at <= now)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if domains.is_empty() {
+            return;
+        }
+
         state.replay_round += 1;
-        let replay_count = state.deferred_retries.len();
-        let domains: Vec<String> = state.deferred_retries.keys().cloned().collect();
-        state.deferred_retries.clear();
+        let replay_count = domains.len();
 
         let _ = queue_event_log(
             &mut state.pending_log_flush,
@@ -396,14 +415,16 @@ async fn handle_drained_feeder(
         if let Some(sender) = jobs_tx.as_ref() {
             for domain in domains {
                 pending_domains.fetch_add(1, Ordering::Relaxed);
-                if sender.send(domain).await.is_err() {
+                if sender.send(domain.clone()).await.is_err() {
                     pending_domains.fetch_sub(1, Ordering::Relaxed);
                     break;
                 }
+                state.deferred_retries.remove(&domain);
+                state.deferred_retry_ready_at.remove(&domain);
             }
         }
 
-        state.last_published_deferred = replay_count as i64;
+        state.last_published_deferred = state.deferred_count();
         publish_scan_status(
             scan_stream,
             scan_id,
@@ -428,7 +449,13 @@ async fn handle_retryable_result(
     res: crate::DomainResult,
     total: i64,
 ) {
-    if res.rate_limited && is_whois_rate_limited(&res) {
+    let limited_service = if res.rate_limited {
+        rate_limited_service(&res)
+    } else {
+        None
+    };
+
+    if let Some(service) = limited_service {
         let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
         let remaining_workers = worker_throttle.reduce_workers();
         let new_delay = if remaining_workers.is_none() {
@@ -446,15 +473,13 @@ async fn handle_retryable_result(
             Some(res.domain.as_str()),
             Some(match remaining_workers {
                 Some(_) => {
-                    "WHOIS rate limit detected; pausing task and reducing worker concurrency"
-                        .to_string()
+                    "Rate limit detected; pausing task and reducing worker concurrency".to_string()
                 }
-                None => {
-                    "WHOIS rate limit detected; pausing task and reducing scan speed".to_string()
-                }
+                None => "Rate limit detected; pausing task and reducing scan speed".to_string(),
             }),
             {
                 let mut fields = vec![
+                    ("source", json!(service)),
                     ("pause_secs", json!(60)),
                     ("paused_until_epoch_ms", json!(paused_until)),
                     ("active_workers", json!(worker_throttle.current_workers())),
@@ -485,10 +510,16 @@ async fn handle_retryable_result(
             ("replay_round", json!(state.replay_round + 1)),
             ("rate_limited", json!(res.rate_limited)),
             ("retry_after_secs", json!(res.retry_after_secs.unwrap_or(0))),
+            ("source", json!(limited_service.unwrap_or("unknown"))),
         ],
     )
     .await;
 
+    let ready_at =
+        Instant::now() + Duration::from_secs(res.retry_after_secs.unwrap_or(0).min(24 * 60 * 60));
+    state
+        .deferred_retry_ready_at
+        .insert(res.domain.clone(), ready_at);
     state.deferred_retries.insert(res.domain.clone(), res);
     let deferred = state.deferred_count();
     if deferred != state.last_published_deferred {
@@ -677,6 +708,7 @@ async fn persist_exhausted_retries(
         return;
     }
 
+    state.deferred_retry_ready_at.clear();
     for (_, res) in state.deferred_retries.drain() {
         state.processed += 1;
         let _ = queue_event_log(

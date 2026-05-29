@@ -37,6 +37,7 @@ pub async fn init_db() -> Result<SqlitePool> {
             processed INTEGER DEFAULT 0,
             found INTEGER DEFAULT 0,
             priority INTEGER DEFAULT 0,
+            scheduler_key TEXT,
             retry_not_before INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             started_at DATETIME,
@@ -47,6 +48,7 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await
     .context("failed to create scans table")?;
     add_column_if_missing(&pool, "scans", "retry_not_before", "INTEGER").await?;
+    add_column_if_missing(&pool, "scans", "scheduler_key", "TEXT").await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scan_payloads (
@@ -201,6 +203,11 @@ pub async fn init_db() -> Result<SqlitePool> {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_suffix ON scans(suffix)")
         .execute(&pool)
         .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_scans_scheduler_ready ON scans(status, scheduler_key, priority DESC, created_at ASC)",
+    )
+    .execute(&pool)
+    .await;
     let _ =
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_published_scans_published_at ON published_scans(published_at DESC)")
             .execute(&pool)

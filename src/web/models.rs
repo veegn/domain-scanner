@@ -168,6 +168,35 @@ impl TaskControl {
 }
 
 impl StartScanRequest {
+    pub fn scheduler_key(&self) -> String {
+        if !self.suffix.trim().is_empty() {
+            return normalize_scheduler_suffix(&self.suffix);
+        }
+
+        let Some(domains) = &self.domains else {
+            return "unspecified".to_string();
+        };
+
+        let mut key: Option<String> = None;
+        for domain in domains {
+            let normalized = domain.trim().to_ascii_lowercase();
+            let Some((_, suffix)) = normalized.split_once('.') else {
+                return "mixed".to_string();
+            };
+            if suffix.is_empty() {
+                return "mixed".to_string();
+            }
+
+            match &key {
+                Some(existing) if existing == suffix => {}
+                Some(_) => return "mixed".to_string(),
+                None => key = Some(suffix.to_string()),
+            }
+        }
+
+        key.unwrap_or_else(|| "mixed".to_string())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if let Some(regex) = &self.regex {
             if regex.len() > MAX_REGEX_LENGTH {
@@ -334,6 +363,10 @@ impl StartScanRequest {
 
         Ok(())
     }
+}
+
+fn normalize_scheduler_suffix(suffix: &str) -> String {
+    suffix.trim().trim_start_matches('.').to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -669,6 +702,37 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_key_uses_suffix_for_generated_scans() {
+        let mut request = base_multi_dictionary_request();
+        request.suffix = ".Co.Uk".to_string();
+
+        assert_eq!(request.scheduler_key(), "co.uk");
+    }
+
+    #[test]
+    fn scheduler_key_groups_single_suffix_manual_domains() {
+        let mut request = base_multi_dictionary_request();
+        request.suffix = String::new();
+        request.dictionary_ids = None;
+        request.domains = Some(vec![
+            "alpha.example".to_string(),
+            "beta.example".to_string(),
+        ]);
+
+        assert_eq!(request.scheduler_key(), "example");
+    }
+
+    #[test]
+    fn scheduler_key_marks_mixed_manual_domains() {
+        let mut request = base_multi_dictionary_request();
+        request.suffix = String::new();
+        request.dictionary_ids = None;
+        request.domains = Some(vec!["alpha.com".to_string(), "beta.net".to_string()]);
+
+        assert_eq!(request.scheduler_key(), "mixed");
+    }
+
+    #[test]
     fn multi_dictionary_template_must_reference_known_dictionaries() {
         let mut req = base_multi_dictionary_request();
         req.format_template = Some("{0}-{2}".to_string());
@@ -715,10 +779,7 @@ mod tests {
             regex: None,
             priority_words: None,
             domains: None,
-            dictionary_words: Some(vec![
-                "example.com".to_string(),
-                "test.org".to_string(),
-            ]),
+            dictionary_words: Some(vec!["example.com".to_string(), "test.org".to_string()]),
             dictionary_id: None,
             dictionary_ids: None,
             separator: None,
@@ -740,10 +801,7 @@ mod tests {
             regex: None,
             priority_words: None,
             domains: None,
-            dictionary_words: Some(vec![
-                "example.com".to_string(),
-                "hello".to_string(),
-            ]),
+            dictionary_words: Some(vec!["example.com".to_string(), "hello".to_string()]),
             dictionary_id: None,
             dictionary_ids: None,
             separator: None,

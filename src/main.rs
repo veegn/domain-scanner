@@ -4,6 +4,7 @@ use domain_scanner::config::AppConfig;
 use domain_scanner::logging;
 use domain_scanner::web;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -20,6 +21,7 @@ async fn main() {
     let args = Args::parse();
     AppConfig::save_default_if_not_exists("config.json");
     let config = AppConfig::load_from_file("config.json");
+    let scheduler_config = config.scheduler.clone();
     logging::init(&config.logging);
 
     info!(target: "domain_scanner::main", port = args.port, context = "startup", "initializing web server");
@@ -39,6 +41,9 @@ async fn main() {
         log_directory = %config.logging.directory.display(),
         log_file_prefix = %config.logging.file_prefix,
         log_max_files = config.logging.max_files,
+        max_parallel_tlds = scheduler_config.max_parallel_tlds,
+        workers_per_scan = scheduler_config.workers_per_scan,
+        max_global_checks = scheduler_config.max_global_checks,
         "runtime config loaded"
     );
 
@@ -95,6 +100,9 @@ async fn main() {
     let worker_task_control = task_control.clone();
     let worker_registry = registry.clone();
     let worker_streams = streams.clone();
+    let worker_scheduler_config = scheduler_config.clone();
+    let global_check_permits = Arc::new(Semaphore::new(scheduler_config.max_global_checks.max(1)));
+    let worker_global_check_permits = global_check_permits.clone();
     tokio::spawn(async move {
         web::start_task_worker(
             worker_db,
@@ -102,6 +110,8 @@ async fn main() {
             worker_task_control,
             worker_registry,
             worker_streams,
+            worker_scheduler_config,
+            worker_global_check_permits,
         )
         .await;
     });

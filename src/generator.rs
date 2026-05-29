@@ -644,10 +644,7 @@ mod tests {
     #[test]
     fn test_combinator_mixed_words() {
         // Mixed dictionary: words with dots keep their TLD, words without get suffix.
-        let dicts = vec![vec![
-            "example.com".to_string(),
-            "hello".to_string(),
-        ]];
+        let dicts = vec![vec!["example.com".to_string(), "hello".to_string()]];
         let mut c = DictionaryCombinator::new(dicts, "{0}".into(), ".xyz".into());
         assert_eq!(c.next(), Some("example.com".to_string()));
         assert_eq!(c.next(), Some("hello.xyz".to_string()));
@@ -657,10 +654,7 @@ mod tests {
     #[test]
     fn test_combinator_full_domain_empty_suffix() {
         // When all words are full domains and suffix is empty, should work fine.
-        let dicts = vec![vec![
-            "a.com".to_string(),
-            "b.org".to_string(),
-        ]];
+        let dicts = vec![vec!["a.com".to_string(), "b.org".to_string()]];
         let mut c = DictionaryCombinator::new(dicts, "{0}".into(), String::new());
         assert_eq!(c.next(), Some("a.com".to_string()));
         assert_eq!(c.next(), Some("b.org".to_string()));

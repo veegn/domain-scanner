@@ -136,18 +136,20 @@ async fn start_scan(
         serde_json::to_string(&payload.dictionary_words).unwrap_or_else(|_| "null".to_string());
     let dictionary_ids_json =
         serde_json::to_string(&payload.dictionary_ids).unwrap_or_else(|_| "null".to_string());
+    let scheduler_key = payload.scheduler_key();
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    if let Err(e) = sqlx::query("INSERT INTO scans (id, status, length, suffix, pattern, regex) VALUES (?, 'pending', ?, ?, ?, ?)")
+    if let Err(e) = sqlx::query("INSERT INTO scans (id, status, length, suffix, pattern, regex, scheduler_key) VALUES (?, 'pending', ?, ?, ?, ?, ?)")
         .bind(&scan_id)
         .bind(payload.length as i64)
         .bind(&payload.suffix)
         .bind(&payload.pattern)
         .bind(&payload.regex)
+        .bind(&scheduler_key)
         .execute(&mut *tx)
         .await
     {

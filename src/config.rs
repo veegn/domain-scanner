@@ -28,6 +28,10 @@ pub struct AppConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Scan scheduling and network rate-limit controls.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -53,6 +57,21 @@ pub struct LoggingConfig {
     pub max_files: usize,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SchedulerConfig {
+    /// Maximum number of different TLD groups that may run at once.
+    #[serde(default = "default_max_parallel_tlds")]
+    pub max_parallel_tlds: usize,
+
+    /// Worker count per scan.
+    #[serde(default = "default_workers_per_scan")]
+    pub workers_per_scan: usize,
+
+    /// Maximum in-flight checker calls across all running scans.
+    #[serde(default = "default_max_global_checks")]
+    pub max_global_checks: usize,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -61,6 +80,7 @@ impl Default for AppConfig {
             rdap_servers: HashMap::new(),
             rdap_bootstrap_url: None,
             logging: LoggingConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -73,6 +93,16 @@ impl Default for LoggingConfig {
             directory: default_log_dir(),
             file_prefix: default_log_prefix(),
             max_files: default_log_retention(),
+        }
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel_tlds: default_max_parallel_tlds(),
+            workers_per_scan: default_workers_per_scan(),
+            max_global_checks: default_max_global_checks(),
         }
     }
 }
@@ -133,4 +163,16 @@ fn default_log_prefix() -> String {
 
 fn default_log_retention() -> usize {
     14
+}
+
+fn default_max_parallel_tlds() -> usize {
+    3
+}
+
+fn default_workers_per_scan() -> usize {
+    10
+}
+
+fn default_max_global_checks() -> usize {
+    20
 }
