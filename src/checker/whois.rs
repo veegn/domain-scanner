@@ -216,7 +216,7 @@ impl WhoisChecker {
         }
     }
 
-    async fn record_timeout(&self, server: &str) -> Duration {
+    async fn record_transient_failure(&self, server: &str, reason: &str) -> Duration {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
         let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
@@ -231,10 +231,10 @@ impl WhoisChecker {
             target: "domain_scanner::checker::whois",
             context = "backoff",
             server,
-            reason = "timeout",
+            reason,
             min_interval_ms = guard.min_interval.as_millis() as u64,
             retry_after_secs = retry_after.as_secs(),
-            "WHOIS timeout backoff updated"
+            "WHOIS transient failure backoff updated"
         );
         drop(guard);
         self.persist_rate_limit_cache(server, min_interval, next_allowed_at)
@@ -586,22 +586,23 @@ impl DomainChecker for WhoisChecker {
             }
             Err(e) => {
                 self.cb.record_failure();
-                if is_timeout_error(&e) {
-                    let retry_after = self.record_timeout(server).await;
+                if let Some(reason) = transient_whois_error_reason(&e) {
+                    let retry_after = self.record_transient_failure(server, reason).await;
                     warn!(
                         target: "domain_scanner::checker::whois",
                         context = "query",
                         domain,
                         server,
                         error = %e,
+                        reason,
                         retry_after_secs = retry_after.as_secs(),
-                        "WHOIS timeout"
+                        "WHOIS transient I/O failure"
                     );
                     CheckResult::retryable_error(
-                        format!("WHOIS timeout on {}: {}", server, e),
+                        format!("WHOIS transient I/O failure on {}: {}", server, e),
                         Some(retry_after.as_secs().max(1)),
                     )
-                    .with_trace(format!("WHOIS: timeout via {}", server))
+                    .with_trace(format!("WHOIS: transient {} via {}", reason, server))
                 } else {
                     debug!(
                         target: "domain_scanner::checker::whois",
@@ -637,8 +638,25 @@ fn parse_server_endpoint(endpoint: &str) -> (String, u16) {
     (endpoint.to_string(), 43)
 }
 
-fn is_timeout_error(error: &str) -> bool {
-    error.to_ascii_lowercase().contains("timeout")
+fn transient_whois_error_reason(error: &str) -> Option<&'static str> {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") {
+        Some("timeout")
+    } else if lower.contains("connection reset") || lower.contains("reset by peer") {
+        Some("connection_reset")
+    } else if lower.contains("broken pipe") {
+        Some("broken_pipe")
+    } else if lower.contains("connection refused") {
+        Some("connection_refused")
+    } else if lower.contains("connection aborted") {
+        Some("connection_aborted")
+    } else if lower.contains("unexpected eof") || lower.contains("early eof") {
+        Some("unexpected_eof")
+    } else if lower.contains("temporarily unavailable") || lower.contains("resource unavailable") {
+        Some("temporarily_unavailable")
+    } else {
+        None
+    }
 }
 
 fn duration_from_unit(value: u64, unit: &str) -> Duration {
@@ -820,6 +838,23 @@ mod tests {
         assert!(checker.is_rate_limited("Access denied: query rate limit exceeded."));
         assert!(!checker.is_rate_limited("Access denied for malformed query."));
         assert!(!checker.is_rate_limited("This domain is not present in the registry."));
+    }
+
+    #[test]
+    fn test_transient_whois_error_reason_detects_connection_reset() {
+        assert_eq!(
+            transient_whois_error_reason("Read failed: Connection reset by peer (os error 104)"),
+            Some("connection_reset")
+        );
+        assert_eq!(
+            transient_whois_error_reason("Connection timeout"),
+            Some("timeout")
+        );
+        assert_eq!(
+            transient_whois_error_reason("Read failed: Unexpected EOF"),
+            Some("unexpected_eof")
+        );
+        assert_eq!(transient_whois_error_reason("Invalid domain syntax"), None);
     }
 
     #[test]
