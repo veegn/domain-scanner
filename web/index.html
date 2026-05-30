@@ -602,12 +602,9 @@
             class="flex flex-col md:flex-row justify-between items-center text-[10px] font-black text-gray-400 uppercase tracking-widest gap-4">
             <p>&copy; 2026 VEEGN • MADE WITH ❤️ FOR RUST</p>
             <div class="flex items-center space-x-4">
-                <span>Preferred Registrars:</span>
-                <a href="https://porkbun.com/" class="text-blue-500 hover:text-blue-700 transition-colors"
-                    target="_blank">Porkbun</a>
-                <span class="text-gray-200">/</span>
-                <a href="https://www.namecheap.com/" class="text-blue-500 hover:text-blue-700 transition-colors"
-                    target="_blank">Namecheap</a>
+                <span>Preferred Registrar:</span>
+                <a href="https://www.spaceship.com/domain-search/" class="text-blue-500 hover:text-blue-700 transition-colors"
+                    target="_blank">Spaceship</a>
             </div>
         </div>
     </footer>
@@ -1238,7 +1235,7 @@
                             <span class="text-lg font-black font-mono text-gray-900">${r.domain}</span>
                         </td>
                         <td class="p-4 text-center">
-                            <a href="https://porkbun.com/checkout/search?q=${r.domain}" target="_blank" 
+                            <a href="https://www.spaceship.com/domain-search/?query=${encodeURIComponent(r.domain)}" target="_blank" 
                                class="text-[9px] font-black bg-blue-50 text-blue-600 px-4 py-2 rounded-xl border border-blue-100 hover:bg-blue-600 hover:text-white transition-all uppercase tracking-widest">Register</a>
                         </td>
                     </tr>

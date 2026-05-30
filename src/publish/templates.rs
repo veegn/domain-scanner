@@ -322,7 +322,7 @@ pub fn render_index_html(meta: &PublishedPageMeta) -> String {
                     <div class="domain-card">
                         <span class="domain-name">${{escapeHtml(row.domain)}}</span>
                         <div class="meta-tags">${{metaHtml}}</div>
-                        <a href="https://porkbun.com/checkout/search?q=${{row.domain}}" target="_blank" class="action-btn">
+                        <a href="https://www.spaceship.com/domain-search/?query=${{encodeURIComponent(row.domain)}}" target="_blank" class="action-btn">
                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent)"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
                         </a>
                     </div>
