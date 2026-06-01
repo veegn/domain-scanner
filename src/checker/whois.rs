@@ -377,6 +377,7 @@ impl WhoisChecker {
             || lower.contains("status: free")
             || lower.contains("domain not found")
             || lower.contains("no matching record")
+            || lower.contains("no data found")
             || lower.contains("is available for registration")
             || lower.contains("available for registration")
             || lower.contains("currently available for application")
@@ -824,6 +825,15 @@ mod tests {
     fn test_identity_digital_dropzone_response_detected_as_available() {
         let checker = WhoisChecker::new();
         let response = "This domain is currently available for application via the Identity Digital Dropzone service.\n>>> Last update of WHOIS database";
+
+        assert!(checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_us_no_data_found_response_detected_as_available() {
+        let checker = WhoisChecker::new();
+        let response = "No Data Found\nURL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/\n>>> Last update of WHOIS database";
 
         assert!(checker.is_available(response));
         assert!(!checker.is_registered(response));
