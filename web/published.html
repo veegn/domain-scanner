@@ -18,6 +18,26 @@
                 radial-gradient(circle at top right, rgba(16, 185, 129, 0.12), transparent 24rem),
                 linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
         }
+
+        .mark-hit {
+            background: #dbeafe;
+            color: #1d4ed8;
+            border-radius: 0.35rem;
+            padding: 0 0.1rem;
+        }
+
+        .result-card {
+            display: block;
+        }
+
+        .result-card:focus-visible,
+        button:focus-visible,
+        a:focus-visible,
+        input:focus-visible,
+        select:focus-visible {
+            outline: 3px solid rgba(59, 130, 246, 0.32);
+            outline-offset: 2px;
+        }
     </style>
 </head>
 <body class="page-bg min-h-screen text-gray-900">
@@ -36,36 +56,38 @@
             </div>
         </header>
 
-        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 p-6 md:p-7 mb-8">
-            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 p-5 md:p-7 mb-8">
+            <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                    <h2 class="text-xl font-black">Global Domain Search</h2>
-                    <p class="text-sm text-gray-500 mt-1">Prefix-search published domain hits. Results link back to each static release page.</p>
+                    <h2 class="text-2xl font-black tracking-tight">Find a domain first</h2>
+                    <p class="text-sm text-gray-500 mt-1 max-w-2xl">Type a prefix, full domain, or pasted URL. Results are searched across every active public release and link back to the source scan.</p>
                 </div>
                 <div class="flex flex-col sm:flex-row gap-3 w-full lg:w-auto relative">
-                    <div class="relative w-full lg:w-80 group">
-                        <input id="searchInput" type="search" placeholder="Search domains like 88, ai, 123..." class="w-full px-4 py-3 rounded-2xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300 transition-all pr-10">
-                        <button onclick="document.getElementById('searchInput').value=''; runSearch();" class="absolute right-3 top-3.5 text-gray-300 hover:text-red-500 transition-colors" title="Clear Search">
+                    <div class="relative w-full lg:w-[28rem] group">
+                        <input id="searchInput" type="search" autocomplete="off" spellcheck="false" placeholder="example, ai, 88, domain.com..." class="w-full px-5 py-4 rounded-2xl border border-gray-200 bg-white text-base font-black font-mono outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300 transition-all pr-12">
+                        <button id="clearSearchBtn" class="hidden absolute right-4 top-4 text-gray-300 hover:text-red-500 transition-colors" title="Clear search" type="button">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
                     </div>
-                    <button id="searchBtn" class="px-5 py-3 rounded-2xl bg-emerald-500 text-white text-sm font-black uppercase tracking-wider hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2 min-w-[100px]">
+                    <button id="searchBtn" class="px-6 py-4 rounded-2xl bg-emerald-500 text-white text-sm font-black uppercase tracking-wider hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2 min-w-[120px]" type="button">
                         <span id="searchBtnText">Search</span>
                         <div id="searchSpinner" class="hidden w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                     </button>
                 </div>
             </div>
-            <div class="flex flex-wrap items-center gap-3 mt-4">
-                <label class="text-xs font-black uppercase tracking-[0.22em] text-gray-400">Results</label>
+            <div class="flex flex-wrap items-center gap-3 mt-5">
+                <label for="searchLimit" class="text-xs font-black uppercase tracking-[0.22em] text-gray-400">Batch size</label>
                 <select id="searchLimit" class="px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm font-semibold outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300">
                     <option value="25">25</option>
                     <option value="50" selected>50</option>
                     <option value="100">100</option>
                 </select>
-                <button id="searchMoreBtn" class="hidden px-4 py-2 rounded-xl border border-gray-200 bg-white text-xs font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">Load More</button>
+                <button id="searchMoreBtn" class="hidden px-4 py-2 rounded-xl border border-gray-200 bg-white text-xs font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors" type="button">Load More</button>
+                <span class="text-xs text-gray-400">Press <span class="font-black text-gray-500">/</span> or <span class="font-black text-gray-500">Ctrl+K</span> to search</span>
             </div>
-            <div id="searchSummary" class="text-sm text-gray-400 mt-4">Enter a query to search published domains.</div>
-            <div id="searchResults" class="mt-5 space-y-3"></div>
+            <div id="searchSuggestions" class="flex flex-wrap gap-2 mt-4"></div>
+            <div id="searchSummary" class="text-sm text-gray-400 mt-4">Start typing to search published domains.</div>
+            <div id="searchResults" class="mt-5 grid gap-3"></div>
         </section>
 
         <section class="glass rounded-3xl border border-white/70 shadow-xl shadow-slate-200/60 overflow-hidden">
@@ -105,7 +127,10 @@
             searchLimit: 50,
             currentSearchQuery: '',
             currentSearchResults: [],
-            searchTimeout: null
+            searchTimeout: null,
+            searchAbort: null,
+            searchRequestId: 0,
+            suggestions: ['ai', '88', '123', 'app', 'data', 'cloud']
         };
 
         const els = {
@@ -115,6 +140,8 @@
             searchMoreBtn: document.getElementById('searchMoreBtn'),
             searchLimit: document.getElementById('searchLimit'),
             searchInput: document.getElementById('searchInput'),
+            clearSearchBtn: document.getElementById('clearSearchBtn'),
+            searchSuggestions: document.getElementById('searchSuggestions'),
             searchResults: document.getElementById('searchResults'),
             searchSummary: document.getElementById('searchSummary'),
             listFilter: document.getElementById('listFilter'),
@@ -159,10 +186,19 @@
             "'": '&#39;'
         })[char]);
 
-        async function fetchJson(url) {
-            const response = await fetch(Routes.api(url));
+        const spaceshipSearchUrl = (domain) => `https://www.spaceship.com/domain-search/?query=${encodeURIComponent(domain)}`;
+
+        async function fetchJson(url, options = {}) {
+            const response = await fetch(Routes.api(url), options);
             if (!response.ok) {
-                throw new Error(`Request failed: ${response.status}`);
+                let message = `Request failed: ${response.status}`;
+                try {
+                    const payload = await response.json();
+                    if (payload.error) message = payload.error;
+                } catch (_) {
+                    // Keep the generic status message when the response is not JSON.
+                }
+                throw new Error(message);
             }
             return response.json();
         }
@@ -172,8 +208,66 @@
         }
 
         function formatDate(value) {
+            if (!value) return 'Unknown';
             const date = new Date(value);
             return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+        }
+
+        function normalizeSearchQuery(value) {
+            let query = String(value ?? '').trim().toLowerCase();
+            query = query.replace(/^https?:\/\//, '').replace(/^www\./, '');
+            query = query.split(/[/?#\s]/)[0] || query;
+            return query.replace(/[^a-z0-9.-]/g, '');
+        }
+
+        function setSearchBusy(isBusy) {
+            els.searchSpinner.classList.toggle('hidden', !isBusy);
+            els.searchBtnText.classList.toggle('hidden', isBusy);
+            els.searchBtn.disabled = isBusy;
+            els.searchBtn.classList.toggle('opacity-70', isBusy);
+        }
+
+        function renderDomainWithHighlight(domain, query) {
+            const cleanDomain = String(domain ?? '');
+            const lowerDomain = cleanDomain.toLowerCase();
+            const lowerQuery = query.toLowerCase();
+            if (!lowerQuery || !lowerDomain.startsWith(lowerQuery)) return escapeHtml(cleanDomain);
+
+            return `<span class="mark-hit">${escapeHtml(cleanDomain.slice(0, lowerQuery.length))}</span>${escapeHtml(cleanDomain.slice(lowerQuery.length))}`;
+        }
+
+        function resultMeta(row) {
+            const bits = [];
+            if (row.signatures) bits.push(row.signatures);
+            if (row.expiration_date) bits.push(`Expires ${row.expiration_date}`);
+            return bits.length ? bits.join(' · ') : 'No signature metadata';
+        }
+
+        function renderSearchSuggestions() {
+            const seen = new Set();
+            const suffixExamples = state.scans
+                .map((scan) => scan.suffix)
+                .filter(Boolean)
+                .slice(0, 6)
+                .map((suffix) => suffix.replace(/^\./, ''));
+            const values = [...state.suggestions, ...suffixExamples]
+                .map(normalizeSearchQuery)
+                .filter((value) => value && !seen.has(value) && seen.add(value))
+                .slice(0, 10);
+
+            els.searchSuggestions.innerHTML = values.map((value) => `
+                <button type="button" data-search-suggestion="${escapeHtml(value)}" class="px-3 py-1.5 rounded-full border border-blue-100 bg-blue-50 text-[11px] font-black uppercase tracking-[0.16em] text-blue-600 hover:bg-blue-100 transition-colors">
+                    ${escapeHtml(value)}
+                </button>
+            `).join('');
+        }
+
+        function clearSearchResults(message = 'Start typing to search published domains.') {
+            state.currentSearchQuery = '';
+            state.currentSearchResults = [];
+            els.searchSummary.textContent = message;
+            els.searchResults.innerHTML = '';
+            els.searchMoreBtn.classList.add('hidden');
         }
 
         function getFilteredScans() {
@@ -251,67 +345,90 @@
         async function loadScans() {
             state.scans = await fetchJson('api/public/published');
             state.scanPageSize = 9;
+            renderSearchSuggestions();
             renderSuffixFilters();
             renderScanList();
         }
 
-        async function runSearch() {
-            const q = els.searchInput.value.trim();
+        async function runSearch({ append = false } = {}) {
+            const q = normalizeSearchQuery(els.searchInput.value);
+            els.searchInput.value = q;
+            els.clearSearchBtn.classList.toggle('hidden', !q);
+
             if (!q) {
-                state.currentSearchQuery = '';
-                state.currentSearchResults = [];
-                els.searchSummary.textContent = 'Enter a query to search published domains.';
-                els.searchResults.innerHTML = '';
-                els.searchMoreBtn.classList.add('hidden');
+                if (state.searchAbort) state.searchAbort.abort();
+                clearSearchResults();
                 return;
             }
 
+            if (!append) {
+                state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
+            }
+
+            if (state.searchAbort) state.searchAbort.abort();
+            const requestId = ++state.searchRequestId;
+            state.searchAbort = new AbortController();
             state.currentSearchQuery = q;
-            els.searchSummary.textContent = 'Searching...';
-            els.searchSpinner.classList.remove('hidden');
-            els.searchBtnText.classList.add('hidden');
+            els.searchSummary.textContent = `Searching "${q}"...`;
+            setSearchBusy(true);
 
             try {
-                const rows = await fetchJson(`api/public/search?q=${encodeURIComponent(q)}&limit=${state.searchLimit}`);
+                const rows = await fetchJson(`api/public/search?q=${encodeURIComponent(q)}&limit=${state.searchLimit}`, {
+                    signal: state.searchAbort.signal
+                });
+                if (requestId !== state.searchRequestId) return;
+
                 state.currentSearchResults = rows;
 
                 if (rows.length === 0) {
                     els.searchSummary.textContent = `No published domains matched "${q}".`;
-                    els.searchResults.innerHTML = '';
+                    els.searchResults.innerHTML = `
+                        <div class="rounded-2xl border border-dashed border-gray-200 bg-white/80 p-6 text-sm text-gray-400">
+                            Try a shorter prefix, for example "${escapeHtml(q.slice(0, Math.max(1, q.length - 1)))}".
+                        </div>
+                    `;
                     els.searchMoreBtn.classList.add('hidden');
                     return;
                 }
 
-                els.searchSummary.textContent = `${rows.length} published domains matched "${q}".`;
-                
-                // PERFORMANCE: Virtual DOM Slice - only render first 500 nodes
-                const limit = Math.min(rows.length, 500);
-                const display = rows.slice(0, limit);
-                
+                const capped = rows.length >= state.searchLimit;
+                els.searchSummary.textContent = `${rows.length}${capped ? '+' : ''} domains matched "${q}". Showing newest releases first.`;
+
+                const display = rows.slice(0, 500);
                 let html = display.map((row) => `
-                    <a href="${Routes.published(row.slug)}" class="block rounded-2xl border border-gray-100 bg-white px-4 py-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors">
-                        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <div class="text-lg font-black font-mono text-gray-900">${escapeHtml(row.domain)}</div>
+                    <article class="result-card rounded-2xl border border-gray-100 bg-white px-4 py-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors">
+                        <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                            <a href="${Routes.published(row.slug)}" class="min-w-0">
+                                <div class="text-xl font-black font-mono text-gray-900 break-all">${renderDomainWithHighlight(row.domain, q)}</div>
                                 <div class="text-xs text-gray-500 mt-1">${escapeHtml(row.title)} · ${escapeHtml(row.slug)}</div>
-                            </div>
-                            <div class="text-left md:text-right">
-                                <div class="text-xs font-bold text-gray-500">${escapeHtml(row.signatures || 'no-signature')}</div>
-                                <div class="text-xs text-gray-400 mt-1">Scanned: ${escapeHtml(formatDate(row.expiration_date || row.scan_finished_at || row.published_at))}</div>
+                            </a>
+                            <div class="flex flex-col gap-3 md:items-end">
+                                <div class="text-xs font-bold text-gray-500">${escapeHtml(resultMeta(row))}</div>
+                                <div class="text-xs text-gray-400">Scan: ${escapeHtml(formatDate(row.scan_finished_at || row.published_at))}</div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button" data-copy-domain="${escapeHtml(row.domain)}" class="px-3 py-1.5 rounded-xl border border-gray-200 bg-white text-[11px] font-black uppercase tracking-[0.18em] text-gray-500 hover:text-blue-600 hover:border-blue-200 transition-colors">Copy</button>
+                                    <a href="${spaceshipSearchUrl(row.domain)}" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 rounded-xl border border-gray-200 bg-white text-[11px] font-black uppercase tracking-[0.18em] text-gray-500 hover:text-emerald-600 hover:border-emerald-200 transition-colors">Spaceship</a>
+                                </div>
                             </div>
                         </div>
-                    </a>
+                    </article>
                 `).join('');
 
                 if (rows.length > 500) {
-                    html += `<div class="p-6 text-center text-gray-400 text-xs font-bold uppercase tracking-[0.2em]">Viewing limited to 500 results for performance. Load more to expand datasets.</div>`;
+                    html += `<div class="p-6 text-center text-gray-400 text-xs font-bold uppercase tracking-[0.2em]">Viewing is capped at 500 rendered cards for performance.</div>`;
                 }
-                
+
                 els.searchResults.innerHTML = html;
                 els.searchMoreBtn.classList.toggle('hidden', rows.length < state.searchLimit || state.searchLimit >= 1000);
+            } catch (error) {
+                if (error.name === 'AbortError') return;
+                els.searchSummary.textContent = 'Search failed';
+                els.searchResults.innerHTML = `<div class="rounded-2xl border border-red-100 bg-red-50 p-6 text-sm text-red-500">${escapeHtml(error.message)}</div>`;
+                els.searchMoreBtn.classList.add('hidden');
             } finally {
-                els.searchSpinner.classList.add('hidden');
-                els.searchBtnText.classList.remove('hidden');
+                if (requestId === state.searchRequestId) {
+                    setSearchBusy(false);
+                }
             }
         }
 
@@ -332,7 +449,6 @@
         els.dashboardLink.href = Routes.build('index.html');
         els.refreshBtn.addEventListener('click', loadScans);
         els.searchBtn.addEventListener('click', async () => {
-            state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
             await runSearch();
         });
         els.searchMoreBtn.addEventListener('click', async () => {
@@ -340,22 +456,63 @@
             const nextLimit = Math.min(1000, state.searchLimit + step);
             if (!state.currentSearchQuery || nextLimit === state.searchLimit) return;
             state.searchLimit = nextLimit;
-            await runSearch();
+            await runSearch({ append: true });
         });
         els.searchInput.addEventListener('input', () => {
-            if (els.searchInput.value.trim().length > 1) debouncedSearch();
+            els.clearSearchBtn.classList.toggle('hidden', !els.searchInput.value.trim());
+            if (els.searchInput.value.trim()) {
+                debouncedSearch();
+            } else {
+                clearSearchResults();
+            }
         });
         els.searchInput.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
                 if (state.searchTimeout) clearTimeout(state.searchTimeout);
-                state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
                 runSearch();
             }
         });
         els.searchLimit.addEventListener('change', () => {
             if (state.currentSearchQuery) {
-                state.searchLimit = parseInt(els.searchLimit.value, 10) || 50;
                 runSearch();
+            }
+        });
+        els.clearSearchBtn.addEventListener('click', () => {
+            els.searchInput.value = '';
+            els.clearSearchBtn.classList.add('hidden');
+            if (state.searchTimeout) clearTimeout(state.searchTimeout);
+            if (state.searchAbort) state.searchAbort.abort();
+            clearSearchResults();
+            els.searchInput.focus();
+        });
+        els.searchSuggestions.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-search-suggestion]');
+            if (!button) return;
+            els.searchInput.value = button.dataset.searchSuggestion;
+            runSearch();
+        });
+        els.searchResults.addEventListener('click', async (event) => {
+            const button = event.target.closest('[data-copy-domain]');
+            if (!button) return;
+            const domain = button.dataset.copyDomain;
+            try {
+                await navigator.clipboard.writeText(domain);
+                const oldText = button.textContent;
+                button.textContent = 'Copied';
+                setTimeout(() => {
+                    button.textContent = oldText;
+                }, 1200);
+            } catch (_) {
+                window.prompt('Copy domain', domain);
+            }
+        });
+        window.addEventListener('keydown', (event) => {
+            const target = event.target;
+            const isTyping = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+            if ((event.key === '/' && !isTyping) || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k')) {
+                event.preventDefault();
+                els.searchInput.focus();
+                els.searchInput.select();
             }
         });
         els.listFilter.addEventListener('input', () => {

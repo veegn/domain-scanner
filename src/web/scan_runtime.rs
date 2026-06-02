@@ -11,6 +11,7 @@ use crate::worker;
 use async_channel::{Sender as JobSender, bounded};
 use serde_json::json;
 use sqlx::sqlite::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -709,7 +710,10 @@ async fn persist_exhausted_retries(
     }
 
     state.deferred_retry_ready_at.clear();
-    for (_, res) in state.deferred_retries.drain() {
+    let exhausted: Vec<crate::DomainResult> =
+        state.deferred_retries.drain().map(|(_, res)| res).collect();
+
+    for res in &exhausted {
         state.processed += 1;
         let _ = queue_event_log(
             &mut state.pending_log_flush,
@@ -728,28 +732,42 @@ async fn persist_exhausted_retries(
             vec![("replay_rounds", json!(MAX_EXCEPTION_REPLAY_ROUNDS))],
         )
         .await;
+    }
 
-        match sqlx::query_as::<_, crate::web::models::ScanResultEvent>(
-            "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures)
-             VALUES (?, ?, 0, NULL, '')
-             RETURNING rowid as event_id, domain, available, expiration_date, signatures",
-        )
-        .bind(scan_id)
-        .bind(&res.domain)
-        .fetch_one(db)
-        .await
+    // Persist the exhausted results in batches rather than one INSERT per
+    // domain, mirroring the main result-flush path.
+    for chunk in exhausted.chunks(super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE) {
+        let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+            "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures) ",
+        );
+        builder.push_values(chunk.iter(), |mut row, res| {
+            row.push_bind(scan_id)
+                .push_bind(&res.domain)
+                .push_bind(false)
+                .push_bind(Option::<String>::None)
+                .push_bind("");
+        });
+        builder
+            .push(" RETURNING rowid as event_id, domain, available, expiration_date, signatures");
+
+        match builder
+            .build_query_as::<crate::web::models::ScanResultEvent>()
+            .fetch_all(db)
+            .await
         {
-            Ok(row) => {
-                let _ = scan_stream.send(ScanStreamMessage::Result(row));
+            Ok(rows) => {
+                for row in rows {
+                    let _ = scan_stream.send(ScanStreamMessage::Result(row));
+                }
             }
             Err(err) => {
                 error!(
                     target: "domain_scanner::queue",
                     context = "storage",
                     scan_id = %scan_id,
-                    domain = %res.domain,
                     error = %err,
-                    "failed to persist exhausted exception result"
+                    batch_size = chunk.len(),
+                    "failed to persist exhausted exception result batch"
                 );
             }
         }

@@ -397,7 +397,11 @@ impl DomainChecker for DohChecker {
                     error = %err,
                     "DoH response parse failed"
                 );
-                return CheckResult::available()
+                // A malformed/unparseable response tells us nothing about
+                // availability. Return an error (not "available") so the
+                // pipeline falls through to RDAP/WHOIS for an authoritative
+                // answer instead of emitting a false positive.
+                return CheckResult::error(format!("DoH response parse failed: {}", err))
                     .with_trace(format!("DoH: parse failed via {}", server));
             }
         };
