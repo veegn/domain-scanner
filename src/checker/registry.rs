@@ -95,6 +95,7 @@ impl CheckerRegistry {
 
         let mut all_signatures = Vec::new();
         let mut available = true;
+        let mut authoritative_available = false;
         let mut last_error: Option<String> = None;
         let mut last_retryable: Option<CheckResult> = None;
         let mut authoritative_result: Option<CheckResult> = None;
@@ -144,6 +145,8 @@ impl CheckerRegistry {
 
             if !result.available {
                 available = false;
+            } else if checker.is_authoritative() {
+                authoritative_available = true;
             }
 
             if checker.should_stop_pipeline(&result) {
@@ -167,6 +170,10 @@ impl CheckerRegistry {
 
         if !available {
             let mut result = CheckResult::registered(all_signatures);
+            result.trace = trace_log;
+            result
+        } else if authoritative_available {
+            let mut result = CheckResult::available();
             result.trace = trace_log;
             result
         } else if let Some(retryable) = last_retryable {

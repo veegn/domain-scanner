@@ -378,6 +378,7 @@ impl WhoisChecker {
             || lower.contains("domain not found")
             || lower.contains("no matching record")
             || lower.contains("no data found")
+            || lower.contains("object does not exist")
             || lower.contains("is available for registration")
             || lower.contains("available for registration")
             || lower.contains("currently available for application")
@@ -834,6 +835,15 @@ mod tests {
     fn test_us_no_data_found_response_detected_as_available() {
         let checker = WhoisChecker::new();
         let response = "No Data Found\nURL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/\n>>> Last update of WHOIS database";
+
+        assert!(checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_top_object_does_not_exist_response_detected_as_available() {
+        let checker = WhoisChecker::new();
+        let response = "The queried object does not exist: abj.top\n>>> Last update of WHOIS database: 2026-06-07T06:28:25Z <<<\n\nStatus Codes:";
 
         assert!(checker.is_available(response));
         assert!(!checker.is_registered(response));

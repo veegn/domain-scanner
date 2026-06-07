@@ -799,6 +799,34 @@ async fn test_registry_prefers_rdap_before_whois_for_custom_suffix() {
 }
 
 #[tokio::test]
+async fn test_registry_keeps_authoritative_available_before_whois_failure() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+
+    let config = AppConfig {
+        rdap_bootstrap_url: Some(bootstrap_url),
+        whois_servers: [("alpha".to_string(), "127.0.0.1:9".to_string())]
+            .into_iter()
+            .collect(),
+        ..AppConfig::default()
+    };
+
+    let registry =
+        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let result = registry.check("free.alpha").await;
+
+    assert!(result.available);
+    assert!(result.error.is_none());
+    assert!(
+        result
+            .trace
+            .iter()
+            .any(|step| step.starts_with("RDAP: not found"))
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
 async fn test_registry_reserved_domain_stops_early() {
     let registry =
         CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
