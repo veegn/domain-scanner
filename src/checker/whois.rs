@@ -405,7 +405,8 @@ impl WhoisChecker {
                     return false;
                 };
 
-                field.trim() == "status" && matches!(value.trim(), "connect" | "inactive")
+                field.trim() == "status"
+                    && matches!(value.trim(), "connect" | "inactive" | "redemptionperiod")
             })
     }
 
@@ -829,6 +830,15 @@ mod tests {
     fn test_denic_connect_response_detected_as_registered() {
         let checker = WhoisChecker::new();
         let response = "Domain: l1p.de\nStatus: connect";
+
+        assert!(!checker.is_available(response));
+        assert!(checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_denic_redemption_period_response_detected_as_registered() {
+        let checker = WhoisChecker::new();
+        let response = "Domain: xue.de\nStatus: redemptionPeriod";
 
         assert!(!checker.is_available(response));
         assert!(checker.is_registered(response));
