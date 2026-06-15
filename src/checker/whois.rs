@@ -400,6 +400,13 @@ impl WhoisChecker {
         ]
         .iter()
         .any(|marker| lower.contains(marker))
+            || lower.lines().any(|line| {
+                let Some((field, value)) = line.trim().split_once(':') else {
+                    return false;
+                };
+
+                field.trim() == "status" && matches!(value.trim(), "connect" | "inactive")
+            })
     }
 
     fn is_rate_limited(&self, response: &str) -> bool {
@@ -413,8 +420,13 @@ impl WhoisChecker {
             || lower.contains("query limit")
             || lower.contains("queries per")
             || lower.contains("try again later")
-            || lower.contains("try again in");
-        let access_blocked = lower.contains("blacklist") || lower.contains("access denied");
+            || lower.contains("try again in")
+            || lower.contains("requests of this client are not permitted")
+            || lower.contains("please use https://www.nic.ch/whois/");
+        let access_blocked = lower.contains("blacklist")
+            || lower.contains("access denied")
+            || lower.contains("client are not permitted")
+            || lower.contains("client is not permitted");
         let transient_context = lower.contains("limit")
             || lower.contains("quota")
             || lower.contains("rate")
@@ -814,6 +826,33 @@ mod tests {
     }
 
     #[test]
+    fn test_denic_connect_response_detected_as_registered() {
+        let checker = WhoisChecker::new();
+        let response = "Domain: l1p.de\nStatus: connect";
+
+        assert!(!checker.is_available(response));
+        assert!(checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_denic_free_response_detected_as_available() {
+        let checker = WhoisChecker::new();
+        let response = "Domain: definitely-free-example.de\nStatus: free";
+
+        assert!(checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_status_codes_help_text_is_not_registered() {
+        let checker = WhoisChecker::new();
+        let response = "Status Codes:\nhttps://icann.org/epp#clientTransferProhibited";
+
+        assert!(!checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
     fn test_radix_available_response_detected_as_available() {
         let checker = WhoisChecker::new();
         let response = ">>> Domain asi.fun is available for registration\n\n>>> Please visit https://rdap.radix.host/registrars/ for a list of accredited registrars";
@@ -869,6 +908,16 @@ mod tests {
         assert!(checker.is_rate_limited(response));
         assert_eq!(hint.retry_after, Some(Duration::from_secs(9156)));
         assert_eq!(hint.min_interval, None);
+        assert!(!checker.is_available(response));
+        assert!(!checker.is_registered(response));
+    }
+
+    #[test]
+    fn test_nic_ch_client_not_permitted_response_is_rate_limited() {
+        let checker = WhoisChecker::new();
+        let response = "Requests of this client are not permitted. Please use https://www.nic.ch/whois/ for queries.";
+
+        assert!(checker.is_rate_limited(response));
         assert!(!checker.is_available(response));
         assert!(!checker.is_registered(response));
     }
