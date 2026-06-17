@@ -415,4 +415,63 @@ mod tests {
         assert_eq!(slugify("  multiple___spaces  "), "multiple-spaces");
         assert_eq!(slugify("---"), "");
     }
+
+    #[tokio::test]
+    async fn test_regenerate_all() {
+        let db = SqlitePool::connect("sqlite:data/scans.db").await.unwrap();
+        let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String, String, i64, String, Option<String>)> (
+            "SELECT ps.id, ps.slug, ps.scan_id, ps.title, ps.description, s.suffix, s.pattern, s.length, ps.published_at, s.finished_at
+             FROM published_scans ps
+             JOIN scans s ON s.id = ps.scan_id"
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+        for row in rows {
+            let (id, slug, scan_id, title, description, suffix, pattern, length, published_at, finished_at) = row;
+            println!("Regenerating {}", slug);
+
+            let domains = sqlx::query_as::<_, PublishedDomainFileRow>(
+                "SELECT domain, available, expiration_date, signatures
+                 FROM published_domains
+                 WHERE published_scan_id = ?
+                 ORDER BY domain ASC",
+            )
+            .bind(&id)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+
+            let meta = PublishedPageMeta {
+                id: id.clone(),
+                slug: slug.clone(),
+                scan_id,
+                title,
+                description,
+                suffix,
+                pattern,
+                length,
+                result_count: domains.len() as i64,
+                published_at: published_at.clone(),
+                scan_finished_at: finished_at.unwrap_or(published_at.clone()),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            let data = PublishedPageData {
+                meta: meta.clone(),
+                domains,
+            };
+
+            // Write to data/published (served by dev server)
+            let dir = Path::new("data/published").join(&slug);
+            write_publication_files(&dir, &meta, &data).await.unwrap();
+            println!("Wrote to {}", dir.display());
+
+            // Also write to web/published (fallback/backup)
+            let web_dir = Path::new("web/published").join(&slug);
+            write_publication_files(&web_dir, &meta, &data).await.unwrap();
+            println!("Wrote to {}", web_dir.display());
+        }
+    }
 }
