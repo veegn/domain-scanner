@@ -754,6 +754,7 @@ async fn test_registry_with_defaults() {
             .await;
     let names = registry.checker_names();
     assert!(names.contains(&"LocalReserved"));
+    assert!(names.contains(&"ZoneData"));
     assert!(names.contains(&"DoH"));
     assert!(names.contains(&"RDAP"));
     assert!(names.contains(&"WHOIS"));
@@ -766,12 +767,37 @@ async fn test_registry_checker_order() {
             .await;
     let names = registry.checker_names();
     let local_idx = names.iter().position(|&n| n == "LocalReserved");
+    let zone_data_idx = names.iter().position(|&n| n == "ZoneData");
     let doh_idx = names.iter().position(|&n| n == "DoH");
     let rdap_idx = names.iter().position(|&n| n == "RDAP");
     let whois_idx = names.iter().position(|&n| n == "WHOIS");
     assert!(local_idx < doh_idx, "LocalReserved should come before DoH");
+    assert!(
+        local_idx < zone_data_idx,
+        "LocalReserved should come before ZoneData"
+    );
+    assert!(zone_data_idx < doh_idx, "ZoneData should come before DoH");
     assert!(doh_idx < rdap_idx, "DoH should come before RDAP");
     assert!(rdap_idx < whois_idx, "RDAP should come before WHOIS");
+}
+
+#[tokio::test]
+async fn test_registry_with_zone_data_checker_xyz() {
+    if !std::path::Path::new("data/centralized_zone_data/xyz.txt.gz").exists() {
+        return; // Skip if the zone file isn't present in the environment
+    }
+
+    let config = AppConfig::default();
+    let registry = CheckerRegistry::with_defaults(config, std::collections::HashMap::new()).await;
+
+    // This domain is known to be in the xyz zone file
+    let result = registry.check("0--0--7.xyz").await;
+
+    assert!(!result.available, "Domain should be marked as registered");
+    assert!(
+        result.trace.iter().any(|s| s.contains("ZoneData: registered")),
+        "Trace should indicate it was resolved via the ZoneDataChecker"
+    );
 }
 
 #[tokio::test]

@@ -135,6 +135,8 @@ impl CheckResult {
 pub enum CheckerPriority {
     /// Fastest checks (e.g., local reserved rules)
     Local = 0,
+    /// Local zone-file snapshot lookups.
+    ZoneData = 5,
     /// Fast network checks (e.g., DNS over HTTPS)
     Fast = 10,
     /// Standard network checks (e.g., RDAP)

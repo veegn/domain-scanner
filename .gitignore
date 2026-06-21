@@ -50,6 +50,7 @@ data/scans.db*
 .playwright-cli/
 logs/
 data/published/
+data/centralized_zone_data/*.gz
 web/published/
 data/dictionaries/
 .agents/

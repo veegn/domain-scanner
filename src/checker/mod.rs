@@ -49,6 +49,7 @@ pub mod rdap;
 pub mod registry;
 pub mod traits;
 pub mod whois;
+pub mod zone_data;
 
 // Re-export main types for convenience
 pub use doh::DohChecker;
@@ -57,3 +58,4 @@ pub use rdap::RdapChecker;
 pub use registry::CheckerRegistry;
 pub use traits::{CheckResult, CheckerPriority, DomainChecker};
 pub use whois::WhoisChecker;
+pub use zone_data::ZoneDataChecker;

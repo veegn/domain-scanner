@@ -10,6 +10,7 @@ use super::local::LocalReservedChecker;
 use super::rdap::RdapChecker;
 use super::traits::{CheckResult, DomainChecker};
 use super::whois::WhoisChecker;
+use super::zone_data::ZoneDataChecker;
 use crate::config::AppConfig;
 use tracing::{debug, error, info, warn};
 
@@ -33,9 +34,10 @@ impl CheckerRegistry {
     ///
     /// Default checkers (in priority order):
     /// 1. `LocalReservedChecker` �?fast local reserved-name check (no network)
-    /// 2. `DohChecker`           �?DNS-over-HTTPS
-    /// 3. `RdapChecker`          �?RDAP protocol
-    /// 4. `WhoisChecker`         �?legacy WHOIS fallback
+    /// 2. `ZoneDataChecker`      �?local `.xyz` zone snapshot
+    /// 3. `DohChecker`           �?DNS-over-HTTPS
+    /// 4. `RdapChecker`          �?RDAP protocol
+    /// 5. `WhoisChecker`         �?legacy WHOIS fallback
     ///
     /// `whois_servers` is loaded from the database (merged with config.json overrides)
     /// by the caller before this function is invoked.
@@ -43,6 +45,7 @@ impl CheckerRegistry {
         let mut registry = Self::new();
 
         registry.add_checker(Arc::new(LocalReservedChecker::new()));
+        registry.add_checker(Arc::new(ZoneDataChecker::new()));
 
         let doh_checker = DohChecker::with_servers(config.doh_servers.clone()).await;
         registry.add_checker(Arc::new(doh_checker));
