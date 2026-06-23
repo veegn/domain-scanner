@@ -263,7 +263,11 @@ impl DomainChecker for ZoneDataChecker {
     }
 
     fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
-        !result.available && result.error.is_none()
+        // A matching local zone snapshot is the source of truth for this
+        // suffix. Both a present and absent delegation are final results;
+        // only a local read/extraction error may fall through to network
+        // checkers.
+        result.error.is_none()
     }
 }
 
@@ -444,6 +448,33 @@ fn owner_name(line: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checker::{CheckerRegistry, DomainChecker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct NetworkSentinel {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl DomainChecker for NetworkSentinel {
+        fn name(&self) -> &'static str {
+            "NetworkSentinel"
+        }
+
+        fn priority(&self) -> CheckerPriority {
+            CheckerPriority::Fast
+        }
+
+        async fn check(&self, _domain: &str) -> CheckResult {
+            self.called.store(true, Ordering::Relaxed);
+            CheckResult::registered(vec!["NETWORK".to_string()])
+        }
+
+        fn supports_tld(&self, _tld: &str) -> bool {
+            true
+        }
+    }
 
     fn fixture_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -507,7 +538,7 @@ mod tests {
 
         let result = checker.check("available.xyz").await;
         assert!(result.available);
-        assert!(!checker.should_stop_pipeline(&result));
+        assert!(checker.should_stop_pipeline(&result));
         
         let path = checker.managers.get("xyz").unwrap().get_extracted_path().await.unwrap();
         assert!(path.exists());
@@ -515,6 +546,27 @@ mod tests {
         drop(checker);
         
         assert!(!path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn available_local_zone_result_skips_network_checkers() {
+        let directory = fixture_dir();
+        let gzip_path = directory.join("xyz.txt.gz");
+        write_gzip_fixture(&gzip_path);
+
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(Arc::new(ZoneDataChecker::with_path(&gzip_path)));
+        let network_called = Arc::new(AtomicBool::new(false));
+        registry.add_checker(Arc::new(NetworkSentinel {
+            called: network_called.clone(),
+        }));
+        registry.sort_by_priority();
+
+        let result = registry.check("available.xyz").await;
+
+        assert!(result.available);
+        assert!(!network_called.load(Ordering::Relaxed));
         fs::remove_dir_all(directory).unwrap();
     }
 
