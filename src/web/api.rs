@@ -55,6 +55,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/public/published", get(get_public_published_scans))
         .route("/api/public/search", get(search_public_domains))
         .route("/api/scan/:id/reorder", post(reorder_scan))
+        .route(
+            "/api/settings",
+            get(get_settings).put(update_settings),
+        )
         .route("/api/dictionary", post(upload_dictionary))
         .route("/api/dictionaries", get(list_dictionaries))
         .route(
@@ -1287,4 +1291,22 @@ async fn get_rate_limits() -> ApiResponse {
     }
 
     Json(limits).into_response()
+}
+
+async fn get_settings(State(state): State<Arc<AppState>>) -> ApiResponse {
+    match crate::web::load_app_config(&state.db).await {
+        Ok(Some(config)) => Json(config).into_response(),
+        Ok(None) => Json(crate::config::AppConfig::default()).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<crate::config::AppConfig>,
+) -> ApiResponse {
+    match crate::web::save_app_config(&state.db, &payload).await {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
