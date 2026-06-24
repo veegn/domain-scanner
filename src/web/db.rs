@@ -26,6 +26,16 @@ pub async fn init_db() -> Result<SqlitePool> {
     }
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+            id TEXT PRIMARY KEY,
+            config_json TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .context("failed to create app_settings table")?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS scans (
             id TEXT PRIMARY KEY,
             status TEXT,
@@ -374,4 +384,36 @@ pub async fn load_tlds(pool: &SqlitePool) -> Vec<String> {
         .fetch_all(pool)
         .await
         .unwrap_or_default()
+}
+
+pub async fn load_app_config(pool: &SqlitePool) -> Result<Option<crate::config::AppConfig>> {
+    let row = sqlx::query("SELECT config_json FROM app_settings WHERE id = 'singleton'")
+        .fetch_optional(pool)
+        .await
+        .context("failed to query app_settings")?;
+    
+    if let Some(r) = row {
+        let json_str: String = r.try_get("config_json")?;
+        let config: crate::config::AppConfig = serde_json::from_str(&json_str)
+            .context("failed to deserialize app config from database")?;
+        Ok(Some(config))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn save_app_config(pool: &SqlitePool, config: &crate::config::AppConfig) -> Result<()> {
+    let json_str = serde_json::to_string(config)
+        .context("failed to serialize app config")?;
+    
+    sqlx::query(
+        "INSERT INTO app_settings (id, config_json) VALUES ('singleton', ?)
+         ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json"
+    )
+    .bind(json_str)
+    .execute(pool)
+    .await
+    .context("failed to save app_settings")?;
+    
+    Ok(())
 }

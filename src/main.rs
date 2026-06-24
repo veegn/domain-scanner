@@ -19,14 +19,44 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    AppConfig::save_default_if_not_exists("config.json");
-    let config = AppConfig::load_from_file("config.json");
+    // 1. Initialize DB (creates schema if needed)
+    // We do this first because the configuration is now stored in the database.
+    let db = match web::init_db().await {
+        Ok(db) => db,
+        Err(err) => {
+            eprintln!("failed to initialize database: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    // 2. Load runtime config from database, or migrate from file
+    let config = match web::load_app_config(&db).await {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
+            // Migration logic
+            let fallback_cfg = if std::path::Path::new("config.json").exists() {
+                let c = AppConfig::load_from_file("config.json");
+                let _ = std::fs::rename("config.json", "config.json.migrated");
+                c
+            } else {
+                AppConfig::default()
+            };
+            if let Err(e) = web::save_app_config(&db, &fallback_cfg).await {
+                eprintln!("failed to save default config to db: {}", e);
+            }
+            fallback_cfg
+        }
+        Err(err) => {
+            eprintln!("failed to load config from database: {}", err);
+            std::process::exit(1);
+        }
+    };
+
     let scheduler_config = config.scheduler.clone();
     logging::init(&config.logging);
 
     info!(target: "domain_scanner::main", port = args.port, context = "startup", "initializing web server");
 
-    // 1. Load runtime config (DoH servers, RDAP URL, WHOIS overrides)
     info!(
         target: "domain_scanner::main",
         context = "config",
@@ -44,22 +74,8 @@ async fn main() {
         max_parallel_tlds = scheduler_config.max_parallel_tlds,
         workers_per_scan = scheduler_config.workers_per_scan,
         max_global_checks = scheduler_config.max_global_checks,
-        "runtime config loaded"
+        "runtime config loaded from database"
     );
-
-    // 2. Initialize DB (creates schema if needed)
-    let db = match web::init_db().await {
-        Ok(db) => db,
-        Err(err) => {
-            error!(
-                target: "domain_scanner::main",
-                context = "database",
-                error = %err,
-                "failed to initialize database"
-            );
-            std::process::exit(1);
-        }
-    };
 
     // 3. Seed default TLDs + WHOIS servers on first startup
     web::seed_defaults(&db).await;

@@ -64,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(delete_dictionary),
         )
         .route("/api/dictionary/:id/words", get(get_dictionary_words))
+        .route("/api/rate_limits", get(get_rate_limits))
         .with_state(state)
 }
 
@@ -1233,4 +1234,57 @@ async fn get_dictionary_words(
         Ok(words) => Json(words).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(serde::Serialize)]
+struct RateLimitStatus {
+    service: String,
+    endpoint: String,
+    cooldown_remaining_secs: u64,
+}
+
+async fn get_rate_limits() -> ApiResponse {
+    let mut limits = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Ok(content) = std::fs::read_to_string("data/cache/rdap/rate_limits.json") {
+        if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(endpoints) = cache.get("endpoints").and_then(|v| v.as_object()) {
+                for (k, v) in endpoints {
+                    if let Some(cooldown) = v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64()) {
+                        if cooldown > now {
+                            limits.push(RateLimitStatus {
+                                service: "RDAP".to_string(),
+                                endpoint: k.clone(),
+                                cooldown_remaining_secs: cooldown - now,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(content) = std::fs::read_to_string("data/cache/whois/rate_limits.json") {
+        if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(servers) = cache.get("servers").and_then(|v| v.as_object()) {
+                for (k, v) in servers {
+                    if let Some(cooldown) = v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64()) {
+                        if cooldown > now {
+                            limits.push(RateLimitStatus {
+                                service: "WHOIS".to_string(),
+                                endpoint: k.clone(),
+                                cooldown_remaining_secs: cooldown - now,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(limits).into_response()
 }

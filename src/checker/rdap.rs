@@ -356,7 +356,7 @@ impl DomainChecker for RdapChecker {
         }
 
         let Some((_suffix, endpoint)) = self.endpoint_for_domain(domain) else {
-            return CheckResult::available().with_trace("RDAP: unsupported suffix");
+            return CheckResult::error("RDAP: unsupported suffix").with_trace("RDAP: unsupported suffix");
         };
 
         self.wait_for_turn(&endpoint).await;
@@ -456,6 +456,12 @@ impl DomainChecker for RdapChecker {
     }
 
     fn is_authoritative(&self) -> bool {
+        true
+    }
+
+    fn should_stop_pipeline(&self, _result: &CheckResult) -> bool {
+        // RDAP is an authoritative source. If it returns a successful result
+        // (whether available or registered), we should trust it and not fallback to WHOIS.
         true
     }
 }

@@ -141,6 +141,21 @@ impl CheckerRegistry {
                 if result.retryable {
                     last_retryable = Some(result.clone());
                 }
+                
+                if checker.is_authoritative() {
+                    warn!(
+                        target: "domain_scanner::checker::registry",
+                        context = "pipeline",
+                        checker = checker.name(),
+                        domain,
+                        error = %err,
+                        retryable = result.retryable,
+                        "stopping pipeline on authoritative checker error"
+                    );
+                    let mut result = result;
+                    result.trace = trace_log;
+                    return result;
+                }
                 continue; // Try next checker on error
             }
 

@@ -278,7 +278,30 @@
                 class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
                 Public Releases
             </a>
+            <a href="settings.html"
+                class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">
+                Settings
+            </a>
         </header>
+
+        <!-- Rate Limit Banner -->
+        <div id="rateLimitBannerContainer" class="mb-8 hidden">
+            <div class="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-xl shadow-sm">
+                <div class="flex">
+                    <div class="flex-shrink-0">
+                        <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <div class="ml-3">
+                        <h3 class="text-sm font-medium text-red-800">Rate Limits Active</h3>
+                        <div class="mt-2 text-sm text-red-700">
+                            <ul id="rateLimitList" class="list-disc pl-5 space-y-1"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <main class="grid grid-cols-1 lg:grid-cols-12 gap-8">
             <!-- Sidebar: Forms & History -->
@@ -1749,11 +1772,45 @@
             });
         }
 
+        const RateLimits = {
+            pollInterval: null,
+            startPolling() {
+                this.poll();
+                this.pollInterval = setInterval(() => this.poll(), 5000);
+            },
+            async poll() {
+                try {
+                    const limits = await API.fetchJson('api/rate_limits');
+                    this.render(limits);
+                } catch (e) {
+                    console.error('Failed to fetch rate limits', e);
+                }
+            },
+            render(limits) {
+                const container = document.getElementById('rateLimitBannerContainer');
+                const list = document.getElementById('rateLimitList');
+                if (!limits || limits.length === 0) {
+                    container.classList.add('hidden');
+                    list.innerHTML = '';
+                    return;
+                }
+                
+                list.innerHTML = limits.map(l => {
+                    const minutes = Math.floor(l.cooldown_remaining_secs / 60);
+                    const seconds = l.cooldown_remaining_secs % 60;
+                    const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                    return `<li><strong>${Utils.escapeHtml(l.service)}</strong> (${Utils.escapeHtml(l.endpoint)}): Cooling down for ${timeStr}</li>`;
+                }).join('');
+                container.classList.remove('hidden');
+            }
+        };
+
         // Entry Point
         window.onload = () => {
             document.querySelectorAll('a[href="published.html"]').forEach(anchor => {
                 anchor.href = Routes.build('published.html');
             });
+            RateLimits.startPolling();
             API.loadRecentScans();
             API.openScansStream();
             API.loadTlds().catch(() => { });
