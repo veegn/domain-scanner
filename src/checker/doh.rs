@@ -237,9 +237,7 @@ impl DohChecker {
     async fn record_rate_limit(&self, server: &str, retry_after: Option<Duration>) -> Duration {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
-        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
-            .max(2_000)
-            .min(60_000);
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2).clamp(2_000, 60_000);
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
@@ -262,9 +260,7 @@ impl DohChecker {
     ) -> Duration {
         let throttle = self.throttle_for_server(server).await;
         let mut guard = throttle.lock().await;
-        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
-            .max(1_000)
-            .min(300_000);
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2).clamp(1_000, 300_000);
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
@@ -406,11 +402,11 @@ impl DomainChecker for DohChecker {
             }
         };
 
-        if let Some(answers) = result.answer {
-            if !answers.is_empty() {
-                return CheckResult::registered(vec!["DNS".to_string()])
-                    .with_trace(format!("DoH: NS records found via {}", server));
-            }
+        if let Some(answers) = result.answer
+            && !answers.is_empty()
+        {
+            return CheckResult::registered(vec!["DNS".to_string()])
+                .with_trace(format!("DoH: NS records found via {}", server));
         }
 
         CheckResult::unknown().with_trace(format!(

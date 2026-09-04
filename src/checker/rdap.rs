@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use reqwest::header::HeaderMap;
+use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use tokio::sync::{Mutex, RwLock};
@@ -45,6 +45,8 @@ struct RdapEndpointThrottle {
     min_interval: Duration,
     next_allowed_at: Instant,
 }
+
+type RdapThrottleMap = HashMap<String, Arc<Mutex<RdapEndpointThrottle>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RdapRateLimitCacheFile {
@@ -91,8 +93,18 @@ struct BootstrapCacheFile {
 
 #[derive(Debug, Deserialize)]
 struct RdapDomainResponse {
+    #[serde(rename = "objectClassName")]
+    object_class_name: Option<String>,
+    #[serde(rename = "ldhName")]
+    ldh_name: Option<String>,
     #[serde(default)]
     events: Vec<RdapEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RdapErrorResponse {
+    #[serde(rename = "errorCode")]
+    error_code: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,9 +266,7 @@ impl RdapChecker {
     async fn record_rate_limit(&self, endpoint: &str, retry_after: Option<Duration>) -> Duration {
         let throttle = self.throttle_for_endpoint(endpoint).await;
         let mut guard = throttle.lock().await;
-        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
-            .max(2_000)
-            .min(60_000);
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2).clamp(2_000, 60_000);
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
@@ -284,9 +294,7 @@ impl RdapChecker {
     ) -> Duration {
         let throttle = self.throttle_for_endpoint(endpoint).await;
         let mut guard = throttle.lock().await;
-        let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
-            .max(1_000)
-            .min(30_000);
+        let next_ms = ((guard.min_interval.as_millis() as u64) * 2).clamp(1_000, 30_000);
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
@@ -347,7 +355,7 @@ impl DomainChecker for RdapChecker {
 
     async fn check(&self, domain: &str) -> CheckResult {
         if !self.cb.allow_request() {
-            return CheckResult::rate_limited("RDAP circuit breaker open")
+            return CheckResult::retryable_error("RDAP circuit breaker open", Some(60))
                 .with_trace("RDAP: circuit breaker open");
         }
 
@@ -391,23 +399,46 @@ impl DomainChecker for RdapChecker {
         let retry_after = retry_after_from_headers(response.headers());
         match response.status() {
             reqwest::StatusCode::OK => {
-                self.cb.record_success();
-                self.record_success(&endpoint).await;
+                if !has_json_content_type(response.headers()) {
+                    self.cb.record_failure();
+                    return CheckResult::error("RDAP returned a non-JSON success response")
+                        .with_trace(format!("RDAP: invalid content type via {}", endpoint));
+                }
                 match response.json::<RdapDomainResponse>().await {
-                    Ok(payload) => CheckResult::registered_with_expiry(
-                        vec!["RDAP".to_string()],
-                        Self::extract_expiry(&payload),
-                    )
-                    .with_trace(format!("RDAP: registered via {}", endpoint)),
-                    Err(err) => CheckResult::error(format!("RDAP parse failed: {}", err))
-                        .with_trace(format!("RDAP: parse failed via {}", endpoint)),
+                    Ok(payload) if is_domain_response_for(&payload, domain) => {
+                        self.cb.record_success();
+                        self.record_success(&endpoint).await;
+                        CheckResult::registered_with_expiry(
+                            vec!["RDAP".to_string()],
+                            Self::extract_expiry(&payload),
+                        )
+                        .with_trace(format!("RDAP: registered via {}", endpoint))
+                    }
+                    Ok(_) => {
+                        self.cb.record_failure();
+                        CheckResult::error("RDAP response did not identify the requested domain")
+                            .with_trace(format!("RDAP: mismatched domain object via {}", endpoint))
+                    }
+                    Err(err) => {
+                        self.cb.record_failure();
+                        CheckResult::error(format!("RDAP parse failed: {}", err))
+                            .with_trace(format!("RDAP: parse failed via {}", endpoint))
+                    }
                 }
             }
             reqwest::StatusCode::NOT_FOUND => {
-                self.cb.record_success();
-                self.record_success(&endpoint).await;
-                CheckResult::no_registration_record()
-                    .with_trace(format!("RDAP: no registration record via {}", endpoint))
+                let is_json = has_json_content_type(response.headers());
+                let body = response.text().await.unwrap_or_default();
+                if is_json && is_valid_rdap_not_found(&body) {
+                    self.cb.record_success();
+                    self.record_success(&endpoint).await;
+                    CheckResult::no_registration_record()
+                        .with_trace(format!("RDAP: no registration record via {}", endpoint))
+                } else {
+                    self.cb.record_failure();
+                    CheckResult::error("RDAP returned an unverified HTTP 404 response")
+                        .with_trace(format!("RDAP: unverified HTTP 404 via {}", endpoint))
+                }
             }
             reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 self.cb.record_failure();
@@ -461,11 +492,48 @@ impl DomainChecker for RdapChecker {
         true
     }
 
-    fn should_stop_pipeline(&self, _result: &CheckResult) -> bool {
+    fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
         // A successful RDAP response definitively says either that a registration
         // record exists or that none was found. It says nothing about purchasing.
-        true
+        result.registration_record_absent || result.has_registration_evidence()
     }
+}
+
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            let media_type = value.split(';').next().unwrap_or_default().trim();
+            media_type.eq_ignore_ascii_case("application/rdap+json")
+                || media_type.eq_ignore_ascii_case("application/json")
+        })
+        .unwrap_or(false)
+}
+
+fn is_domain_response_for(response: &RdapDomainResponse, domain: &str) -> bool {
+    response
+        .object_class_name
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("domain"))
+        .unwrap_or(false)
+        && response
+            .ldh_name
+            .as_deref()
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_end_matches('.')
+                    .eq_ignore_ascii_case(domain.trim().trim_end_matches('.'))
+            })
+            .unwrap_or(false)
+}
+
+fn is_valid_rdap_not_found(body: &str) -> bool {
+    serde_json::from_str::<RdapErrorResponse>(body)
+        .ok()
+        .and_then(|response| response.error_code)
+        == Some(404)
 }
 
 fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
@@ -607,17 +675,17 @@ async fn fetch_bootstrap_map_with_cache(
             Ok(endpoint_map)
         }
         Err(fetch_err) => {
-            if let Some(cache) = read_cache_file(&cache_path) {
-                if cache.source_url == url {
-                    warn!(
-                        target: "domain_scanner::checker::rdap",
-                        context = "bootstrap_cache",
-                        source = %url,
-                        error = %fetch_err,
-                        "failed to refresh RDAP bootstrap; using cached data"
-                    );
-                    return Ok(cache.endpoint_map);
-                }
+            if let Some(cache) = read_cache_file(&cache_path)
+                && cache.source_url == url
+            {
+                warn!(
+                    target: "domain_scanner::checker::rdap",
+                    context = "bootstrap_cache",
+                    source = %url,
+                    error = %fetch_err,
+                    "failed to refresh RDAP bootstrap; using cached data"
+                );
+                return Ok(cache.endpoint_map);
             }
             warn!(
                 target: "domain_scanner::checker::rdap",
@@ -655,10 +723,7 @@ fn default_rdap_rate_limit_cache_path() -> PathBuf {
 
 fn load_cached_rdap_throttles(
     cache_path: &Path,
-) -> (
-    HashMap<String, RdapRateLimitCacheEntry>,
-    HashMap<String, Arc<Mutex<RdapEndpointThrottle>>>,
-) {
+) -> (HashMap<String, RdapRateLimitCacheEntry>, RdapThrottleMap) {
     let cache_entries = read_rdap_rate_limit_cache(cache_path);
     let throttles = cache_entries
         .iter()

@@ -9,7 +9,7 @@ use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 
@@ -19,6 +19,8 @@ pub(super) const COUNTER_PERSIST_INTERVAL: i64 = 50;
 pub(super) const STATUS_PUBLISH_INTERVAL: i64 = 10;
 pub(super) const RESULT_FLUSH_BATCH_SIZE: usize = 50;
 pub(super) const LOG_FLUSH_BATCH_SIZE: usize = 50;
+const STORAGE_FLUSH_ATTEMPTS: usize = 4;
+const STORAGE_FLUSH_BASE_DELAY_MS: u64 = 100;
 
 #[derive(Serialize)]
 struct ScanLogRecord {
@@ -201,64 +203,63 @@ pub(super) async fn prepare_job_feeder(
         return Ok(total);
     }
 
-    if let Some(dict_ids) = &params.dictionary_ids {
-        if !dict_ids.is_empty() {
-            let all_words = match crate::web::dictionary::load_multiple_dictionary_words(dict_ids)
-                .await
-            {
-                Ok(words) => words,
-                Err(err) => {
-                    let _ = add_event_log(
-                        db,
-                        streams,
-                        scan_id,
-                        "ERROR",
-                        "dictionary.load_failed",
-                        None,
-                        Some(format!("Failed to load dictionaries: {}", err)),
-                        vec![
-                            ("dictionary_ids", json!(dict_ids)),
-                            ("error", json!(err.to_string())),
-                        ],
-                    )
-                    .await;
-                    let _ = sqlx::query(
+    if let Some(dict_ids) = &params.dictionary_ids
+        && !dict_ids.is_empty()
+    {
+        let all_words = match crate::web::dictionary::load_multiple_dictionary_words(dict_ids).await
+        {
+            Ok(words) => words,
+            Err(err) => {
+                let _ = add_event_log(
+                    db,
+                    streams,
+                    scan_id,
+                    "ERROR",
+                    "dictionary.load_failed",
+                    None,
+                    Some(format!("Failed to load dictionaries: {}", err)),
+                    vec![
+                        ("dictionary_ids", json!(dict_ids)),
+                        ("error", json!(err.to_string())),
+                    ],
+                )
+                .await;
+                let _ = sqlx::query(
                         "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                     )
                     .bind(scan_id)
                     .execute(db)
                     .await;
-                    task_control.unregister(scan_id);
-                    return Err(());
-                }
-            };
+                task_control.unregister(scan_id);
+                return Err(());
+            }
+        };
 
-            let suffix = params.suffix.clone();
+        let suffix = params.suffix.clone();
 
-            let total: usize = all_words.iter().map(|wl| wl.len()).product();
-            let total_i64 = total as i64;
+        let total: usize = all_words.iter().map(|wl| wl.len()).product();
+        let total_i64 = total as i64;
 
-            let combinator = if let Some(template) = &params.format_template {
-                DictionaryCombinator::new(all_words, template.clone(), suffix)
-            } else {
-                let separator = params.separator.clone().unwrap_or_default();
-                let prefix = params.prefix.clone().unwrap_or_default();
-                let postfix = params.postfix.clone().unwrap_or_default();
-                DictionaryCombinator::from_parts(all_words, &prefix, &separator, &postfix, suffix)
-            };
+        let combinator = if let Some(template) = &params.format_template {
+            DictionaryCombinator::new(all_words, template.clone(), suffix)
+        } else {
+            let separator = params.separator.clone().unwrap_or_default();
+            let prefix = params.prefix.clone().unwrap_or_default();
+            let postfix = params.postfix.clone().unwrap_or_default();
+            DictionaryCombinator::from_parts(all_words, &prefix, &separator, &postfix, suffix)
+        };
 
-            spawn_combinator_feeder(
-                combinator,
-                already_processed.clone(),
-                jobs_tx.clone(),
-                scan_id.to_string(),
-                feeder_done,
-                pending_domains,
-                task_signal,
-                scan_stream.clone(),
-            );
-            return Ok(total_i64);
-        }
+        spawn_combinator_feeder(
+            combinator,
+            already_processed.clone(),
+            jobs_tx.clone(),
+            scan_id.to_string(),
+            feeder_done,
+            pending_domains,
+            task_signal,
+            scan_stream.clone(),
+        );
+        return Ok(total_i64);
     }
 
     if let Some(dict_id) = &params.dictionary_id {
@@ -518,7 +519,7 @@ fn spawn_combinator_feeder(
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
-        while let Some(domain) = combinator.next() {
+        for domain in combinator.by_ref() {
             if already_processed.contains(&domain) {
                 continue;
             }
@@ -615,7 +616,7 @@ async fn queue_log(
     });
 
     if pending.len() >= LOG_FLUSH_BATCH_SIZE {
-        flush_pending_logs(db, scan_stream, scan_id, pending).await;
+        flush_pending_logs(db, scan_stream, scan_id, pending).await?;
     }
 
     Ok(())
@@ -710,8 +711,18 @@ pub(super) async fn flush_pending_state_logs(
     scan_id: &str,
     state: &mut ScanRuntimeState,
 ) {
-    if !state.pending_log_flush.is_empty() {
-        flush_pending_logs(db, scan_stream, scan_id, &mut state.pending_log_flush).await;
+    if !state.pending_log_flush.is_empty()
+        && let Err(err) =
+            flush_pending_logs(db, scan_stream, scan_id, &mut state.pending_log_flush).await
+    {
+        warn!(
+            target: "domain_scanner::queue",
+            context = "scan_log",
+            scan_id = %scan_id,
+            error = %err,
+            pending = state.pending_log_flush.len(),
+            "scan log batch remains buffered after retry exhaustion"
+        );
     }
 }
 
@@ -721,38 +732,79 @@ pub(super) async fn flush_scan_buffers(
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
     state: &mut ScanRuntimeState,
-) {
-    if !state.pending_result_flush.is_empty() {
-        flush_pending_results(
-            db,
-            streams,
-            scan_stream,
-            scan_id,
-            &mut state.pending_result_flush,
-        )
-        .await;
-    }
+) -> Result<(), sqlx::Error> {
+    let result_flush = if state.pending_result_flush.is_empty() {
+        Ok(())
+    } else {
+        flush_pending_results(db, scan_stream, scan_id, &mut state.pending_result_flush).await
+    };
     flush_pending_state_logs(db, scan_stream, scan_id, state).await;
+    streams.notify_scans();
+    result_flush
 }
 
 pub(super) async fn flush_pending_results(
     db: &SqlitePool,
-    streams: &StreamHub,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
     pending: &mut Vec<PendingResultPersist>,
-) {
-    if pending.is_empty() {
-        return;
+) -> Result<(), sqlx::Error> {
+    while !pending.is_empty() {
+        let mut attempt = 1;
+        loop {
+            match persist_pending_result_batch(db, scan_stream, scan_id, pending).await {
+                Ok(()) => break,
+                Err(err) if attempt < STORAGE_FLUSH_ATTEMPTS => {
+                    let delay_ms = STORAGE_FLUSH_BASE_DELAY_MS << (attempt - 1);
+                    warn!(
+                        target: "domain_scanner::queue",
+                        context = "storage",
+                        scan_id = %scan_id,
+                        error = %err,
+                        attempt,
+                        pending = pending.len(),
+                        retry_delay_ms = delay_ms,
+                        "result batch write failed; retaining it for retry"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    attempt += 1;
+                }
+                Err(err) => {
+                    error!(
+                        target: "domain_scanner::queue",
+                        context = "storage",
+                        scan_id = %scan_id,
+                        error = %err,
+                        attempts = attempt,
+                        pending = pending.len(),
+                        "result batch write retries exhausted; batch is still buffered"
+                    );
+                    return Err(err);
+                }
+            }
+        }
     }
 
-    let batch = std::mem::take(pending);
+    Ok(())
+}
+
+async fn persist_pending_result_batch(
+    db: &SqlitePool,
+    scan_stream: &broadcast::Sender<ScanStreamMessage>,
+    scan_id: &str,
+    pending: &mut Vec<PendingResultPersist>,
+) -> Result<(), sqlx::Error> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let batch_len = pending.len().min(RESULT_FLUSH_BATCH_SIZE);
 
     let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
         "INSERT OR REPLACE INTO results
             (scan_id, domain, available, registration_record_absent, purchasable, expiration_date, signatures) ",
     );
-    builder.push_values(batch.iter(), |mut row, result| {
+    builder.push_values(pending[..batch_len].iter(), |mut row, result| {
         row.push_bind(scan_id)
             .push_bind(&result.domain)
             // Never claim purchase availability through the legacy field.
@@ -767,43 +819,19 @@ pub(super) async fn flush_pending_results(
           expiration_date, signatures",
     );
 
-    match builder
+    let rows = builder
         .build_query_as::<ScanResultEvent>()
         .fetch_all(db)
-        .await
-    {
-        Ok(rows) => {
-            for row in rows {
-                if row.registration_record_absent {
-                    let _ = scan_stream.send(ScanStreamMessage::Result(row));
-                }
-            }
-        }
-        Err(err) => {
-            error!(
-                target: "domain_scanner::queue",
-                context = "storage",
-                scan_id = %scan_id,
-                error = %err,
-                batch_size = batch.len(),
-                "failed to persist result batch"
-            );
-            let _ = add_event_log(
-                db,
-                streams,
-                scan_id,
-                "ERROR",
-                "storage.result_batch_persist_failed",
-                None,
-                Some("Failed to persist result batch".to_string()),
-                vec![
-                    ("batch_size", json!(batch.len())),
-                    ("error", json!(err.to_string())),
-                ],
-            )
-            .await;
+        .await?;
+
+    pending.drain(..batch_len);
+    for row in rows {
+        if row.registration_record_absent {
+            let _ = scan_stream.send(ScanStreamMessage::Result(row));
         }
     }
+
+    Ok(())
 }
 
 async fn flush_pending_logs(
@@ -811,38 +839,66 @@ async fn flush_pending_logs(
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
     pending: &mut Vec<PendingLogPersist>,
-) {
-    if pending.is_empty() {
-        return;
+) -> Result<(), sqlx::Error> {
+    while !pending.is_empty() {
+        let mut attempt = 1;
+        loop {
+            match persist_pending_log_batch(db, scan_stream, scan_id, pending).await {
+                Ok(()) => break,
+                Err(err) if attempt < STORAGE_FLUSH_ATTEMPTS => {
+                    let delay_ms = STORAGE_FLUSH_BASE_DELAY_MS << (attempt - 1);
+                    warn!(
+                        target: "domain_scanner::queue",
+                        context = "scan_log",
+                        scan_id = %scan_id,
+                        error = %err,
+                        attempt,
+                        pending = pending.len(),
+                        retry_delay_ms = delay_ms,
+                        "scan log batch write failed; retaining it for retry"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
-    let batch = std::mem::take(pending);
+    Ok(())
+}
+
+async fn persist_pending_log_batch(
+    db: &SqlitePool,
+    scan_stream: &broadcast::Sender<ScanStreamMessage>,
+    scan_id: &str,
+    pending: &mut Vec<PendingLogPersist>,
+) -> Result<(), sqlx::Error> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let batch_len = pending.len().min(LOG_FLUSH_BATCH_SIZE);
     let mut builder: QueryBuilder<'_, Sqlite> =
         QueryBuilder::new("INSERT INTO scan_logs (scan_id, level, message) ");
-    builder.push_values(batch.iter(), |mut row, log| {
+    builder.push_values(pending[..batch_len].iter(), |mut row, log| {
         row.push_bind(scan_id)
             .push_bind(&log.level)
             .push_bind(&log.message);
     });
     builder.push(" RETURNING id, message, level, created_at");
 
-    match builder.build_query_as::<ScanLogEvent>().fetch_all(db).await {
-        Ok(inserted) => {
-            for log in inserted {
-                let _ = scan_stream.send(ScanStreamMessage::Log(log));
-            }
-        }
-        Err(err) => {
-            warn!(
-                target: "domain_scanner::queue",
-                context = "scan_log",
-                scan_id = %scan_id,
-                error = %err,
-                batch_size = batch.len(),
-                "failed to write scan log batch"
-            );
-        }
+    let inserted = builder
+        .build_query_as::<ScanLogEvent>()
+        .fetch_all(db)
+        .await?;
+
+    pending.drain(..batch_len);
+    for log in inserted {
+        let _ = scan_stream.send(ScanStreamMessage::Log(log));
     }
+
+    Ok(())
 }
 
 pub(super) fn rate_limited_service(res: &crate::DomainResult) -> Option<&'static str> {
@@ -865,5 +921,82 @@ pub(super) fn rate_limited_service(res: &crate::DomainResult) -> Option<&'static
         Some("doh")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn pending_result(domain: &str) -> PendingResultPersist {
+        PendingResultPersist {
+            domain: domain.to_string(),
+            registration_record_absent: true,
+            purchasable: None,
+            expiration_date: None,
+            signatures: "WHOIS".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn result_batch_is_only_removed_after_successful_insert() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE results (
+                scan_id TEXT,
+                domain TEXT,
+                available BOOLEAN,
+                registration_record_absent BOOLEAN,
+                purchasable BOOLEAN,
+                expiration_date TEXT,
+                signatures TEXT,
+                PRIMARY KEY (scan_id, domain)
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let (scan_stream, _) = broadcast::channel(4);
+        let mut pending = vec![pending_result("example.test")];
+
+        persist_pending_result_batch(&db, &scan_stream, "scan-1", &mut pending)
+            .await
+            .unwrap();
+
+        assert!(pending.is_empty());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM results")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn result_batch_is_retained_when_insert_fails() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let (scan_stream, _) = broadcast::channel(4);
+        let mut pending = vec![pending_result("example.test")];
+
+        let result = persist_pending_result_batch(&db, &scan_stream, "scan-1", &mut pending).await;
+
+        assert!(result.is_err());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].domain, "example.test");
+    }
+
+    #[tokio::test]
+    async fn log_batch_is_retained_when_insert_fails() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let (scan_stream, _) = broadcast::channel(4);
+        let mut pending = vec![PendingLogPersist {
+            level: "ERROR".to_string(),
+            message: "storage failure".to_string(),
+        }];
+
+        let result = persist_pending_log_batch(&db, &scan_stream, "scan-1", &mut pending).await;
+
+        assert!(result.is_err());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message, "storage failure");
     }
 }

@@ -58,10 +58,10 @@ pub fn generate_domains(
         if word.is_empty() {
             continue;
         }
-        if let Some(ref r) = regex {
-            if !r.is_match(&word) {
-                continue;
-            }
+        if let Some(ref r) = regex
+            && !r.is_match(&word)
+        {
+            continue;
         }
         if priority_set_raw.insert(word.clone()) {
             priority_lines.push(word);
@@ -76,7 +76,7 @@ pub fn generate_domains(
         let file =
             File::open(&dict_file).map_err(|e| format!("Error reading dictionary file: {}", e))?;
         let reader = BufReader::new(file);
-        let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+        let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
         total_estimated = count_filtered_dictionary_entries(&lines, regex.as_ref(), &priority_set);
 
         let tx = tx.clone();
@@ -109,10 +109,10 @@ pub fn generate_domains(
                     continue;
                 }
 
-                if let Some(ref r) = regex {
-                    if !r.is_match(word) {
-                        continue;
-                    }
+                if let Some(ref r) = regex
+                    && !r.is_match(word)
+                {
+                    continue;
                 }
 
                 if current_idx >= skip {
@@ -158,10 +158,8 @@ pub fn generate_domains(
 
             tokio::spawn(async move {
                 let skip = normalized_skip_count(skip_count);
-                let mut current_idx = 0;
-
                 // Priority Phase
-                for word in priority_lines {
+                for (current_idx, word) in priority_lines.into_iter().enumerate() {
                     if current_idx >= skip {
                         let domain = format!("{}{}", word, suffix);
                         if tx.send(domain).await.is_err() {
@@ -169,7 +167,6 @@ pub fn generate_domains(
                         }
                         generated_clone.fetch_add(1, Ordering::Relaxed);
                     }
-                    current_idx += 1;
                 }
 
                 // Regular Phase
@@ -227,10 +224,10 @@ async fn generate_combinations_iterative(
         }
 
         // Regex check
-        if let Some(ref r) = regex {
-            if !r.is_match(&current) {
-                continue;
-            }
+        if let Some(ref r) = regex
+            && !r.is_match(&current)
+        {
+            continue;
         }
 
         if actual_idx >= skip {
@@ -408,8 +405,12 @@ impl DictionaryCombinator {
     pub fn skip_to(&mut self, pos: usize) {
         self.set_position(pos);
     }
+}
 
-    pub fn next(&mut self) -> Option<String> {
+impl Iterator for DictionaryCombinator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
@@ -429,11 +430,11 @@ impl DictionaryCombinator {
                     }
                     idx_str.push(next);
                 }
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    if let Some(list) = self.word_lists.get(idx) {
-                        domain.push_str(&list[self.indices[idx]]);
-                        continue;
-                    }
+                if let Ok(idx) = idx_str.parse::<usize>()
+                    && let Some(list) = self.word_lists.get(idx)
+                {
+                    domain.push_str(&list[self.indices[idx]]);
+                    continue;
                 }
                 domain.push('{');
                 domain.push_str(&idx_str);

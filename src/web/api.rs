@@ -90,41 +90,41 @@ async fn start_scan(
     }
 
     // Validate multi-dictionary product against 2M cap
-    if let Some(dict_ids) = &payload.dictionary_ids {
-        if !dict_ids.is_empty() {
-            let mut total: usize = 1;
-            for dict_id in dict_ids {
-                match dictionary::get_dictionary(&state.db, dict_id).await {
-                    Ok(Some(d)) => {
-                        let wc = d.word_count as usize;
-                        total = total.saturating_mul(wc);
-                        if total > MAX_DICTIONARY_PRODUCT {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        return api_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("Dictionary not found: {}", dict_id),
-                        );
-                    }
-                    Err(e) => {
-                        return api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to load dictionary {}: {}", dict_id, e),
-                        );
+    if let Some(dict_ids) = &payload.dictionary_ids
+        && !dict_ids.is_empty()
+    {
+        let mut total: usize = 1;
+        for dict_id in dict_ids {
+            match dictionary::get_dictionary(&state.db, dict_id).await {
+                Ok(Some(d)) => {
+                    let wc = d.word_count as usize;
+                    total = total.saturating_mul(wc);
+                    if total > MAX_DICTIONARY_PRODUCT {
+                        break;
                     }
                 }
+                Ok(None) => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Dictionary not found: {}", dict_id),
+                    );
+                }
+                Err(e) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to load dictionary {}: {}", dict_id, e),
+                    );
+                }
             }
-            if total > MAX_DICTIONARY_PRODUCT {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Dictionary product {} exceeds maximum of {}",
-                        total, MAX_DICTIONARY_PRODUCT
-                    ),
-                );
-            }
+        }
+        if total > MAX_DICTIONARY_PRODUCT {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Dictionary product {} exceeds maximum of {}",
+                    total, MAX_DICTIONARY_PRODUCT
+                ),
+            );
         }
     }
 
@@ -1249,53 +1249,49 @@ struct RateLimitStatus {
 }
 
 async fn get_rate_limits() -> ApiResponse {
-    let mut limits = Vec::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    if let Ok(content) = std::fs::read_to_string("data/cache/rdap/rate_limits.json") {
-        if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(endpoints) = cache.get("endpoints").and_then(|v| v.as_object()) {
-                for (k, v) in endpoints {
-                    if let Some(cooldown) =
-                        v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64())
-                    {
-                        if cooldown > now {
-                            limits.push(RateLimitStatus {
-                                service: "RDAP".to_string(),
-                                endpoint: k.clone(),
-                                cooldown_remaining_secs: cooldown - now,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Ok(content) = std::fs::read_to_string("data/cache/whois/rate_limits.json") {
-        if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(servers) = cache.get("servers").and_then(|v| v.as_object()) {
-                for (k, v) in servers {
-                    if let Some(cooldown) =
-                        v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64())
-                    {
-                        if cooldown > now {
-                            limits.push(RateLimitStatus {
-                                service: "WHOIS".to_string(),
-                                endpoint: k.clone(),
-                                cooldown_remaining_secs: cooldown - now,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let mut limits =
+        load_cached_rate_limits("data/cache/rdap/rate_limits.json", "endpoints", "RDAP", now).await;
+    limits.extend(
+        load_cached_rate_limits("data/cache/whois/rate_limits.json", "servers", "WHOIS", now).await,
+    );
 
     Json(limits).into_response()
+}
+
+async fn load_cached_rate_limits(
+    path: &str,
+    collection: &str,
+    service: &str,
+    now: u64,
+) -> Vec<RateLimitStatus> {
+    let Ok(content) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(entries) = cache.get(collection).and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|(endpoint, value)| {
+            let cooldown = value
+                .get("cooldown_until_epoch_secs")
+                .and_then(|value| value.as_u64())?;
+            (cooldown > now).then(|| RateLimitStatus {
+                service: service.to_string(),
+                endpoint: endpoint.clone(),
+                cooldown_remaining_secs: cooldown - now,
+            })
+        })
+        .collect()
 }
 
 async fn get_settings(State(state): State<Arc<AppState>>) -> ApiResponse {

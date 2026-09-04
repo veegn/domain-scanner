@@ -32,6 +32,8 @@ async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
             n if n == "taken.alpha" || n.ends_with(".taken.alpha") => (
                 StatusCode::OK,
                 Json(serde_json::json!({
+                    "objectClassName": "domain",
+                    "ldhName": name,
                     "events": [
                         {
                             "eventAction": "expiration",
@@ -43,6 +45,8 @@ async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
             n if n == "taken.co.alpha" || n.ends_with(".taken.co.alpha") => (
                 StatusCode::OK,
                 Json(serde_json::json!({
+                    "objectClassName": "domain",
+                    "ldhName": name,
                     "events": [
                         {
                             "eventAction": "expiry",
@@ -54,7 +58,15 @@ async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
             "free.alpha" => (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
-                    "description": "Domain not found"
+                    "errorCode": 404,
+                    "title": "Not Found",
+                    "description": ["Domain not found"]
+                })),
+            ),
+            "unverified-404.alpha" => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "description": "Generic reverse proxy response"
                 })),
             ),
             "limited.alpha" => (
@@ -282,6 +294,13 @@ async fn test_rdap_mocked_check_registered_absent_and_rate_limited() {
     let free = checker.check("free.alpha").await;
     assert!(free.registration_record_absent);
     assert!(free.error.is_none());
+
+    let unverified = checker.check("unverified-404.alpha").await;
+    assert!(!unverified.registration_record_absent);
+    assert_eq!(
+        unverified.error.as_deref(),
+        Some("RDAP returned an unverified HTTP 404 response")
+    );
 
     let limited = checker.check("limited.alpha").await;
     assert!(limited.rate_limited);
@@ -873,6 +892,34 @@ async fn test_registry_keeps_authoritative_no_record_before_whois_failure() {
 }
 
 #[tokio::test]
+async fn test_registry_falls_back_to_whois_after_unverified_rdap_404() {
+    let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
+
+    let config = AppConfig {
+        rdap_bootstrap_url: Some(bootstrap_url),
+        whois_servers: [("alpha".to_string(), "127.0.0.1:9".to_string())]
+            .into_iter()
+            .collect(),
+        ..AppConfig::default()
+    };
+
+    let registry =
+        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let result = registry.check("unverified-404.alpha").await;
+
+    assert!(!result.registration_record_absent);
+    assert!(
+        result
+            .trace
+            .iter()
+            .any(|step| step.starts_with("RDAP: unverified HTTP 404"))
+    );
+    assert!(result.trace.iter().any(|step| step.starts_with("WHOIS:")));
+
+    handle.abort();
+}
+
+#[tokio::test]
 async fn test_registry_reserved_domain_stops_early() {
     let registry =
         CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
@@ -1412,8 +1459,10 @@ fn test_config_save_does_not_overwrite() {
 
 #[test]
 fn test_config_serialization_roundtrip() {
-    let mut config = AppConfig::default();
-    config.doh_servers = vec!["https://server1.com".to_string()];
+    let mut config = AppConfig {
+        doh_servers: vec!["https://server1.com".to_string()],
+        ..AppConfig::default()
+    };
     config
         .whois_servers
         .insert("com".to_string(), "whois.example.com".to_string());

@@ -246,23 +246,20 @@ impl PendingScanTask {
 
         Self {
             scan_id,
-            params: {
-                let params = StartScanRequest {
-                    length: row.try_get::<i64, _>("length").unwrap_or(0) as usize,
-                    suffix: row.try_get("suffix").unwrap_or_default(),
-                    pattern: row.try_get("pattern").unwrap_or_default(),
-                    regex: row.try_get("regex").unwrap_or(None),
-                    priority_words: serde_json::from_str(&priority_words_json).unwrap_or(None),
-                    domains: serde_json::from_str(&domains_json).unwrap_or(None),
-                    dictionary_words: serde_json::from_str(&dictionary_words_json).unwrap_or(None),
-                    dictionary_id: row.try_get("dictionary_id").unwrap_or(None),
-                    dictionary_ids: serde_json::from_str(&dictionary_ids_json).unwrap_or(None),
-                    separator: row.try_get("separator").unwrap_or(None),
-                    format_template: row.try_get("format_template").unwrap_or(None),
-                    prefix: row.try_get("prefix").unwrap_or(None),
-                    postfix: row.try_get("postfix").unwrap_or(None),
-                };
-                params
+            params: StartScanRequest {
+                length: row.try_get::<i64, _>("length").unwrap_or(0) as usize,
+                suffix: row.try_get("suffix").unwrap_or_default(),
+                pattern: row.try_get("pattern").unwrap_or_default(),
+                regex: row.try_get("regex").unwrap_or(None),
+                priority_words: serde_json::from_str(&priority_words_json).unwrap_or(None),
+                domains: serde_json::from_str(&domains_json).unwrap_or(None),
+                dictionary_words: serde_json::from_str(&dictionary_words_json).unwrap_or(None),
+                dictionary_id: row.try_get("dictionary_id").unwrap_or(None),
+                dictionary_ids: serde_json::from_str(&dictionary_ids_json).unwrap_or(None),
+                separator: row.try_get("separator").unwrap_or(None),
+                format_template: row.try_get("format_template").unwrap_or(None),
+                prefix: row.try_get("prefix").unwrap_or(None),
+                postfix: row.try_get("postfix").unwrap_or(None),
             },
             scheduler_key: row
                 .try_get::<Option<String>, _>("scheduler_key")

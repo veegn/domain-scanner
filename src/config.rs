@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     /// DoH server URLs for DNS-over-HTTPS lookups (load-balanced round-robin).
     /// Leave empty to use built-in defaults (AliDNS, DNSPod, Google, Cloudflare).
@@ -72,19 +72,6 @@ pub struct SchedulerConfig {
     pub max_global_checks: usize,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            doh_servers: Vec::new(),
-            whois_servers: HashMap::new(),
-            rdap_servers: HashMap::new(),
-            rdap_bootstrap_url: None,
-            logging: LoggingConfig::default(),
-            scheduler: SchedulerConfig::default(),
-        }
-    }
-}
-
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -141,10 +128,10 @@ impl AppConfig {
     }
 
     pub fn save_default_if_not_exists(path: &str) {
-        if !Path::new(path).exists() {
-            if let Ok(content) = serde_json::to_string_pretty(&Self::default()) {
-                let _ = fs::write(path, content);
-            }
+        if !Path::new(path).exists()
+            && let Ok(content) = serde_json::to_string_pretty(&Self::default())
+        {
+            let _ = fs::write(path, content);
         }
     }
 }

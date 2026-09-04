@@ -80,10 +80,20 @@ struct WhoisServerThrottle {
     next_allowed_at: Instant,
 }
 
+type WhoisThrottleMap = HashMap<String, Arc<Mutex<WhoisServerThrottle>>>;
+
 #[derive(Debug, Clone, Copy)]
 struct RateLimitHint {
     retry_after: Option<Duration>,
     min_interval: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhoisResponseClassification {
+    Registered,
+    NoRegistrationRecord,
+    Conflicting,
+    Inconclusive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,9 +259,7 @@ impl WhoisChecker {
         if let Some(min_interval) = hint.min_interval {
             guard.min_interval = guard.min_interval.max(min_interval);
         } else {
-            let next_ms = ((guard.min_interval.as_millis() as u64) * 2)
-                .max(2_000)
-                .min(60_000);
+            let next_ms = ((guard.min_interval.as_millis() as u64) * 2).clamp(2_000, 60_000);
             guard.min_interval = Duration::from_millis(next_ms);
         }
 
@@ -317,16 +325,13 @@ impl WhoisChecker {
 
         let addr_str = format!("{}:43", server_host);
 
-        match tokio::net::lookup_host(&addr_str).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    let ip = addr.ip();
-                    let mut cache = self.ip_cache.write().await;
-                    cache.insert(server_host.to_string(), ip);
-                    return Some(ip);
-                }
-            }
-            Err(_) => {}
+        if let Ok(mut addrs) = tokio::net::lookup_host(&addr_str).await
+            && let Some(addr) = addrs.next()
+        {
+            let ip = addr.ip();
+            let mut cache = self.ip_cache.write().await;
+            cache.insert(server_host.to_string(), ip);
+            return Some(ip);
         }
         warn!(
             target: "domain_scanner::checker::whois",
@@ -369,45 +374,106 @@ impl WhoisChecker {
         Ok(buffer)
     }
 
-    fn has_explicit_no_registration_record(&self, response: &str) -> bool {
-        let lower = response.to_lowercase();
-        lower.contains("no match")
-            || lower.contains("not found")
-            || lower.contains("no entries found")
-            || lower.contains("status: free")
-            || lower.contains("domain not found")
-            || lower.contains("no matching record")
-            || lower.contains("no data found")
-            || lower.contains("object does not exist")
-            || lower.contains("is available for registration")
-            || lower.contains("available for registration")
-            || lower.contains("currently available for application")
-            || lower.contains("available for application")
+    fn has_explicit_no_registration_record(&self, response: &str, domain: &str) -> bool {
+        let domain = normalize_domain_value(domain);
+        let lines: Vec<String> = response
+            .lines()
+            .map(normalize_whois_line)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        let domain_field_matches = lines.iter().any(|line| {
+            whois_field(line)
+                .filter(|(field, _)| matches!(*field, "domain" | "domain name"))
+                .map(|(_, value)| normalize_domain_value(value) == domain)
+                .unwrap_or(false)
+        });
+        let status_is_free = lines.iter().any(|line| {
+            whois_field(line)
+                .filter(|(field, _)| *field == "status")
+                .map(|(_, value)| value.trim().eq_ignore_ascii_case("free"))
+                .unwrap_or(false)
+        });
+
+        if domain_field_matches && status_is_free {
+            return true;
+        }
+
+        lines.iter().any(|line| {
+            let without_period = line.trim_end_matches('.');
+            matches!(
+                without_period,
+                "not found"
+                    | "no match"
+                    | "no entries found"
+                    | "no matching record"
+                    | "no data found"
+                    | "domain not found"
+            ) || ((without_period.starts_with("no match for")
+                || without_period.starts_with("not found:")
+                || without_period.starts_with("domain not found:")
+                || without_period.starts_with("the queried object does not exist:"))
+                && line_mentions_domain(without_period, &domain))
+                || (without_period.starts_with("domain ")
+                    && (without_period.ends_with(" is available for registration")
+                        || without_period.ends_with(" is currently available for registration"))
+                    && line_mentions_domain(without_period, &domain))
+                || without_period.starts_with(
+                    "this domain is currently available for application via the identity digital dropzone service",
+                )
+        })
     }
 
-    fn is_registered(&self, response: &str) -> bool {
-        let lower = response.to_ascii_lowercase();
-        [
-            "domain name:",
-            "registrar:",
-            "registered on:",
-            "registration time:",
-            "creation date:",
-            "expiry date:",
-            "expiration date:",
-            "domain status:",
-            "name servers:",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker))
-            || lower.lines().any(|line| {
-                let Some((field, value)) = line.trim().split_once(':') else {
-                    return false;
-                };
+    fn is_registered(&self, response: &str, domain: &str) -> bool {
+        let domain = normalize_domain_value(domain);
+        let lines: Vec<String> = response
+            .lines()
+            .map(normalize_whois_line)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let domain_field_matches = lines.iter().any(|line| {
+            whois_field(line)
+                .filter(|(field, _)| matches!(*field, "domain" | "domain name"))
+                .map(|(_, value)| normalize_domain_value(value) == domain)
+                .unwrap_or(false)
+        });
 
-                field.trim() == "status"
-                    && matches!(value.trim(), "connect" | "inactive" | "redemptionperiod")
+        domain_field_matches
+            && lines.iter().any(|line| {
+                whois_field(line)
+                    .map(|(field, value)| {
+                        !value.trim().is_empty()
+                            && matches!(
+                                field,
+                                "registrar"
+                                    | "registered on"
+                                    | "registration time"
+                                    | "creation date"
+                                    | "expiry date"
+                                    | "expiration date"
+                                    | "registry expiry date"
+                                    | "domain status"
+                                    | "name server"
+                                    | "name servers"
+                            )
+                            || (field == "status"
+                                && !value.trim().eq_ignore_ascii_case("free")
+                                && !value.trim().is_empty())
+                    })
+                    .unwrap_or(false)
             })
+    }
+
+    fn classify_response(&self, response: &str, domain: &str) -> WhoisResponseClassification {
+        match (
+            self.has_explicit_no_registration_record(response, domain),
+            self.is_registered(response, domain),
+        ) {
+            (true, true) => WhoisResponseClassification::Conflicting,
+            (true, false) => WhoisResponseClassification::NoRegistrationRecord,
+            (false, true) => WhoisResponseClassification::Registered,
+            (false, false) => WhoisResponseClassification::Inconclusive,
+        }
     }
 
     fn is_rate_limited(&self, response: &str) -> bool {
@@ -461,10 +527,10 @@ impl WhoisChecker {
 
     fn extract_expiry(&self, response: &str) -> Option<String> {
         for re in expiry_regexes() {
-            if let Some(caps) = re.captures(response) {
-                if let Some(m) = caps.get(1) {
-                    return Some(m.as_str().trim().to_string());
-                }
+            if let Some(caps) = re.captures(response)
+                && let Some(m) = caps.get(1)
+            {
+                return Some(m.as_str().trim().to_string());
             }
         }
         None
@@ -485,10 +551,7 @@ fn normalize_server_map(custom_servers: HashMap<String, String>) -> HashMap<Stri
 
 fn load_cached_throttles(
     cache_path: &Path,
-) -> (
-    HashMap<String, WhoisRateLimitCacheEntry>,
-    HashMap<String, Arc<Mutex<WhoisServerThrottle>>>,
-) {
+) -> (HashMap<String, WhoisRateLimitCacheEntry>, WhoisThrottleMap) {
     let cache_entries = read_rate_limit_cache(cache_path);
     let throttles = cache_entries
         .iter()
@@ -558,9 +621,9 @@ impl DomainChecker for WhoisChecker {
                     .with_trace(format!("WHOIS: empty response via {}", server));
                 }
 
-                if self.is_rate_limited(&response) {
+                if self.is_rate_limited(response) {
                     self.cb.record_failure();
-                    let hint = self.sniff_rate_limit_hint(&response);
+                    let hint = self.sniff_rate_limit_hint(response);
                     let retry_after = self.record_rate_limit(server, hint).await;
                     warn!(
                         target: "domain_scanner::checker::whois",
@@ -577,29 +640,41 @@ impl DomainChecker for WhoisChecker {
                     .with_trace(format!("WHOIS: rate limited via {}", server));
                 }
 
-                if self.has_explicit_no_registration_record(&response) {
-                    self.cb.record_success();
-                    self.record_success(server).await;
-                    CheckResult::no_registration_record()
-                        .with_trace(format!("WHOIS: no registration record via {}", server))
-                } else if self.is_registered(&response) {
-                    self.cb.record_success();
-                    self.record_success(server).await;
-                    let expiry = self.extract_expiry(&response);
-                    CheckResult::registered_with_expiry(vec!["WHOIS".to_string()], expiry)
-                        .with_trace(format!("WHOIS: registered via {}", server))
-                } else {
-                    self.cb.record_failure();
-                    warn!(
-                        target: "domain_scanner::checker::whois",
-                        context = "query",
-                        domain,
-                        server,
-                        response_preview = %response.chars().take(120).collect::<String>(),
-                        "WHOIS returned inconclusive response"
-                    );
-                    CheckResult::error(format!("WHOIS inconclusive response from {}", server))
-                        .with_trace(format!("WHOIS: inconclusive via {}", server))
+                match self.classify_response(response, domain) {
+                    WhoisResponseClassification::NoRegistrationRecord => {
+                        self.cb.record_success();
+                        self.record_success(server).await;
+                        CheckResult::no_registration_record()
+                            .with_trace(format!("WHOIS: no registration record via {}", server))
+                    }
+                    WhoisResponseClassification::Registered => {
+                        self.cb.record_success();
+                        self.record_success(server).await;
+                        let expiry = self.extract_expiry(response);
+                        CheckResult::registered_with_expiry(vec!["WHOIS".to_string()], expiry)
+                            .with_trace(format!("WHOIS: registered via {}", server))
+                    }
+                    classification => {
+                        self.cb.record_failure();
+                        warn!(
+                            target: "domain_scanner::checker::whois",
+                            context = "query",
+                            domain,
+                            server,
+                            ?classification,
+                            response_preview = %response.chars().take(120).collect::<String>(),
+                            "WHOIS response did not provide unambiguous registration evidence"
+                        );
+                        CheckResult::error(format!(
+                            "WHOIS {} response from {}",
+                            match classification {
+                                WhoisResponseClassification::Conflicting => "conflicting",
+                                _ => "inconclusive",
+                            },
+                            server
+                        ))
+                        .with_trace(format!("WHOIS: {:?} via {}", classification, server))
+                    }
                 }
             }
             Err(e) => {
@@ -646,11 +721,39 @@ impl DomainChecker for WhoisChecker {
     }
 }
 
+fn normalize_whois_line(line: &str) -> String {
+    line.trim()
+        .trim_start_matches('>')
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn normalize_domain_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '.'
+        })
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn whois_field(line: &str) -> Option<(&str, &str)> {
+    let (field, value) = line.split_once(':')?;
+    Some((field.trim(), value.trim()))
+}
+
+fn line_mentions_domain(line: &str, domain: &str) -> bool {
+    line.split_whitespace()
+        .map(normalize_domain_value)
+        .any(|token| token == domain)
+}
+
 fn parse_server_endpoint(endpoint: &str) -> (String, u16) {
-    if let Some((host, port)) = endpoint.rsplit_once(':') {
-        if let Ok(port) = port.parse::<u16>() {
-            return (host.to_string(), port);
-        }
+    if let Some((host, port)) = endpoint.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return (host.to_string(), port);
     }
 
     (endpoint.to_string(), 43)
@@ -810,21 +913,23 @@ mod tests {
         let checker = WhoisChecker::new();
         let response =
             "Domain Name: GOOGLE.COM\nRegistrar: MarkMonitor Inc.\nName Server: NS1.GOOGLE.COM";
-        assert!(checker.is_registered(response));
+        assert!(checker.is_registered(response, "google.com"));
     }
 
     #[test]
     fn test_empty_response_is_not_registered() {
         let checker = WhoisChecker::new();
-        assert!(!checker.is_registered(""));
-        assert!(!checker.has_explicit_no_registration_record(""));
+        assert!(!checker.is_registered("", "example.test"));
+        assert!(!checker.has_explicit_no_registration_record("", "example.test"));
     }
 
     #[test]
     fn test_free_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
-        assert!(checker.has_explicit_no_registration_record("No match for domain \"4TB.UK\""));
-        assert!(!checker.is_registered("No match for domain \"4TB.UK\""));
+        assert!(
+            checker.has_explicit_no_registration_record("No match for domain \"4TB.UK\"", "4tb.uk")
+        );
+        assert!(!checker.is_registered("No match for domain \"4TB.UK\"", "4tb.uk"));
     }
 
     #[test]
@@ -832,8 +937,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Domain: l1p.de\nStatus: connect";
 
-        assert!(!checker.has_explicit_no_registration_record(response));
-        assert!(checker.is_registered(response));
+        assert!(!checker.has_explicit_no_registration_record(response, "l1p.de"));
+        assert!(checker.is_registered(response, "l1p.de"));
     }
 
     #[test]
@@ -841,8 +946,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Domain: xue.de\nStatus: redemptionPeriod";
 
-        assert!(!checker.has_explicit_no_registration_record(response));
-        assert!(checker.is_registered(response));
+        assert!(!checker.has_explicit_no_registration_record(response, "xue.de"));
+        assert!(checker.is_registered(response, "xue.de"));
     }
 
     #[test]
@@ -850,8 +955,10 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Domain: definitely-free-example.de\nStatus: free";
 
-        assert!(checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(
+            checker.has_explicit_no_registration_record(response, "definitely-free-example.de")
+        );
+        assert!(!checker.is_registered(response, "definitely-free-example.de"));
     }
 
     #[test]
@@ -859,8 +966,39 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Status Codes:\nhttps://icann.org/epp#clientTransferProhibited";
 
-        assert!(!checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(!checker.has_explicit_no_registration_record(response, "example.com"));
+        assert!(!checker.is_registered(response, "example.com"));
+    }
+
+    #[test]
+    fn test_no_record_words_in_disclaimer_do_not_override_registration_evidence() {
+        let checker = WhoisChecker::new();
+        let response =
+            "Domain Name: EXAMPLE.COM\nRegistrar: Example Registrar\nHelp: documentation not found";
+
+        assert_eq!(
+            checker.classify_response(response, "example.com"),
+            WhoisResponseClassification::Registered
+        );
+    }
+
+    #[test]
+    fn test_conflicting_whois_evidence_is_inconclusive() {
+        let checker = WhoisChecker::new();
+        let response = "No match for domain example.com\nDomain Name: EXAMPLE.COM\nRegistrar: Example Registrar";
+
+        assert_eq!(
+            checker.classify_response(response, "example.com"),
+            WhoisResponseClassification::Conflicting
+        );
+    }
+
+    #[test]
+    fn test_no_record_response_must_reference_requested_domain() {
+        let checker = WhoisChecker::new();
+        let response = "No match for domain another.example";
+
+        assert!(!checker.has_explicit_no_registration_record(response, "example.com"));
     }
 
     #[test]
@@ -868,8 +1006,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = ">>> Domain asi.fun is available for registration\n\n>>> Please visit https://rdap.radix.host/registrars/ for a list of accredited registrars";
 
-        assert!(checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(checker.has_explicit_no_registration_record(response, "asi.fun"));
+        assert!(!checker.is_registered(response, "asi.fun"));
     }
 
     #[test]
@@ -877,8 +1015,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "This domain is currently available for application via the Identity Digital Dropzone service.\n>>> Last update of WHOIS database";
 
-        assert!(checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(checker.has_explicit_no_registration_record(response, "example.foo"));
+        assert!(!checker.is_registered(response, "example.foo"));
     }
 
     #[test]
@@ -886,8 +1024,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "No Data Found\nURL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/\n>>> Last update of WHOIS database";
 
-        assert!(checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(checker.has_explicit_no_registration_record(response, "example.us"));
+        assert!(!checker.is_registered(response, "example.us"));
     }
 
     #[test]
@@ -895,8 +1033,8 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "The queried object does not exist: abj.top\n>>> Last update of WHOIS database: 2026-06-07T06:28:25Z <<<\n\nStatus Codes:";
 
-        assert!(checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(checker.has_explicit_no_registration_record(response, "abj.top"));
+        assert!(!checker.is_registered(response, "abj.top"));
     }
 
     #[test]
@@ -919,8 +1057,8 @@ mod tests {
         assert!(checker.is_rate_limited(response));
         assert_eq!(hint.retry_after, Some(Duration::from_secs(9156)));
         assert_eq!(hint.min_interval, None);
-        assert!(!checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(!checker.has_explicit_no_registration_record(response, "4tk.uk"));
+        assert!(!checker.is_registered(response, "4tk.uk"));
     }
 
     #[test]
@@ -929,8 +1067,8 @@ mod tests {
         let response = "Requests of this client are not permitted. Please use https://www.nic.ch/whois/ for queries.";
 
         assert!(checker.is_rate_limited(response));
-        assert!(!checker.has_explicit_no_registration_record(response));
-        assert!(!checker.is_registered(response));
+        assert!(!checker.has_explicit_no_registration_record(response, "example.ch"));
+        assert!(!checker.is_registered(response, "example.ch"));
     }
 
     #[test]

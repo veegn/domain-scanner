@@ -293,9 +293,7 @@ impl StartScanRequest {
             }
 
             let has_fragments = dict_words.iter().any(|w| !w.contains('.'));
-            if has_fragments {
-                validate_suffix(&self.suffix)?;
-            } else if !self.suffix.is_empty() {
+            if has_fragments || !self.suffix.is_empty() {
                 validate_suffix(&self.suffix)?;
             }
 

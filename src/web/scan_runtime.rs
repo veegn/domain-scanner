@@ -11,10 +11,9 @@ use crate::worker;
 use async_channel::{Sender as JobSender, bounded};
 use serde_json::json;
 use sqlx::sqlite::SqlitePool;
-use sqlx::{QueryBuilder, Sqlite};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::sync::{broadcast, mpsc};
 use tracing::error;
@@ -239,7 +238,6 @@ pub(super) async fn run_scan_logic(
 
                 handle_completed_result(
                     db,
-                    streams,
                     &scan_stream,
                     scan_id,
                     total,
@@ -259,8 +257,24 @@ pub(super) async fn run_scan_logic(
         }
     }
 
-    flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await;
-    persist_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
+    queue_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
+    if let Err(err) = flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await {
+        transition_after_storage_failure(
+            db,
+            streams,
+            &scan_stream,
+            scan_id,
+            total,
+            TaskControl::signal(&task_signal),
+            &state,
+            &err,
+        )
+        .await;
+        let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
+        streams.cleanup_scan(scan_id).await;
+        task_control.unregister(scan_id);
+        return;
+    }
 
     let signal = TaskControl::signal(&task_signal);
     let (status, log_event, log_msg, log_fields) = match signal {
@@ -540,7 +554,6 @@ async fn handle_retryable_result(
 
 async fn handle_completed_result(
     db: &SqlitePool,
-    streams: &StreamHub,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
     total: i64,
@@ -619,15 +632,18 @@ async fn handle_completed_result(
             signatures: res.signatures.join(","),
         });
 
-    if state.pending_result_flush.len() >= super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE {
-        flush_pending_results(
-            db,
-            streams,
-            scan_stream,
-            scan_id,
-            &mut state.pending_result_flush,
-        )
-        .await;
+    if state.pending_result_flush.len() >= super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE
+        && let Err(err) =
+            flush_pending_results(db, scan_stream, scan_id, &mut state.pending_result_flush).await
+    {
+        error!(
+            target: "domain_scanner::queue",
+            context = "storage",
+            scan_id = %scan_id,
+            error = %err,
+            pending = state.pending_result_flush.len(),
+            "continuing scan with the failed result batch retained in memory"
+        );
     }
 
     persist_scan_progress_if_needed(db, scan_stream, scan_id, task_signal, state).await;
@@ -647,40 +663,42 @@ async fn persist_scan_progress_if_needed(
         return;
     }
 
-    if let Err(err) = sqlx::query("UPDATE scans SET processed = ?, found = ? WHERE id = ?")
+    match sqlx::query("UPDATE scans SET processed = ?, found = ? WHERE id = ?")
         .bind(state.processed)
         .bind(state.found)
         .bind(scan_id)
         .execute(db)
         .await
     {
-        error!(
-            target: "domain_scanner::queue",
-            context = "storage",
-            scan_id = %scan_id,
-            processed = state.processed,
-            found = state.found,
-            error = %err,
-            "failed to persist counters"
-        );
-        let _ = queue_event_log(
-            &mut state.pending_log_flush,
-            db,
-            scan_stream,
-            scan_id,
-            "ERROR",
-            "storage.counters_persist_failed",
-            None,
-            Some("Failed to persist counters".to_string()),
-            vec![
-                ("processed", json!(state.processed)),
-                ("found", json!(state.found)),
-                ("error", json!(err.to_string())),
-            ],
-        )
-        .await;
+        Ok(_) => state.last_persisted = state.processed,
+        Err(err) => {
+            error!(
+                target: "domain_scanner::queue",
+                context = "storage",
+                scan_id = %scan_id,
+                processed = state.processed,
+                found = state.found,
+                error = %err,
+                "failed to persist counters"
+            );
+            let _ = queue_event_log(
+                &mut state.pending_log_flush,
+                db,
+                scan_stream,
+                scan_id,
+                "ERROR",
+                "storage.counters_persist_failed",
+                None,
+                Some("Failed to persist counters".to_string()),
+                vec![
+                    ("processed", json!(state.processed)),
+                    ("found", json!(state.found)),
+                    ("error", json!(err.to_string())),
+                ],
+            )
+            .await;
+        }
     }
-    state.last_persisted = state.processed;
 }
 
 async fn publish_running_status_if_needed(
@@ -712,7 +730,7 @@ async fn publish_running_status_if_needed(
     }
 }
 
-async fn persist_exhausted_retries(
+async fn queue_exhausted_retries(
     db: &SqlitePool,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
@@ -748,50 +766,16 @@ async fn persist_exhausted_retries(
         .await;
     }
 
-    // Persist the exhausted results in batches rather than one INSERT per
-    // domain, mirroring the main result-flush path.
-    for chunk in exhausted.chunks(super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE) {
-        let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
-            "INSERT OR REPLACE INTO results
-                (scan_id, domain, available, registration_record_absent, purchasable, expiration_date, signatures) ",
-        );
-        builder.push_values(chunk.iter(), |mut row, res| {
-            row.push_bind(scan_id)
-                .push_bind(&res.domain)
-                .push_bind(false)
-                .push_bind(false)
-                .push_bind(Option::<bool>::None)
-                .push_bind(Option::<String>::None)
-                .push_bind("");
-        });
-        builder.push(
-            " RETURNING rowid as event_id, domain, registration_record_absent, purchasable,
-              expiration_date, signatures",
-        );
-
-        match builder
-            .build_query_as::<crate::web::models::ScanResultEvent>()
-            .fetch_all(db)
-            .await
-        {
-            Ok(rows) => {
-                for row in rows {
-                    if row.registration_record_absent {
-                        let _ = scan_stream.send(ScanStreamMessage::Result(row));
-                    }
-                }
-            }
-            Err(err) => {
-                error!(
-                    target: "domain_scanner::queue",
-                    context = "storage",
-                    scan_id = %scan_id,
-                    error = %err,
-                    batch_size = chunk.len(),
-                    "failed to persist exhausted exception result batch"
-                );
-            }
-        }
+    for res in exhausted {
+        state
+            .pending_result_flush
+            .push(super::scan_runtime_support::PendingResultPersist {
+                domain: res.domain,
+                registration_record_absent: false,
+                purchasable: None,
+                expiration_date: None,
+                signatures: String::new(),
+            });
     }
 
     flush_pending_state_logs(db, scan_stream, scan_id, state).await;
@@ -805,4 +789,78 @@ async fn persist_exhausted_retries(
         0,
     )
     .await;
+}
+
+async fn transition_after_storage_failure(
+    db: &SqlitePool,
+    streams: &StreamHub,
+    scan_stream: &broadcast::Sender<ScanStreamMessage>,
+    scan_id: &str,
+    total: i64,
+    signal: TaskSignal,
+    state: &ScanRuntimeState,
+    error: &sqlx::Error,
+) {
+    let (status, retry_not_before) = match signal {
+        TaskSignal::Run => (
+            "pending",
+            Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+                    + 30,
+            ),
+        ),
+        TaskSignal::Pause => ("paused", None),
+        TaskSignal::Cancel => ("cancelled", None),
+    };
+    let (persisted_processed, persisted_found) =
+        get_result_counts(db, scan_id).await.unwrap_or((0, 0));
+
+    error!(
+        target: "domain_scanner::queue",
+        context = "storage",
+        scan_id = %scan_id,
+        error = %error,
+        buffered_results = state.pending_result_flush.len(),
+        next_status = status,
+        "scan finalization stopped because result persistence did not complete"
+    );
+
+    if let Err(status_error) = sqlx::query(
+        "UPDATE scans
+         SET status = ?, processed = ?, found = ?, retry_not_before = ?,
+             finished_at = CASE WHEN ? = 'cancelled' THEN CURRENT_TIMESTAMP ELSE NULL END
+         WHERE id = ?",
+    )
+    .bind(status)
+    .bind(persisted_processed)
+    .bind(persisted_found)
+    .bind(retry_not_before)
+    .bind(status)
+    .bind(scan_id)
+    .execute(db)
+    .await
+    {
+        error!(
+            target: "domain_scanner::queue",
+            context = "storage",
+            scan_id = %scan_id,
+            error = %status_error,
+            "failed to place scan into a recoverable state after storage failure"
+        );
+    }
+
+    publish_scan_status(
+        scan_stream,
+        scan_id,
+        status,
+        total,
+        persisted_processed,
+        persisted_found,
+        0,
+    )
+    .await;
+    streams.notify_scans();
 }

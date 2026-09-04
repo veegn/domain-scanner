@@ -21,6 +21,12 @@ pub struct CheckerRegistry {
     checkers: Vec<Arc<dyn DomainChecker>>,
 }
 
+impl Default for CheckerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CheckerRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
@@ -144,11 +150,8 @@ impl CheckerRegistry {
                         domain,
                         error = %err,
                         retryable = result.retryable,
-                        "stopping pipeline on authoritative checker error"
+                        "authoritative checker failed; trying the next supported checker"
                     );
-                    let mut result = result;
-                    result.trace = trace_log;
-                    return result;
                 }
                 continue; // Try next checker on error
             }

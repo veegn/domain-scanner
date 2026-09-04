@@ -1,0 +1,3 @@
+# Orchestration boundaries intentionally pass explicit runtime dependencies.
+# Keep the threshold finite so accidental argument growth still fails CI.
+too-many-arguments-threshold = 10

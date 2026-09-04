@@ -41,25 +41,25 @@ pub fn init(config: &LoggingConfig) {
     };
 
     let mut file_layer = None;
-    if config.file_enabled {
-        if let Some((writer, guard)) = build_file_writer(config) {
-            file_layer = Some(
-                fmt::layer()
-                    .with_ansi(false)
-                    .with_timer(timer)
-                    .with_target(true)
-                    .with_level(true)
-                    .with_thread_ids(false)
-                    .with_thread_names(false)
-                    .compact()
-                    .with_writer(writer)
-                    .boxed(),
-            );
+    if config.file_enabled
+        && let Some((writer, guard)) = build_file_writer(config)
+    {
+        file_layer = Some(
+            fmt::layer()
+                .with_ansi(false)
+                .with_timer(timer)
+                .with_target(true)
+                .with_level(true)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .compact()
+                .with_writer(writer)
+                .boxed(),
+        );
 
-            let guard_slot = FILE_GUARD.get_or_init(|| Mutex::new(None));
-            if let Ok(mut slot) = guard_slot.lock() {
-                *slot = Some(guard);
-            }
+        let guard_slot = FILE_GUARD.get_or_init(|| Mutex::new(None));
+        if let Ok(mut slot) = guard_slot.lock() {
+            *slot = Some(guard);
         }
     }
 
