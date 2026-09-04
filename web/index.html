@@ -422,7 +422,7 @@
 <body class="bg-gray-50 p-4 md:p-8 flex flex-col min-h-screen text-gray-800">
     <div class="max-w-7xl mx-auto w-full flex-grow">
         <!-- Header Section -->
-        <header class="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <header class="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div class="flex items-center space-x-4">
                 <div class="bg-blue-600 text-white p-2.5 rounded-xl shadow-lg ring-4 ring-blue-50">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24"
@@ -440,19 +440,23 @@
                     </p>
                 </div>
             </div>
-            <div
-                class="hidden md:flex items-center space-x-2 text-xs font-mono text-gray-400 bg-white px-3 py-1.5 rounded-full border border-gray-100 shadow-sm">
-                <span>API Status:</span>
-                <span class="text-green-600 font-bold">STABLE</span>
+            <div class="flex flex-wrap items-center gap-2 sm:gap-3 lg:justify-end">
+                <div
+                    class="hidden h-10 items-center gap-2 whitespace-nowrap rounded-xl border border-gray-100 bg-white px-4 text-xs font-mono text-gray-400 shadow-sm md:inline-flex">
+                    <span>API Status:</span>
+                    <span class="font-bold text-green-600">STABLE</span>
+                </div>
+                <nav aria-label="Primary" class="flex flex-wrap items-center gap-2">
+                    <a href="published.html"
+                        class="inline-flex h-10 items-center justify-center whitespace-nowrap rounded-xl border border-gray-100 bg-white px-4 text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 shadow-sm transition-colors hover:border-blue-200 hover:text-blue-700">
+                        Public Releases
+                    </a>
+                    <a href="settings.html"
+                        class="inline-flex h-10 items-center justify-center whitespace-nowrap rounded-xl border border-gray-100 bg-white px-4 text-[10px] font-black uppercase tracking-[0.22em] text-gray-600 shadow-sm transition-colors hover:border-blue-200 hover:text-blue-600">
+                        Settings
+                    </a>
+                </nav>
             </div>
-            <a href="published.html"
-                class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-blue-600 hover:text-blue-700 hover:border-blue-200 transition-colors">
-                Public Releases
-            </a>
-            <a href="settings.html"
-                class="inline-flex items-center justify-center bg-white px-4 py-2 rounded-xl border border-gray-100 shadow-sm text-[10px] font-black uppercase tracking-[0.22em] text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-colors">
-                Settings
-            </a>
         </header>
 
         <!-- Rate Limit Banner -->
@@ -737,7 +741,7 @@
                         <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
                             <div>
                                 <h2 class="text-xl font-black text-gray-900">Unregistered Candidates</h2>
-                                <p class="text-xs text-amber-600 mt-1">No registration record was found. Purchase availability is not confirmed.</p>
+                                <p id="candidateNotice" class="mt-1 hidden text-xs text-amber-600" role="status">No registration record was found. Purchase availability is not confirmed.</p>
                             </div>
                             <div class="flex flex-wrap gap-2">
                                 <button onclick="Handlers.rescanTask()" id="btnRescan"
@@ -801,7 +805,7 @@
                                         </div>
                                     </th>
                                     <th
-                                        class="p-5 text-[10px] font-black text-gray-400 uppercase tracking-widest text-center w-32">
+                                        class="w-36 whitespace-nowrap p-5 text-center text-[10px] font-black uppercase tracking-widest text-gray-400">
                                         Operations</th>
                                 </tr>
                             </thead>
@@ -1501,6 +1505,8 @@
 
             renderResults() {
                 const tableBody = document.getElementById('resultsTable');
+                const candidateNotice = document.getElementById('candidateNotice');
+                candidateNotice.classList.toggle('hidden', State.currentResults.length === 0);
                 if (State.currentResults.length === 0) {
                     tableBody.innerHTML = '<tr><td colspan="3" class="p-20 text-center text-gray-300 italic text-xs uppercase tracking-widest">No domains without registration records detected</td></tr>';
                     return;
@@ -1528,9 +1534,9 @@
                         <td class="p-4 cursor-pointer" onclick="Handlers.toggleDomain('${r.domain}')">
                             <span class="text-lg font-black font-mono text-gray-900">${r.domain}</span>
                         </td>
-                        <td class="p-4 text-center">
-                            <a href="https://www.spaceship.com/domain-search/?query=${encodeURIComponent(r.domain)}" target="_blank" 
-                               class="text-[9px] font-black bg-blue-50 text-blue-600 px-4 py-2 rounded-xl border border-blue-100 hover:bg-blue-600 hover:text-white transition-all uppercase tracking-widest">Check Purchase</a>
+                        <td class="whitespace-nowrap p-4 text-center">
+                            <a href="https://www.spaceship.com/domain-search/?query=${encodeURIComponent(r.domain)}" target="_blank" rel="noopener noreferrer"
+                               class="inline-flex min-w-[7.5rem] items-center justify-center whitespace-nowrap rounded-xl border border-blue-100 bg-blue-50 px-4 py-2 text-[9px] font-black uppercase tracking-widest text-blue-600 transition-all hover:bg-blue-600 hover:text-white">Check Purchase</a>
                         </td>
                     </tr>
                 `).join('');
