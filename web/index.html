@@ -113,13 +113,194 @@
             align-content: start;
         }
 
+        .stream-viewport {
+            min-height: 240px;
+            max-height: min(55vh, 420px);
+            overflow-x: hidden;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            scrollbar-gutter: stable;
+        }
+
+        .stream-tab {
+            border: 1px solid transparent;
+            color: #94a3b8;
+            transition: color 0.2s, background-color 0.2s, border-color 0.2s;
+        }
+
+        .stream-tab:hover {
+            color: #475569;
+            background: #f8fafc;
+        }
+
+        .stream-tab.active {
+            color: #1d4ed8;
+            background: #eff6ff;
+            border-color: #bfdbfe;
+        }
+
+        .stream-filter.active {
+            color: #1d4ed8;
+            background: #eff6ff;
+            border-color: #bfdbfe;
+        }
+
+        .stream-log-list {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .activity-empty {
+            grid-column: 1 / -1;
+        }
+
+        .stream-log-row {
+            display: grid;
+            grid-template-columns: 76px 76px minmax(130px, 0.35fr) minmax(0, 1fr);
+            align-items: baseline;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            color: #cbd5e1;
+            font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.45;
+        }
+
+        .stream-log-row:hover {
+            background: rgba(51, 65, 85, 0.6);
+        }
+
+        .stream-log-time {
+            color: #64748b;
+        }
+
+        .stream-log-domain,
+        .stream-log-detail {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .stream-log-domain {
+            color: #e2e8f0;
+        }
+
+        .stream-log-detail {
+            color: #94a3b8;
+        }
+
+        .stream-level {
+            width: max-content;
+            min-width: 56px;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-align: center;
+        }
+
+        .stream-level-info { color: #93c5fd; background: rgba(59, 130, 246, 0.18); }
+        .stream-level-warn { color: #fcd34d; background: rgba(245, 158, 11, 0.18); }
+        .stream-level-error { color: #fca5a5; background: rgba(239, 68, 68, 0.18); }
+        .stream-level-result { color: #6ee7b7; background: rgba(16, 185, 129, 0.18); }
+
+        .stream-connection {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            border-radius: 999px;
+            padding: 4px 8px;
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .stream-connection::before {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+            content: '';
+        }
+
+        .stream-connection-live { color: #059669; background: #ecfdf5; }
+        .stream-connection-reconnecting { color: #d97706; background: #fffbeb; }
+        .stream-connection-closed { color: #64748b; background: #f1f5f9; }
+
+        .stream-new-events {
+            position: sticky;
+            bottom: 8px;
+            z-index: 1;
+            display: block;
+            width: max-content;
+            margin: -34px auto 8px;
+            box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
+        }
+
+        .card-no-record {
+            background: rgba(16, 185, 129, 0.18);
+            color: #6ee7b7;
+        }
+
+        .card-no-record .card-badge {
+            background: rgba(16, 185, 129, 0.25);
+            color: #a7f3d0;
+        }
+
+        .card-registered {
+            background: rgba(139, 92, 246, 0.18);
+            color: #c4b5fd;
+        }
+
+        .card-registered .card-badge {
+            background: rgba(139, 92, 246, 0.25);
+            color: #ddd6fe;
+        }
+
+        .card-retry {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fde68a;
+        }
+
+        .card-retry .card-badge {
+            background: rgba(245, 158, 11, 0.25);
+            color: #fef3c7;
+        }
+
+        .card-error {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+        }
+
+        .card-error .card-badge {
+            background: rgba(239, 68, 68, 0.22);
+            color: #fecaca;
+        }
+
+        .card-trace,
+        .card-unknown {
+            background: rgba(100, 116, 139, 0.15);
+            color: #cbd5e1;
+        }
+
+        .card-trace .card-badge,
+        .card-unknown .card-badge {
+            background: rgba(100, 116, 139, 0.25);
+            color: #e2e8f0;
+        }
+
         .domain-card {
             padding: 4px 8px;
             border-radius: 4px;
             font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
             font-size: 12px;
             font-weight: 600;
-            animation: card-in 0.2s ease-out;
+            animation: domain-chip-in 0.2s ease-out;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -163,36 +344,6 @@
         .card-scanning .card-badge {
             background: rgba(59, 130, 246, 0.3);
             color: #bfdbfe;
-        }
-
-        .card-open {
-            background: rgba(16, 185, 129, 0.18);
-            color: #6ee7b7;
-        }
-
-        .card-open .card-badge {
-            background: rgba(16, 185, 129, 0.25);
-            color: #a7f3d0;
-        }
-
-        .card-taken {
-            background: rgba(239, 68, 68, 0.15);
-            color: #fca5a5;
-        }
-
-        .card-taken .card-badge {
-            background: rgba(239, 68, 68, 0.2);
-            color: #fecaca;
-        }
-
-        .card-err {
-            background: rgba(245, 158, 11, 0.15);
-            color: #fde68a;
-        }
-
-        .card-err .card-badge {
-            background: rgba(245, 158, 11, 0.25);
-            color: #fde68a;
         }
 
         .console-break {
@@ -244,6 +395,26 @@
 
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
             background: #94a3b8;
+        }
+
+        @media (max-width: 640px) {
+            .stream-log-row {
+                grid-template-columns: 58px 62px minmax(0, 1fr);
+            }
+
+            .stream-log-detail {
+                grid-column: 3;
+                color: #94a3b8;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                scroll-behavior: auto !important;
+                transition-duration: 0.01ms !important;
+            }
         }
     </style>
 </head>
@@ -491,32 +662,69 @@
 
                     <!-- Progress Bar & Console -->
                     <div class="bg-gray-50 p-6 rounded-2xl border border-gray-100">
-                        <div class="flex justify-between items-center mb-4">
-                            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Stream
-                                Output</span>
-                            <span class="text-[10px] font-mono text-gray-400"><span id="progressInline">0</span> / <span
-                                    id="totalInline">0</span> | <span id="percentageInline"
-                                    class="font-bold text-blue-600">0</span>%</span>
+                        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+                            <div class="flex items-center gap-2">
+                                <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Stream
+                                    Output</span>
+                                <span id="streamConnection" class="stream-connection stream-connection-closed">Offline</span>
+                            </div>
+                            <div class="flex items-center gap-3 text-[10px] font-mono text-gray-400">
+                                <span><span id="progressInline">0</span> / <span id="totalInline">0</span></span>
+                                <span class="text-blue-600 font-bold"><span id="percentageInline">0</span>%</span>
+                                <span id="throughputInline" class="hidden text-gray-400">0/s</span>
+                                <span id="etaInline" class="hidden text-gray-400">ETA --</span>
+                            </div>
                         </div>
                         <div class="w-full bg-white rounded-full h-1.5 shadow-inner mb-6">
                             <div class="bg-blue-600 h-1.5 rounded-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(37,99,235,0.4)]"
                                 id="progressBar" style="width: 0%"></div>
                         </div>
 
-                        <div class="flex justify-between items-center mb-2">
-                            <button onclick="UI.toggleConsole()" class="flex items-center group">
-                                <span
-                                    class="text-[10px] font-black text-gray-400 uppercase tracking-widest group-hover:text-gray-600 transition-colors">Log
-                                    Stream window</span>
-                                <span id="consoleToggle"
-                                    class="ml-2 text-[8px] font-black bg-white px-2 py-0.5 rounded border border-gray-200 text-gray-300 group-hover:border-gray-400 group-hover:text-gray-500">HIDE</span>
-                            </button>
+                        <div class="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3 mb-3">
+                            <div class="flex items-center gap-1" role="tablist" aria-label="Stream view">
+                                <button id="streamTabActivity" type="button" role="tab" aria-selected="true"
+                                    onclick="UI.setStreamView('activity')"
+                                    class="stream-tab active px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest">Activity</button>
+                                <button id="streamTabLogs" type="button" role="tab" aria-selected="false"
+                                    onclick="UI.setStreamView('logs')"
+                                    class="stream-tab px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest">Logs</button>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button type="button" data-log-filter="all" onclick="UI.setLogFilter('all')"
+                                    class="stream-filter active px-2.5 py-1 rounded-full border border-gray-200 text-[9px] font-bold text-gray-500">All</button>
+                                <button type="button" data-log-filter="results" onclick="UI.setLogFilter('results')"
+                                    class="stream-filter px-2.5 py-1 rounded-full border border-gray-200 text-[9px] font-bold text-gray-500">Results</button>
+                                <button type="button" data-log-filter="retry" onclick="UI.setLogFilter('retry')"
+                                    class="stream-filter px-2.5 py-1 rounded-full border border-gray-200 text-[9px] font-bold text-gray-500">Retry</button>
+                                <button type="button" data-log-filter="errors" onclick="UI.setLogFilter('errors')"
+                                    class="stream-filter px-2.5 py-1 rounded-full border border-gray-200 text-[9px] font-bold text-gray-500">Errors</button>
+                                <label class="relative">
+                                    <span class="sr-only">Search stream</span>
+                                    <input id="logSearch" type="search" placeholder="Filter domain or event"
+                                        oninput="UI.setLogQuery(this.value)"
+                                        class="w-40 sm:w-48 border border-gray-200 bg-white px-3 py-1.5 rounded-lg text-[10px] outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-300">
+                                </label>
+                            </div>
                         </div>
-                        <div id="logConsoleContainer" class="transition-all duration-500 overflow-hidden">
-                            <div id="logConsole"
-                                class="bg-gray-900 rounded-xl p-4 h-64 overflow-hidden shadow-inner domain-grid">
+                        <div id="logConsoleContainer" class="transition-all duration-300">
+                            <div id="logConsole" role="log" aria-live="polite" aria-relevant="additions text"
+                                class="bg-gray-900 rounded-xl p-3 shadow-inner stream-viewport custom-scrollbar domain-grid">
                                 <div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for
                                     domain activity...</div>
+                            </div>
+                            <button id="streamNewEvents" type="button" onclick="UI.showNewEvents()"
+                                class="hidden bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-full text-[9px] font-black tracking-wide">New events</button>
+                        </div>
+                        <div class="flex flex-wrap items-center justify-between gap-2 mt-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">
+                            <span id="streamMeta">0 events</span>
+                            <div class="flex items-center gap-3">
+                                <label class="inline-flex items-center gap-1.5 normal-case tracking-normal font-semibold text-gray-500">
+                                    <input id="logFollow" type="checkbox" checked onchange="UI.setLogFollow(this.checked)"
+                                        class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                    Auto-follow
+                                </label>
+                                <button type="button" onclick="UI.copyVisibleLogs()" class="hover:text-blue-600 transition-colors">Copy</button>
+                                <button type="button" onclick="UI.clearStreamView()" class="hover:text-blue-600 transition-colors">Clear view</button>
                             </div>
                         </div>
                     </div>
@@ -662,9 +870,19 @@
             sortDirection: 'asc',
             searchTimeout: null,
             lastLogId: 0,
-            isConsoleCollapsed: false,
             currentStatus: null,
             lastFoundCount: 0,
+            streamLogs: [],
+            streamView: 'activity',
+            logFilter: 'all',
+            logQuery: '',
+            logFollowEnabled: true,
+            logUserScrolledAway: false,
+            logNewCount: 0,
+            streamRenderScheduled: false,
+            streamConnected: false,
+            lastActivityDomain: null,
+            statusSample: null,
             taskMode: 'combinatorial',
             dictSlots: 1,
             dictionaries: [],
@@ -673,6 +891,7 @@
         };
 
         const LOG_STREAM_WINDOW_SIZE = 40;
+        const LOG_STREAM_BUFFER_SIZE = 500;
 
         /**
          * API Interaction Layer
@@ -792,41 +1011,56 @@
                 this.closeScanStream();
                 const url = Routes.api(`api/scan/${id}/stream`);
                 const stream = new EventSource(url);
-                const statusRows = [];
                 State.scanStream = stream;
                 State.lastLogId = 0;
                 State.currentStatus = null;
                 State.lastFoundCount = 0;
+                State.streamLogs = [];
+                State.logUserScrolledAway = false;
+                State.logNewCount = 0;
+                State.lastActivityDomain = null;
+                State.statusSample = null;
                 State.currentResults = [];
+                UI.setStreamConnection('reconnecting');
+                UI.renderLogStream(State.streamLogs);
                 UI.renderResults();
 
-                const renderWindow = () => UI.renderLogStream(statusRows);
+                const renderWindow = () => UI.scheduleLogRender();
+
+                stream.addEventListener('open', () => UI.setStreamConnection('live'));
 
                 stream.addEventListener('status', (event) => {
-                    const data = JSON.parse(event.data);
+                    const data = Utils.parseJson(event.data);
+                    if (!data) return;
                     State.currentStatus = data.status;
                     State.lastFoundCount = data.found;
                     UI.syncStatusPanel(data);
                 });
 
                 stream.addEventListener('log', (event) => {
-                    const log = JSON.parse(event.data);
+                    const log = Utils.parseJson(event.data);
+                    if (!log) return;
                     if (log.id > 0 && log.id <= State.lastLogId) return;
                     if (log.id > 0) State.lastLogId = log.id;
-                    statusRows.push(log);
-                    if (statusRows.length > 250) statusRows.splice(0, statusRows.length - 250);
+                    State.streamLogs.push(log);
+                    if (State.streamLogs.length > LOG_STREAM_BUFFER_SIZE) {
+                        State.streamLogs.splice(0, State.streamLogs.length - LOG_STREAM_BUFFER_SIZE);
+                    }
+                    if (!State.logFollowEnabled || State.logUserScrolledAway) State.logNewCount += 1;
                     renderWindow();
                 });
 
                 stream.addEventListener('result', (event) => {
-                    const result = JSON.parse(event.data);
+                    const result = Utils.parseJson(event.data);
+                    if (!result) return;
                     if (State.currentResults.some(item => item.domain === result.domain)) return;
                     State.currentResults.push(result);
                     UI.renderResults();
                 });
 
                 stream.addEventListener('result_batch', (event) => {
-                    const results = JSON.parse(event.data);
+                    const results = Utils.parseJson(event.data);
+                    if (!Array.isArray(results)) return;
                     let changed = false;
                     const seen = new Set(State.currentResults.map(item => item.domain));
 
@@ -854,11 +1088,13 @@
                 stream.addEventListener('complete', () => {
                     // Explicitly close so the browser does not auto-reconnect.
                     // The server has no more events to send for a finished/cancelled scan.
+                    UI.setStreamConnection('closed');
                     this.closeScanStream();
                     this.loadRecentScans();
                 });
 
                 stream.addEventListener('error', () => {
+                    UI.setStreamConnection(stream.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
                     if (stream.readyState === EventSource.CLOSED) {
                         this.closeScanStream();
                     }
@@ -869,6 +1105,7 @@
                 if (State.scanStream) {
                     State.scanStream.close();
                     State.scanStream = null;
+                    UI.setStreamConnection('closed');
                 }
             }
         };
@@ -1225,15 +1462,41 @@
                 document.getElementById('percentageInline').innerText = pct;
                 document.getElementById('progressBar').style.width = pct + '%';
 
-                if (['finished', 'failed', 'paused', 'cancelled'].includes(data.status)) {
-                    if (data.status === 'finished' && data.found > 0) document.getElementById('btnRescan').classList.remove('hidden');
-                    if (!State.isConsoleCollapsed) this.setConsoleState(true);
-                } else {
+                this.syncStreamMetrics(data);
+                if (data.status === 'finished' && data.found > 0) document.getElementById('btnRescan').classList.remove('hidden');
+                if (!['finished', 'failed', 'paused', 'cancelled'].includes(data.status)) {
                     document.getElementById('btnRescan').classList.add('hidden');
-                    if (data.status === 'running' && State.isConsoleCollapsed) this.setConsoleState(false);
                 }
 
                 this.syncPublishActions();
+            },
+
+            syncStreamMetrics(data) {
+                const processed = Number(data.processed) || 0;
+                const total = Number(data.total) || 0;
+                const now = performance.now();
+                const previous = State.statusSample;
+                State.statusSample = { processed, at: now };
+
+                const throughputEl = document.getElementById('throughputInline');
+                const etaEl = document.getElementById('etaInline');
+                if (!throughputEl || !etaEl || !previous || now <= previous.at || processed <= previous.processed) {
+                    if (data.status !== 'running') {
+                        throughputEl?.classList.add('hidden');
+                        etaEl?.classList.add('hidden');
+                    }
+                    return;
+                }
+
+                const rate = (processed - previous.processed) / ((now - previous.at) / 1000);
+                if (!Number.isFinite(rate) || rate <= 0) return;
+                throughputEl.innerText = `${Math.round(rate)}/s`;
+                throughputEl.classList.remove('hidden');
+
+                const remaining = Math.max(0, total - processed);
+                const etaSeconds = Math.ceil(remaining / rate);
+                etaEl.innerText = `ETA ${Utils.formatDuration(etaSeconds)}`;
+                etaEl.classList.toggle('hidden', data.status !== 'running' || remaining === 0);
             },
 
             renderResults() {
@@ -1284,14 +1547,64 @@
                 tableBody.innerHTML = html;
             },
 
+            scheduleLogRender() {
+                if (State.streamRenderScheduled) return;
+                State.streamRenderScheduled = true;
+                requestAnimationFrame(() => {
+                    State.streamRenderScheduled = false;
+                    this.renderLogStream(State.streamLogs);
+                });
+            },
+
             renderLogStream(logs) {
                 const consoleEl = document.getElementById('logConsole');
+                if (!consoleEl) return;
+                const entries = this.getFilteredLogEntries(logs);
+                const shouldFollow = State.logFollowEnabled && !State.logUserScrolledAway;
+
+                consoleEl.classList.toggle('domain-grid', State.streamView === 'activity');
+                consoleEl.classList.toggle('stream-log-list', State.streamView === 'logs');
+                consoleEl.innerHTML = State.streamView === 'logs'
+                    ? this.renderLogRows(entries)
+                    : this.renderActivity(entries);
+
+                if (!entries.length) {
+                    consoleEl.innerHTML = `<div class="text-gray-600 text-xs italic w-full ${State.streamView === 'activity' ? 'activity-empty' : ''}">No events match the current view.</div>`;
+                }
+                if (shouldFollow) {
+                    consoleEl.scrollTop = consoleEl.scrollHeight;
+                    State.logNewCount = 0;
+                }
+                this.updateStreamMeta(entries.length, logs.length);
+            },
+
+            getFilteredLogEntries(logs) {
+                const query = State.logQuery.trim().toLowerCase();
+                return logs
+                    .map(log => ({ log, status: Utils.formatLogMessage(log) }))
+                    .filter(({ log, status }) => {
+                        const tag = String(status.tag || '').toUpperCase();
+                        const level = String(log.level || 'INFO').toUpperCase();
+                        const isResult = ['NO RECORD', 'TAKEN'].includes(tag);
+                        const isRetry = tag.includes('RETRY') || tag === 'THROTTLE';
+                        const isError = level === 'ERROR' || ['ERR', 'UNKNOWN'].includes(tag) || tag === 'RETRY EXHAUSTED';
+                        if (State.logFilter === 'results' && !isResult) return false;
+                        if (State.logFilter === 'retry' && !isRetry) return false;
+                        if (State.logFilter === 'errors' && !isError) return false;
+                        if (!query) return true;
+                        return [status.domain, status.tag, status.detail, log.message]
+                            .filter(Boolean)
+                            .some(value => String(value).toLowerCase().includes(query));
+                    });
+            },
+
+            renderActivity(entries) {
                 const domainStates = new Map();
                 const domainOrder = [];
                 const systemLines = [];
 
-                for (const log of logs) {
-                    const status = Utils.formatLogMessage(log);
+                for (const entry of entries) {
+                    const { status } = entry;
                     if (status.domain) {
                         if (domainStates.has(status.domain)) {
                             domainOrder.splice(domainOrder.indexOf(status.domain), 1);
@@ -1299,28 +1612,50 @@
                         domainOrder.push(status.domain);
                         domainStates.set(status.domain, status);
                     } else if (status.tag && !['SCAN', 'QUEUED'].includes(status.tag)) {
-                        systemLines.push(status);
+                        systemLines.push(entry);
                     }
                 }
 
-                const latestSystemLine = systemLines[systemLines.length - 1];
-                const maxDomainCards = latestSystemLine
-                    ? Math.max(0, LOG_STREAM_WINDOW_SIZE - 1)
-                    : LOG_STREAM_WINDOW_SIZE;
-                const visibleDomains = domainOrder.slice(-maxDomainCards);
+                const visibleDomains = domainOrder.slice(-LOG_STREAM_WINDOW_SIZE);
+                const latestDomain = visibleDomains[visibleDomains.length - 1];
+                const animateLatest = latestDomain && latestDomain !== State.lastActivityDomain;
+                State.lastActivityDomain = latestDomain;
+                let html = visibleDomains
+                    .map(domain => Utils.renderDomainCard(domainStates.get(domain), animateLatest && domain === latestDomain))
+                    .join('');
 
-                State.seenDomains = State.seenDomains || new Set();
-                let html = '';
-                for (const d of visibleDomains) {
-                    const isNew = !State.seenDomains.has(d);
-                    if (isNew) State.seenDomains.add(d);
-                    html += Utils.renderDomainCard(domainStates.get(d), isNew);
+                const recentSystem = systemLines.slice(-3);
+                if (recentSystem.length) {
+                    html += recentSystem.map(({ log, status }) => Utils.renderSystemLine(status, log)).join('');
                 }
-                if (latestSystemLine) {
-                    html += Utils.renderSystemLine(latestSystemLine);
-                }
+                return html;
+            },
 
-                consoleEl.innerHTML = html || '<div class="text-gray-600 text-xs italic w-full" style="grid-column:1/-1;">Waiting for domain activity...</div>';
+            renderLogRows(entries) {
+                return entries.map(({ log, status }) => {
+                    const level = Utils.streamLevel(log, status);
+                    const detail = status.detail || log.message || status.tag || '';
+                    return `<div class="stream-log-row" title="${Utils.escapeHtml(detail)}">
+                        <time class="stream-log-time">${Utils.escapeHtml(Utils.formatLogTime(log.created_at))}</time>
+                        <span class="stream-level ${level.css}">${Utils.escapeHtml(level.label)}</span>
+                        <span class="stream-log-domain">${Utils.escapeHtml(status.domain || 'SYSTEM')}</span>
+                        <span class="stream-log-detail">${Utils.escapeHtml(detail)}</span>
+                    </div>`;
+                }).join('');
+            },
+
+            updateStreamMeta(visibleCount, totalCount) {
+                const meta = document.getElementById('streamMeta');
+                if (meta) {
+                    meta.innerText = visibleCount === totalCount
+                        ? `${totalCount} events`
+                        : `${visibleCount} of ${totalCount} events`;
+                }
+                const button = document.getElementById('streamNewEvents');
+                if (button) {
+                    button.innerText = `${State.logNewCount} new event${State.logNewCount === 1 ? '' : 's'}`;
+                    button.classList.toggle('hidden', State.logNewCount === 0 || !State.logUserScrolledAway);
+                }
             },
 
             getFilteredResults() {
@@ -1363,15 +1698,87 @@
                 this.renderResults();
             },
 
-            toggleConsole() { this.setConsoleState(!State.isConsoleCollapsed); },
+            setStreamConnection(state) {
+                const connection = document.getElementById('streamConnection');
+                if (!connection) return;
+                const normalized = ['live', 'reconnecting', 'closed'].includes(state) ? state : 'closed';
+                const labels = { live: 'Live', reconnecting: 'Reconnecting', closed: 'Offline' };
+                connection.className = `stream-connection stream-connection-${normalized}`;
+                connection.innerText = labels[normalized];
+                State.streamConnected = normalized === 'live';
+            },
 
-            setConsoleState(collapsed) {
-                State.isConsoleCollapsed = collapsed;
-                const container = document.getElementById('logConsoleContainer');
-                const toggle = document.getElementById('consoleToggle');
-                container.style.maxHeight = collapsed ? '0px' : '300px';
-                container.style.marginTop = collapsed ? '0px' : '12px';
-                toggle.innerText = collapsed ? 'SHOW' : 'HIDE';
+            setStreamView(view) {
+                State.streamView = view === 'logs' ? 'logs' : 'activity';
+                for (const tab of document.querySelectorAll('[role="tab"]')) {
+                    const active = tab.id === `streamTab${State.streamView === 'logs' ? 'Logs' : 'Activity'}`;
+                    tab.classList.toggle('active', active);
+                    tab.setAttribute('aria-selected', String(active));
+                }
+                this.scheduleLogRender();
+            },
+
+            setLogFilter(filter) {
+                State.logFilter = ['all', 'results', 'retry', 'errors'].includes(filter) ? filter : 'all';
+                for (const button of document.querySelectorAll('[data-log-filter]')) {
+                    button.classList.toggle('active', button.dataset.logFilter === State.logFilter);
+                }
+                this.scheduleLogRender();
+            },
+
+            setLogQuery(query) {
+                State.logQuery = query || '';
+                this.scheduleLogRender();
+            },
+
+            setLogFollow(enabled) {
+                State.logFollowEnabled = Boolean(enabled);
+                if (State.logFollowEnabled) {
+                    State.logUserScrolledAway = false;
+                    State.logNewCount = 0;
+                    const consoleEl = document.getElementById('logConsole');
+                    if (consoleEl) consoleEl.scrollTop = consoleEl.scrollHeight;
+                }
+                this.updateStreamMeta(this.getFilteredLogEntries(State.streamLogs).length, State.streamLogs.length);
+            },
+
+            handleLogScroll() {
+                const consoleEl = document.getElementById('logConsole');
+                if (!consoleEl) return;
+                const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 24;
+                State.logUserScrolledAway = !atBottom;
+                if (atBottom) State.logNewCount = 0;
+                this.updateStreamMeta(this.getFilteredLogEntries(State.streamLogs).length, State.streamLogs.length);
+            },
+
+            showNewEvents() {
+                State.logUserScrolledAway = false;
+                State.logNewCount = 0;
+                const checkbox = document.getElementById('logFollow');
+                if (checkbox) checkbox.checked = true;
+                State.logFollowEnabled = true;
+                const consoleEl = document.getElementById('logConsole');
+                if (consoleEl) consoleEl.scrollTo({ top: consoleEl.scrollHeight, behavior: 'smooth' });
+                this.updateStreamMeta(this.getFilteredLogEntries(State.streamLogs).length, State.streamLogs.length);
+            },
+
+            clearStreamView() {
+                State.streamLogs = [];
+                State.logNewCount = 0;
+                State.lastActivityDomain = null;
+                this.renderLogStream(State.streamLogs);
+            },
+
+            async copyVisibleLogs() {
+                const text = this.getFilteredLogEntries(State.streamLogs)
+                    .map(({ log, status }) => `${Utils.formatLogTime(log.created_at)} ${status.tag || 'LOG'} ${status.domain || 'SYSTEM'} ${status.detail || log.message || ''}`)
+                    .join('\n');
+                if (!text || !navigator.clipboard) return;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    const meta = document.getElementById('streamMeta');
+                    if (meta) meta.innerText = 'Copied visible events';
+                } catch (_) { /* Clipboard access may be unavailable on HTTP. */ }
             }
         };
 
@@ -1383,7 +1790,7 @@
                 State.currentId = id;
                 State.lastLogId = 0;
                 State.selectedDomains.clear();
-                if (State.seenDomains) State.seenDomains.clear();
+                State.lastActivityDomain = null;
                 State.currentResults = [];
                 document.getElementById('currentId').innerText = id;
                 document.getElementById('statusArea').classList.remove('hidden');
@@ -1613,6 +2020,9 @@
          */
         const Utils = {
             escapeHtml: v => String(v).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])),
+            parseJson: value => {
+                try { return JSON.parse(value); } catch (_) { return null; }
+            },
 
             formatScanSummary(s) {
                 if (s.has_domains) return `List: ${s.total || '0'} items`;
@@ -1645,41 +2055,94 @@
             },
 
             formatLogMessage(log) {
-                let parsed = null;
-                try { parsed = JSON.parse(log.message); } catch (_) { }
+                const parsed = this.parseJson(log.message);
 
                 if (parsed && parsed.event) {
                     const chipMap = {
-                        'task.picked': { tag: 'TASK', css: 'chip-task' },
-                        'task.cancelled': { tag: 'HALT', css: 'chip-halt' },
-                        'task.summary': { tag: 'DONE', css: 'chip-done' },
-                        'domain.queued': { tag: 'QUEUED', css: 'chip-scan' },
-                        'domain.scanning': { tag: 'SCAN', css: 'chip-scan' },
-                        'domain.no_registration_record': { tag: 'NO RECORD', css: 'chip-open' },
-                        'domain.registered': { tag: 'TAKEN', css: 'chip-taken' },
-                        'domain.registration_status_unknown': { tag: 'UNKNOWN', css: 'chip-err' },
-                        'domain.error': { tag: 'ERR', css: 'chip-err' }
+                        'task.picked': { tag: 'TASK', css: 'card-system' },
+                        'task.cancelled': { tag: 'HALT', css: 'card-system' },
+                        'task.paused': { tag: 'PAUSED', css: 'card-system' },
+                        'task.summary': { tag: 'DONE', css: 'card-system' },
+                        'task.config': { tag: 'CONFIG', css: 'card-system' },
+                        'task.signal_changed': { tag: 'SIGNAL', css: 'card-system' },
+                        'task.exception_replay_scheduled': { tag: 'REPLAY', css: 'card-system' },
+                        'task.throttle_adjusted': { tag: 'THROTTLE', css: 'card-system' },
+                        'storage.counters_persist_failed': { tag: 'STORAGE', css: 'card-error' },
+                        'storage.result_batch_persist_failed': { tag: 'STORAGE', css: 'card-error' },
+                        'domain.queued': { tag: 'QUEUED', css: 'card-queued' },
+                        'domain.scanning': { tag: 'SCAN', css: 'card-scanning' },
+                        'domain.trace': { tag: 'TRACE', css: 'card-trace' },
+                        'domain.no_registration_record': { tag: 'NO RECORD', css: 'card-no-record' },
+                        // Legacy logs used "available" for the absence of a registration record.
+                        // Keep the UI aligned with the current semantics: purchase availability is not confirmed.
+                        'domain.available': { tag: 'NO RECORD', css: 'card-no-record' },
+                        'domain.registered': { tag: 'TAKEN', css: 'card-registered' },
+                        'domain.registration_status_unknown': { tag: 'UNKNOWN', css: 'card-unknown' },
+                        'domain.deferred_retry_recorded': { tag: 'RETRY', css: 'card-retry' },
+                        'domain.retry_exhausted': { tag: 'RETRY EXHAUSTED', css: 'card-error' },
+                        'domain.error': { tag: 'ERR', css: 'card-error' }
                     };
-                    const meta = chipMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), css: 'chip-task' };
-                    return { tag: meta.tag, domain: parsed.domain, detail: parsed.message || this.formatFields(parsed.fields), cardClass: meta.css };
+                    const meta = chipMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), css: 'card-system' };
+                    const detailMap = {
+                        'domain.available': 'No registration record found (legacy signal)',
+                        'domain.no_registration_record': 'No registration record found',
+                        'domain.registered': 'Registration record found',
+                        'domain.registration_status_unknown': 'Registration status is unknown'
+                    };
+                    return {
+                        tag: meta.tag,
+                        domain: parsed.domain || null,
+                        detail: parsed.message || this.formatFields(parsed.fields) || detailMap[parsed.event] || parsed.event,
+                        cardClass: meta.css,
+                        event: parsed.event
+                    };
                 }
 
                 // Fallback for plain messages
-                return { tag: log.level || 'LOG', domain: log.message, cardClass: 'chip-task' };
+                return { tag: log.level || 'LOG', domain: null, detail: log.message, cardClass: 'card-system', event: 'plain' };
             },
 
             formatFields: f => f ? Object.entries(f).filter(([_, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(' | ') : '',
 
-            renderDomainCard(s, animate = false) {
-                const cssMap = { QUEUED: 'card-queued', SCAN: 'card-scanning', OPEN: 'card-open', TAKEN: 'card-taken', ERR: 'card-err' };
-                const cardClass = cssMap[s.tag] || 'card-scanning';
-                const shortTag = s.tag.length > 5 ? s.tag.slice(0, 4) : s.tag;
-                const animStyle = animate ? '' : ' style="animation: none;"';
-                return `<div class="domain-card ${cardClass}"${animStyle}><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${s.tag}">${shortTag}</span></div>`;
+            formatLogTime(value) {
+                const date = new Date(value || 0);
+                if (Number.isNaN(date.getTime())) return '--:--:--';
+                return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
             },
-            renderSystemLine(s) {
+
+            formatDuration(seconds) {
+                if (!Number.isFinite(seconds) || seconds < 0) return '--';
+                const minutes = Math.floor(seconds / 60);
+                const remainder = Math.floor(seconds % 60);
+                return minutes > 0 ? `${minutes}m ${String(remainder).padStart(2, '0')}s` : `${remainder}s`;
+            },
+
+            streamLevel(log, status) {
+                const tag = String(status.tag || '').toUpperCase();
+                const level = String(log.level || '').toUpperCase();
+                if (['NO RECORD', 'TAKEN'].includes(tag)) return { label: 'RESULT', css: 'stream-level-result' };
+                if (level === 'ERROR' || ['ERR', 'UNKNOWN', 'RETRY EXHAUSTED', 'STORAGE'].includes(tag)) {
+                    return { label: 'ERROR', css: 'stream-level-error' };
+                }
+                if (level === 'WARN' || tag === 'RETRY' || tag === 'THROTTLE') {
+                    return { label: 'WARN', css: 'stream-level-warn' };
+                }
+                return { label: 'INFO', css: 'stream-level-info' };
+            },
+
+            renderDomainCard(s, animate = false) {
+                const cardClass = s.cardClass || 'card-scanning';
+                const shortTag = {
+                    'NO RECORD': 'NO REC',
+                    'RETRY EXHAUSTED': 'FAILED'
+                }[s.tag] || (s.tag.length > 7 ? s.tag.slice(0, 6) : s.tag);
+                const animStyle = animate ? '' : ' style="animation: none;"';
+                return `<div class="domain-card ${cardClass}"${animStyle}><span class="card-name" title="${Utils.escapeHtml(s.domain)}">${Utils.escapeHtml(s.domain)}</span><span class="card-badge" title="${Utils.escapeHtml(s.tag)}">${Utils.escapeHtml(shortTag)}</span></div>`;
+            },
+            renderSystemLine(s, log) {
+                const level = Utils.streamLevel(log, s);
                 const detail = s.detail ? Utils.escapeHtml(s.detail) : '';
-                return `<div class="console-break">${s.tag} ${s.domain || ''} ${detail}</div>`;
+                return `<div class="console-break"><span class="stream-log-time">${Utils.escapeHtml(Utils.formatLogTime(log.created_at))}</span> <span class="stream-level ${level.css}">${Utils.escapeHtml(level.label)}</span> <span>${Utils.escapeHtml(s.tag)}</span> ${detail}</div>`;
             }
         };
 
@@ -1811,6 +2274,7 @@
 
         // Entry Point
         window.onload = () => {
+            document.getElementById('logConsole')?.addEventListener('scroll', () => UI.handleLogScroll());
             document.querySelectorAll('a[href="published.html"]').forEach(anchor => {
                 anchor.href = Routes.build('published.html');
             });

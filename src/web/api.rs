@@ -437,7 +437,7 @@ async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn get_logs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
     let rows = match fetch_scan_logs(&state.db, &id, 0).await {
-        Ok(rows) => rows.into_iter().rev().collect::<Vec<_>>(),
+        Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
@@ -495,7 +495,12 @@ async fn stream_scan(
         }
 
         match fetch_scan_logs(&db, &id, log_cursor).await {
-            Ok(rows) => {
+            Ok(mut rows) => {
+                // A fresh subscription receives the newest page; replay it in
+                // chronological order before switching to live events.
+                if log_cursor == 0 {
+                    rows.reverse();
+                }
                 for log in rows {
                     log_cursor = log.id.max(log_cursor);
                     yield Ok::<Event, Infallible>(
@@ -692,17 +697,30 @@ async fn fetch_scan_logs(
     id: &str,
     after_id: i64,
 ) -> Result<Vec<LogRow>, sqlx::Error> {
-    sqlx::query_as::<_, LogRow>(
-        "SELECT id, message, level, created_at
-         FROM scan_logs
-         WHERE scan_id = ? AND id > ?
-         ORDER BY id ASC
-         LIMIT 200",
-    )
-    .bind(id)
-    .bind(after_id)
-    .fetch_all(db)
-    .await
+    if after_id == 0 {
+        sqlx::query_as::<_, LogRow>(
+            "SELECT id, message, level, created_at
+             FROM scan_logs
+             WHERE scan_id = ?
+             ORDER BY id DESC
+             LIMIT 200",
+        )
+        .bind(id)
+        .fetch_all(db)
+        .await
+    } else {
+        sqlx::query_as::<_, LogRow>(
+            "SELECT id, message, level, created_at
+             FROM scan_logs
+             WHERE scan_id = ? AND id > ?
+             ORDER BY id ASC
+             LIMIT 200",
+        )
+        .bind(id)
+        .bind(after_id)
+        .fetch_all(db)
+        .await
+    }
 }
 
 async fn fetch_scan_results(
