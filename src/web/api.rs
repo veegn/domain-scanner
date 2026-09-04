@@ -55,10 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/public/published", get(get_public_published_scans))
         .route("/api/public/search", get(search_public_domains))
         .route("/api/scan/:id/reorder", post(reorder_scan))
-        .route(
-            "/api/settings",
-            get(get_settings).put(update_settings),
-        )
+        .route("/api/settings", get(get_settings).put(update_settings))
         .route("/api/dictionary", post(upload_dictionary))
         .route("/api/dictionaries", get(list_dictionaries))
         .route(
@@ -714,9 +711,10 @@ async fn fetch_scan_results(
     after_event_id: i64,
 ) -> Result<Vec<ResultRow>, sqlx::Error> {
     sqlx::query_as::<_, ResultRow>(
-        "SELECT rowid as event_id, domain, available, expiration_date, signatures
+        "SELECT rowid as event_id, domain, registration_record_absent, purchasable,
+                expiration_date, signatures
          FROM results
-         WHERE scan_id = ? AND available = 1 AND rowid > ?
+         WHERE scan_id = ? AND registration_record_absent = 1 AND rowid > ?
          ORDER BY rowid ASC",
     )
     .bind(id)
@@ -732,9 +730,10 @@ async fn fetch_scan_results_page(
     limit: i64,
 ) -> Result<Vec<ResultRow>, sqlx::Error> {
     sqlx::query_as::<_, ResultRow>(
-        "SELECT rowid as event_id, domain, available, expiration_date, signatures
+        "SELECT rowid as event_id, domain, registration_record_absent, purchasable,
+                expiration_date, signatures
          FROM results
-         WHERE scan_id = ? AND available = 1
+         WHERE scan_id = ? AND registration_record_absent = 1
          ORDER BY rowid ASC
          LIMIT ? OFFSET ?",
     )
@@ -801,7 +800,8 @@ async fn fetch_public_domain_hits(
     let pattern = format!("{needle}%");
     sqlx::query_as::<_, PublishedDomainHit>(
         "SELECT pd.domain,
-                pd.available,
+                pd.registration_record_absent,
+                pd.purchasable,
                 pd.expiration_date,
                 pd.signatures,
                 pd.published_at,
@@ -812,6 +812,7 @@ async fn fetch_public_domain_hits(
          JOIN published_scans ps ON ps.id = pd.published_scan_id
          JOIN scans s ON s.id = ps.scan_id
          WHERE ps.status = 'active'
+           AND pd.registration_record_absent = 1
            AND pd.domain LIKE ? COLLATE NOCASE
          ORDER BY ps.published_at DESC, pd.domain ASC
          LIMIT ?",
@@ -1258,7 +1259,9 @@ async fn get_rate_limits() -> ApiResponse {
         if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(endpoints) = cache.get("endpoints").and_then(|v| v.as_object()) {
                 for (k, v) in endpoints {
-                    if let Some(cooldown) = v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64()) {
+                    if let Some(cooldown) =
+                        v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64())
+                    {
                         if cooldown > now {
                             limits.push(RateLimitStatus {
                                 service: "RDAP".to_string(),
@@ -1276,7 +1279,9 @@ async fn get_rate_limits() -> ApiResponse {
         if let Ok(cache) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(servers) = cache.get("servers").and_then(|v| v.as_object()) {
                 for (k, v) in servers {
-                    if let Some(cooldown) = v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64()) {
+                    if let Some(cooldown) =
+                        v.get("cooldown_until_epoch_secs").and_then(|v| v.as_u64())
+                    {
                         if cooldown > now {
                             limits.push(RateLimitStatus {
                                 service: "WHOIS".to_string(),

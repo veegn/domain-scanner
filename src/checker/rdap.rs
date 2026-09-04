@@ -356,7 +356,8 @@ impl DomainChecker for RdapChecker {
         }
 
         let Some((_suffix, endpoint)) = self.endpoint_for_domain(domain) else {
-            return CheckResult::error("RDAP: unsupported suffix").with_trace("RDAP: unsupported suffix");
+            return CheckResult::error("RDAP: unsupported suffix")
+                .with_trace("RDAP: unsupported suffix");
         };
 
         self.wait_for_turn(&endpoint).await;
@@ -405,7 +406,8 @@ impl DomainChecker for RdapChecker {
             reqwest::StatusCode::NOT_FOUND => {
                 self.cb.record_success();
                 self.record_success(&endpoint).await;
-                CheckResult::available().with_trace(format!("RDAP: not found via {}", endpoint))
+                CheckResult::no_registration_record()
+                    .with_trace(format!("RDAP: no registration record via {}", endpoint))
             }
             reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 self.cb.record_failure();
@@ -460,8 +462,8 @@ impl DomainChecker for RdapChecker {
     }
 
     fn should_stop_pipeline(&self, _result: &CheckResult) -> bool {
-        // RDAP is an authoritative source. If it returns a successful result
-        // (whether available or registered), we should trust it and not fallback to WHOIS.
+        // A successful RDAP response definitively says either that a registration
+        // record exists or that none was found. It says nothing about purchasing.
         true
     }
 }

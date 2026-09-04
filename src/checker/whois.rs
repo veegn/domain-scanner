@@ -369,7 +369,7 @@ impl WhoisChecker {
         Ok(buffer)
     }
 
-    fn is_available(&self, response: &str) -> bool {
+    fn has_explicit_no_registration_record(&self, response: &str) -> bool {
         let lower = response.to_lowercase();
         lower.contains("no match")
             || lower.contains("not found")
@@ -527,7 +527,7 @@ impl DomainChecker for WhoisChecker {
         let suffix = if let Some(suffix) = self.matching_suffix(domain) {
             suffix
         } else if domain.contains('.') {
-            return CheckResult::available().with_trace("WHOIS: unsupported suffix");
+            return CheckResult::unknown().with_trace("WHOIS: unsupported suffix");
         } else {
             return CheckResult::error("Invalid domain").with_trace("WHOIS: invalid domain");
         };
@@ -535,7 +535,7 @@ impl DomainChecker for WhoisChecker {
         let server = if let Some(s) = self.server_map.get(&suffix) {
             s.as_str()
         } else {
-            return CheckResult::available().with_trace(format!("WHOIS: no server for {}", suffix));
+            return CheckResult::unknown().with_trace(format!("WHOIS: no server for {}", suffix));
         };
 
         match self.query_whois(domain, server).await {
@@ -577,10 +577,11 @@ impl DomainChecker for WhoisChecker {
                     .with_trace(format!("WHOIS: rate limited via {}", server));
                 }
 
-                if self.is_available(&response) {
+                if self.has_explicit_no_registration_record(&response) {
                     self.cb.record_success();
                     self.record_success(server).await;
-                    CheckResult::available().with_trace(format!("WHOIS: available via {}", server))
+                    CheckResult::no_registration_record()
+                        .with_trace(format!("WHOIS: no registration record via {}", server))
                 } else if self.is_registered(&response) {
                     self.cb.record_success();
                     self.record_success(server).await;
@@ -816,13 +817,13 @@ mod tests {
     fn test_empty_response_is_not_registered() {
         let checker = WhoisChecker::new();
         assert!(!checker.is_registered(""));
-        assert!(!checker.is_available(""));
+        assert!(!checker.has_explicit_no_registration_record(""));
     }
 
     #[test]
-    fn test_free_response_still_detected_as_available() {
+    fn test_free_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
-        assert!(checker.is_available("No match for domain \"4TB.UK\""));
+        assert!(checker.has_explicit_no_registration_record("No match for domain \"4TB.UK\""));
         assert!(!checker.is_registered("No match for domain \"4TB.UK\""));
     }
 
@@ -831,7 +832,7 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Domain: l1p.de\nStatus: connect";
 
-        assert!(!checker.is_available(response));
+        assert!(!checker.has_explicit_no_registration_record(response));
         assert!(checker.is_registered(response));
     }
 
@@ -840,16 +841,16 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Domain: xue.de\nStatus: redemptionPeriod";
 
-        assert!(!checker.is_available(response));
+        assert!(!checker.has_explicit_no_registration_record(response));
         assert!(checker.is_registered(response));
     }
 
     #[test]
-    fn test_denic_free_response_detected_as_available() {
+    fn test_denic_free_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
         let response = "Domain: definitely-free-example.de\nStatus: free";
 
-        assert!(checker.is_available(response));
+        assert!(checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
@@ -858,43 +859,43 @@ mod tests {
         let checker = WhoisChecker::new();
         let response = "Status Codes:\nhttps://icann.org/epp#clientTransferProhibited";
 
-        assert!(!checker.is_available(response));
+        assert!(!checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
     #[test]
-    fn test_radix_available_response_detected_as_available() {
+    fn test_radix_available_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
         let response = ">>> Domain asi.fun is available for registration\n\n>>> Please visit https://rdap.radix.host/registrars/ for a list of accredited registrars";
 
-        assert!(checker.is_available(response));
+        assert!(checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
     #[test]
-    fn test_identity_digital_dropzone_response_detected_as_available() {
+    fn test_identity_digital_dropzone_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
         let response = "This domain is currently available for application via the Identity Digital Dropzone service.\n>>> Last update of WHOIS database";
 
-        assert!(checker.is_available(response));
+        assert!(checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
     #[test]
-    fn test_us_no_data_found_response_detected_as_available() {
+    fn test_us_no_data_found_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
         let response = "No Data Found\nURL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/\n>>> Last update of WHOIS database";
 
-        assert!(checker.is_available(response));
+        assert!(checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
     #[test]
-    fn test_top_object_does_not_exist_response_detected_as_available() {
+    fn test_top_object_does_not_exist_response_detected_as_no_registration_record() {
         let checker = WhoisChecker::new();
         let response = "The queried object does not exist: abj.top\n>>> Last update of WHOIS database: 2026-06-07T06:28:25Z <<<\n\nStatus Codes:";
 
-        assert!(checker.is_available(response));
+        assert!(checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
@@ -918,7 +919,7 @@ mod tests {
         assert!(checker.is_rate_limited(response));
         assert_eq!(hint.retry_after, Some(Duration::from_secs(9156)));
         assert_eq!(hint.min_interval, None);
-        assert!(!checker.is_available(response));
+        assert!(!checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 
@@ -928,7 +929,7 @@ mod tests {
         let response = "Requests of this client are not permitted. Please use https://www.nic.ch/whois/ for queries.";
 
         assert!(checker.is_rate_limited(response));
-        assert!(!checker.is_available(response));
+        assert!(!checker.has_explicit_no_registration_record(response));
         assert!(!checker.is_registered(response));
     }
 

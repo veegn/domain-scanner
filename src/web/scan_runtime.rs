@@ -288,7 +288,7 @@ pub(super) async fn run_scan_logic(
             "Scan completed",
             vec![
                 ("processed", json!(state.processed)),
-                ("available", json!(state.found)),
+                ("registration_record_absent", json!(state.found)),
             ],
         ),
     };
@@ -550,7 +550,7 @@ async fn handle_completed_result(
 ) {
     state.processed += 1;
 
-    if res.available {
+    if res.registration_record_absent {
         state.found += 1;
         let _ = queue_event_log(
             &mut state.pending_log_flush,
@@ -558,7 +558,7 @@ async fn handle_completed_result(
             scan_stream,
             scan_id,
             "INFO",
-            "domain.available",
+            "domain.no_registration_record",
             Some(res.domain.as_str()),
             None,
             vec![],
@@ -577,7 +577,7 @@ async fn handle_completed_result(
             vec![],
         )
         .await;
-    } else {
+    } else if !res.signatures.is_empty() {
         let mut fields = vec![("signatures", json!(res.signatures))];
         if let Some(expiration_date) = &res.expiration_date {
             fields.push(("expiration_date", json!(expiration_date)));
@@ -594,13 +594,27 @@ async fn handle_completed_result(
             fields,
         )
         .await;
+    } else {
+        let _ = queue_event_log(
+            &mut state.pending_log_flush,
+            db,
+            scan_stream,
+            scan_id,
+            "WARN",
+            "domain.registration_status_unknown",
+            Some(res.domain.as_str()),
+            None,
+            vec![],
+        )
+        .await;
     }
 
     state
         .pending_result_flush
         .push(super::scan_runtime_support::PendingResultPersist {
             domain: res.domain.clone(),
-            available: res.available,
+            registration_record_absent: res.registration_record_absent,
+            purchasable: res.purchasable,
             expiration_date: res.expiration_date.clone(),
             signatures: res.signatures.join(","),
         });
@@ -738,17 +752,22 @@ async fn persist_exhausted_retries(
     // domain, mirroring the main result-flush path.
     for chunk in exhausted.chunks(super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE) {
         let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
-            "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures) ",
+            "INSERT OR REPLACE INTO results
+                (scan_id, domain, available, registration_record_absent, purchasable, expiration_date, signatures) ",
         );
         builder.push_values(chunk.iter(), |mut row, res| {
             row.push_bind(scan_id)
                 .push_bind(&res.domain)
                 .push_bind(false)
+                .push_bind(false)
+                .push_bind(Option::<bool>::None)
                 .push_bind(Option::<String>::None)
                 .push_bind("");
         });
-        builder
-            .push(" RETURNING rowid as event_id, domain, available, expiration_date, signatures");
+        builder.push(
+            " RETURNING rowid as event_id, domain, registration_record_absent, purchasable,
+              expiration_date, signatures",
+        );
 
         match builder
             .build_query_as::<crate::web::models::ScanResultEvent>()
@@ -757,7 +776,9 @@ async fn persist_exhausted_retries(
         {
             Ok(rows) => {
                 for row in rows {
-                    let _ = scan_stream.send(ScanStreamMessage::Result(row));
+                    if row.registration_record_absent {
+                        let _ = scan_stream.send(ScanStreamMessage::Result(row));
+                    }
                 }
             }
             Err(err) => {

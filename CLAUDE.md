@@ -37,7 +37,7 @@ Startup runs a 10-step sequence: parse CLI args → load/create `config.json` �
 
 ### Multi-source checker pipeline (`src/checker/`)
 
-Domain availability is determined by a **priority-ordered pipeline** defined via the `DomainChecker` trait in `src/checker/traits.rs`. The `CheckerRegistry` in `src/checker/registry.rs` orchestrates checkers in order, stopping at the first authoritative "registered" result or on rate-limit:
+Domain registration evidence is determined by a **priority-ordered pipeline** defined via the `DomainChecker` trait in `src/checker/traits.rs`. The `CheckerRegistry` in `src/checker/registry.rs` orchestrates checkers in order, stopping at authoritative registration evidence or on rate-limit. Only an explicit authoritative RDAP/WHOIS negative response becomes `registration_record_absent`; DNS absence and unsupported/ambiguous responses remain inconclusive. This flag is not proof that a registrar will sell the domain:
 
 1. **LocalReserved** (priority 0) — checks RFC 2606 reserved words, no network.
 2. **DoH** (priority 10) — DNS-over-HTTPS NS record lookup using 5 providers (AliDNS, DNSPod, Google, Cloudflare, dns.sb), round-robin selected at startup.
@@ -87,7 +87,7 @@ On restart, stale `cancelling`/`pausing` scans are finalized, counter columns ar
 
 ### Key types (`src/lib.rs`)
 
-- `DomainResult` — the scan result for a single domain (available, signatures, expiration, error, retry flags, trace).
+- `DomainResult` — the scan result for a single domain (`registration_record_absent`, optional registrar-confirmed `purchasable`, signatures, expiration, error, retry flags, trace).
 - `WorkerMessage` — the worker-to-runtime channel message enum: `Scanning(domain)` or `Result(DomainResult)`.
 
 ## Upcoming feature: dictionary matching

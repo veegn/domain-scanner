@@ -1,17 +1,20 @@
 //! Domain Checker Module
 //!
-//! This module provides a flexible, extensible architecture for domain availability checking.
+//! This module provides a flexible, extensible architecture for domain registration-record checking.
 //!
 //! # Architecture Overview
 //!
 //! The checker system is built around the `DomainChecker` trait, which defines the interface
 //! for all domain checking implementations. Multiple checkers can be combined using the
-//! `CheckerRegistry` to provide comprehensive domain availability checking.
+//! `CheckerRegistry` to collect registration-record evidence. A missing record is not a
+//! purchase guarantee.
 //!
 //! # Built-in Checkers
 //!
 //! - **LocalReservedChecker**: Checks against local reserved domain rules (fastest, no network)
 //! - **DohChecker**: DNS over HTTPS queries to check for DNS records
+//! - **RdapChecker**: Queries authoritative RDAP registration data
+//! - **WhoisChecker**: Uses explicit WHOIS responses as a fallback
 //!
 //! # Adding a New Checker
 //!
@@ -34,8 +37,8 @@
 //!     let registry = CheckerRegistry::with_defaults(None);
 //!     let result = registry.check("example.com").await;
 //!     
-//!     if result.available {
-//!         println!("Domain is available!");
+//!     if result.registration_record_absent {
+//!         println!("No registration record was found; purchase is not confirmed.");
 //!     } else {
 //!         println!("Domain is registered: {:?}", result.signatures);
 //!     }
@@ -49,7 +52,6 @@ pub mod rdap;
 pub mod registry;
 pub mod traits;
 pub mod whois;
-pub mod zone_data;
 
 // Re-export main types for convenience
 pub use doh::DohChecker;
@@ -58,4 +60,3 @@ pub use rdap::RdapChecker;
 pub use registry::CheckerRegistry;
 pub use traits::{CheckResult, CheckerPriority, DomainChecker};
 pub use whois::WhoisChecker;
-pub use zone_data::ZoneDataChecker;

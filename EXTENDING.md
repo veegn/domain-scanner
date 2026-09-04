@@ -36,7 +36,7 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// 返回检查器优先级
     fn priority(&self) -> CheckerPriority;
 
-    /// 检查域名是否可用
+    /// 检查域名是否存在注册记录
     async fn check(&self, domain: &str) -> CheckResult;
 
     /// 检查是否支持给定的 TLD
@@ -62,16 +62,19 @@ pub enum CheckerPriority {
 
 ```rust
 pub struct CheckResult {
-    pub available: bool,           // 域名是否可注册
+    pub registration_record_absent: bool, // 权威响应是否明确未发现注册记录
     pub signatures: Vec<String>,   // 检测到的签名/标识
     pub error: Option<String>,     // 错误信息
 }
 
 // 便捷方法
-CheckResult::available()                    // 域名可用
+CheckResult::no_registration_record()       // 权威来源明确未发现注册记录
 CheckResult::registered(vec!["RDAP"])       // 域名已注册
+CheckResult::unknown()                      // 无法判断（例如 DNS 无记录或 TLD 不受支持）
 CheckResult::error("Connection failed")     // 检查失败
 ```
+
+`registration_record_absent` 不等于“实际可购买”。溢价域名、注册局保留名、渠道限制和实时库存必须通过注册商可购/报价接口单独确认；未接入此类接口时 `DomainResult.purchasable` 为 `None`。
 
 ## 添加新检查器的步骤
 
@@ -149,12 +152,12 @@ impl DomainChecker for WhoisChecker {
             Ok(response) => {
                 let response_lower = response.to_lowercase();
                 
-                // 检查可用性指示词
+                // 只接受 WHOIS 明确的“未找到注册记录”指示词
                 if response_lower.contains("no match") 
                     || response_lower.contains("not found")
                     || response_lower.contains("status: free") 
                 {
-                    return CheckResult::available();
+                    return CheckResult::no_registration_record();
                 }
                 
                 // 检查已注册指示词
@@ -165,8 +168,8 @@ impl DomainChecker for WhoisChecker {
                     return CheckResult::registered(vec!["WHOIS".to_string()]);
                 }
                 
-                // 无法确定，返回可用（让其他检查器确认）
-                CheckResult::available()
+                // 无法确定时保持未知，不能推断为可购买
+                CheckResult::unknown()
             }
             Err(e) => CheckResult::error(format!("WHOIS query failed: {}", e)),
         }
@@ -177,7 +180,7 @@ impl DomainChecker for WhoisChecker {
     }
 
     fn is_authoritative(&self) -> bool {
-        false  // WHOIS 响应可能不够准确
+        true  // 仅在明确识别记录存在或不存在时返回成功结果
     }
 }
 ```
@@ -237,50 +240,9 @@ registry.sort_by_priority();
 2. 依次执行每个检查器的 `check()` 方法
 3. 收集所有签名
 4. 如果任一检查器返回"已注册"且该检查器是权威的，停止检查
-5. 如果所有检查器都返回"可用"，域名被标记为可用
-
-## 示例：添加 Zone File 检查器
-
-```rust
-//! Zone File 检查器
-//! 直接查询 DNS Zone 文件判断域名是否存在
-
-use async_trait::async_trait;
-use super::traits::{CheckResult, CheckerPriority, DomainChecker};
-
-#[derive(Debug, Clone)]
-pub struct ZoneFileChecker {
-    zone_file_url: String,
-}
-
-impl ZoneFileChecker {
-    pub fn new(zone_file_url: impl Into<String>) -> Self {
-        Self { zone_file_url: zone_file_url.into() }
-    }
-}
-
-#[async_trait]
-impl DomainChecker for ZoneFileChecker {
-    fn name(&self) -> &'static str { "ZoneFile" }
-    
-    fn priority(&self) -> CheckerPriority { CheckerPriority::Fast }
-    
-    async fn check(&self, domain: &str) -> CheckResult {
-        // 实现 Zone 文件查询逻辑
-        // ...
-        CheckResult::available()
-    }
-    
-    fn supports_tld(&self, tld: &str) -> bool {
-        // 只支持特定 TLD
-        tld == "com" || tld == "net"
-    }
-    
-    fn is_authoritative(&self) -> bool {
-        true  // Zone 文件是权威来源
-    }
-}
-```
+5. 只有权威检查器返回明确的“未发现注册记录”响应时，结果才标记为 `registration_record_absent`
+6. DNS 无记录、不支持的 TLD、空响应或含糊响应均保持未知，不会进入候选列表
+7. 注册商是否实际销售以及是否为溢价域名属于独立的 `purchasable`/报价能力，本检查器链不作推断
 
 ## 最佳实践
 
@@ -304,11 +266,11 @@ mod tests {
         
         // 测试已知已注册的域名
         let result = checker.check("google.com").await;
-        assert!(!result.available);
+        assert!(!result.registration_record_absent);
         
-        // 测试可能可用的域名（需要小心选择）
+        // 测试权威来源明确未发现注册记录的域名（需要小心选择）
         // let result = checker.check("xyzabc123notexist.com").await;
-        // assert!(result.available);
+        // assert!(result.registration_record_absent);
     }
 }
 ```

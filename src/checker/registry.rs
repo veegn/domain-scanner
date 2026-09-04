@@ -10,7 +10,6 @@ use super::local::LocalReservedChecker;
 use super::rdap::RdapChecker;
 use super::traits::{CheckResult, DomainChecker};
 use super::whois::WhoisChecker;
-use super::zone_data::ZoneDataChecker;
 use crate::config::AppConfig;
 use tracing::{debug, error, info, warn};
 
@@ -33,11 +32,10 @@ impl CheckerRegistry {
     /// Create a registry with the default set of checkers.
     ///
     /// Default checkers (in priority order):
-    /// 1. `LocalReservedChecker` �?fast local reserved-name check (no network)
-    /// 2. `ZoneDataChecker`      �?local `.xyz` zone snapshot
-    /// 3. `DohChecker`           �?DNS-over-HTTPS
-    /// 4. `RdapChecker`          �?RDAP protocol
-    /// 5. `WhoisChecker`         �?legacy WHOIS fallback
+    /// 1. `LocalReservedChecker` — fast local reserved-name check (no network)
+    /// 2. `DohChecker`           — DNS-over-HTTPS
+    /// 3. `RdapChecker`          — RDAP protocol
+    /// 4. `WhoisChecker`         — legacy WHOIS fallback
     ///
     /// `whois_servers` is loaded from the database (merged with config.json overrides)
     /// by the caller before this function is invoked.
@@ -45,8 +43,6 @@ impl CheckerRegistry {
         let mut registry = Self::new();
 
         registry.add_checker(Arc::new(LocalReservedChecker::new()));
-        registry.add_checker(Arc::new(ZoneDataChecker::new()));
-
         let doh_checker = DohChecker::with_servers(config.doh_servers.clone()).await;
         registry.add_checker(Arc::new(doh_checker));
 
@@ -97,11 +93,9 @@ impl CheckerRegistry {
         }
 
         let mut all_signatures = Vec::new();
-        let mut available = true;
-        let mut authoritative_available = false;
+        let mut authoritative_no_record = false;
         let mut last_error: Option<String> = None;
         let mut last_retryable: Option<CheckResult> = None;
-        let mut authoritative_result: Option<CheckResult> = None;
         let mut trace_log = Vec::new();
 
         for checker in &self.checkers {
@@ -141,7 +135,7 @@ impl CheckerRegistry {
                 if result.retryable {
                     last_retryable = Some(result.clone());
                 }
-                
+
                 if checker.is_authoritative() {
                     warn!(
                         target: "domain_scanner::checker::registry",
@@ -161,37 +155,26 @@ impl CheckerRegistry {
 
             all_signatures.extend(result.signatures.clone());
 
-            if !result.available {
-                available = false;
-            } else if checker.is_authoritative() {
-                authoritative_available = true;
+            if result.registration_record_absent && checker.is_authoritative() {
+                authoritative_no_record = true;
             }
 
             if checker.should_stop_pipeline(&result) {
-                authoritative_result = Some(result);
-                break;
+                let mut final_result = result;
+                if final_result.has_registration_evidence() {
+                    final_result.signatures = all_signatures;
+                }
+                final_result.trace = trace_log;
+                return final_result;
             }
         }
 
-        if let Some(final_res) = authoritative_result {
-            if final_res.available {
-                let mut result = CheckResult::available();
-                result.trace = trace_log;
-                return result;
-            } else {
-                let mut res = CheckResult::registered(all_signatures);
-                res.error = None;
-                res.trace = trace_log;
-                return res;
-            }
-        }
-
-        if !available {
+        if !all_signatures.is_empty() {
             let mut result = CheckResult::registered(all_signatures);
             result.trace = trace_log;
             result
-        } else if authoritative_available {
-            let mut result = CheckResult::available();
+        } else if authoritative_no_record {
+            let mut result = CheckResult::no_registration_record();
             result.trace = trace_log;
             result
         } else if let Some(retryable) = last_retryable {
@@ -199,24 +182,18 @@ impl CheckerRegistry {
             result.trace = trace_log;
             result
         } else if let Some(err) = last_error {
-            if all_signatures.is_empty() {
-                error!(
-                    target: "domain_scanner::checker::registry",
-                    context = "pipeline",
-                    domain,
-                    error = %err,
-                    "returning terminal error"
-                );
-                let mut result = CheckResult::error(err);
-                result.trace = trace_log;
-                result
-            } else {
-                let mut result = CheckResult::available();
-                result.trace = trace_log;
-                result
-            }
+            error!(
+                target: "domain_scanner::checker::registry",
+                context = "pipeline",
+                domain,
+                error = %err,
+                "returning terminal error"
+            );
+            let mut result = CheckResult::error(err);
+            result.trace = trace_log;
+            result
         } else {
-            let mut result = CheckResult::available();
+            let mut result = CheckResult::unknown();
             result.trace = trace_log;
             result
         }

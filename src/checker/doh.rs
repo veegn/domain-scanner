@@ -377,7 +377,7 @@ impl DomainChecker for DohChecker {
                 status = %resp.status(),
                 "DoH returned non-success HTTP"
             );
-            // Non-429 HTTP errors (5xx, 403, 502...) mean we cannot determine availability.
+            // Non-429 HTTP errors (5xx, 403, 502...) mean we cannot determine registration status.
             // Return error so the pipeline falls through to RDAP/WHOIS for confirmation.
             return CheckResult::error(format!("DoH returned HTTP {}", resp.status()))
                 .with_trace(format!("DoH: HTTP {} via {}", resp.status(), server));
@@ -398,7 +398,7 @@ impl DomainChecker for DohChecker {
                     "DoH response parse failed"
                 );
                 // A malformed/unparseable response tells us nothing about
-                // availability. Return an error (not "available") so the
+                // registration status. Return an error so the
                 // pipeline falls through to RDAP/WHOIS for an authoritative
                 // answer instead of emitting a false positive.
                 return CheckResult::error(format!("DoH response parse failed: {}", err))
@@ -413,7 +413,10 @@ impl DomainChecker for DohChecker {
             }
         }
 
-        CheckResult::available().with_trace(format!("DoH: no NS records via {}", server))
+        CheckResult::unknown().with_trace(format!(
+            "DoH: no NS records via {}; registration status remains unknown",
+            server
+        ))
     }
 
     fn supports_tld(&self, _tld: &str) -> bool {
@@ -428,9 +431,8 @@ impl DomainChecker for DohChecker {
     }
 
     fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
-        // Requirement 1: If DNS found (Available=False), stop the pipeline.
-        // If DNS NOT found (Available=True), continue to other checkers (WHOIS).
-        !result.available
+        // DNS presence is evidence of registration. DNS absence is inconclusive.
+        result.has_registration_evidence()
     }
 }
 
@@ -474,8 +476,8 @@ mod tests {
         let result = checker.check("google.com").await;
         // Should be registered (DNS signature)
         // Note: this test might fail if no internet or all doh block, but assuming dev env has net
-        if result.available {
-            // If marked available, check if it was an error
+        if result.registration_record_absent {
+            // DoH must never claim authoritative record absence.
             if let Some(e) = result.error {
                 debug!(
                     target: "domain_scanner::checker::doh",
@@ -505,7 +507,7 @@ mod tests {
                 .as_secs()
         );
         let result = checker.check(&domain).await;
-        // Should be available (no DNS)
-        assert!(result.available);
+        // DNS absence is inconclusive, not proof of registration-record absence.
+        assert!(!result.registration_record_absent);
     }
 }

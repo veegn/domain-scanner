@@ -37,7 +37,8 @@ pub struct PublishedPageData {
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct PublishedDomainFileRow {
     pub domain: String,
-    pub available: bool,
+    pub registration_record_absent: bool,
+    pub purchasable: Option<bool>,
     pub expiration_date: Option<String>,
     pub signatures: String,
 }
@@ -79,15 +80,15 @@ pub async fn create_published_scan(
     }
 
     let domains = sqlx::query_as::<_, PublishedDomainFileRow>(
-        "SELECT domain, available, expiration_date, signatures
+        "SELECT domain, registration_record_absent, purchasable, expiration_date, signatures
          FROM results
-         WHERE scan_id = ? AND available = 1
+         WHERE scan_id = ? AND registration_record_absent = 1
          ORDER BY domain ASC",
     )
     .bind(scan_id)
     .fetch_all(db)
     .await
-    .context("failed to load available scan results")?;
+    .context("failed to load scan results without registration records")?;
 
     let publication_id = Uuid::new_v4().to_string();
     let slug_seed = slugify(title);
@@ -208,9 +209,9 @@ pub async fn update_published_scan(
     let updated_at = Utc::now().to_rfc3339();
 
     let domains = sqlx::query_as::<_, PublishedDomainFileRow>(
-        "SELECT domain, available, expiration_date, signatures
+        "SELECT domain, registration_record_absent, purchasable, expiration_date, signatures
          FROM published_domains
-         WHERE published_scan_id = ?
+         WHERE published_scan_id = ? AND registration_record_absent = 1
          ORDER BY domain ASC",
     )
     .bind(id)
@@ -241,11 +242,12 @@ pub async fn update_published_scan(
 
     sqlx::query(
         "UPDATE published_scans
-         SET title = ?, description = ?, updated_at = ?
+         SET title = ?, description = ?, result_count = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(&meta.title)
     .bind(&meta.description)
+    .bind(meta.result_count)
     .bind(&updated_at)
     .bind(id)
     .execute(db)
@@ -361,13 +363,17 @@ async fn persist_publication(
     for batch in domains.chunks(500) {
         let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
             "INSERT INTO published_domains
-                (published_scan_id, domain, available, expiration_date, signatures, published_at) ",
+                (published_scan_id, domain, available, registration_record_absent, purchasable,
+                 expiration_date, signatures, published_at) ",
         );
 
         builder.push_values(batch, |mut row, domain| {
             row.push_bind(&meta.id)
                 .push_bind(&domain.domain)
-                .push_bind(domain.available)
+                // Never claim purchase availability through the legacy field.
+                .push_bind(false)
+                .push_bind(domain.registration_record_absent)
+                .push_bind(domain.purchasable)
                 .push_bind(&domain.expiration_date)
                 .push_bind(&domain.signatures)
                 .push_bind(&meta.published_at);
@@ -417,6 +423,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "manual regeneration utility; uses the workspace database and output directories"]
     async fn test_regenerate_all() {
         let db = SqlitePool::connect("sqlite:data/scans.db").await.unwrap();
         let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String, String, i64, String, Option<String>)> (
@@ -429,13 +436,24 @@ mod tests {
         .unwrap();
 
         for row in rows {
-            let (id, slug, scan_id, title, description, suffix, pattern, length, published_at, finished_at) = row;
+            let (
+                id,
+                slug,
+                scan_id,
+                title,
+                description,
+                suffix,
+                pattern,
+                length,
+                published_at,
+                finished_at,
+            ) = row;
             println!("Regenerating {}", slug);
 
             let domains = sqlx::query_as::<_, PublishedDomainFileRow>(
-                "SELECT domain, available, expiration_date, signatures
+                "SELECT domain, registration_record_absent, purchasable, expiration_date, signatures
                  FROM published_domains
-                 WHERE published_scan_id = ?
+                 WHERE published_scan_id = ? AND registration_record_absent = 1
                  ORDER BY domain ASC",
             )
             .bind(&id)
@@ -470,7 +488,9 @@ mod tests {
 
             // Also write to web/published (fallback/backup)
             let web_dir = Path::new("web/published").join(&slug);
-            write_publication_files(&web_dir, &meta, &data).await.unwrap();
+            write_publication_files(&web_dir, &meta, &data)
+                .await
+                .unwrap();
             println!("Wrote to {}", web_dir.display());
         }
     }

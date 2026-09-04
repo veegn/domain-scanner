@@ -50,9 +50,10 @@ data/scans.db*
 .playwright-cli/
 logs/
 data/published/
-data/centralized_zone_data/*.gz
 web/published/
 data/dictionaries/
+# Legacy local snapshots are ignored even though zone-data checking is no longer supported.
+data/centralized_zone_data/
 .agents/
 .claude/
 tmpclaude-*

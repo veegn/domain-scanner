@@ -292,7 +292,8 @@ pub async fn worker(
 
                 let result = DomainResult {
                     domain,
-                    available: check_result.available,
+                    registration_record_absent: check_result.registration_record_absent,
+                    purchasable: None,
                     error: check_result.error,
                     signatures: check_result.signatures,
                     expiration_date: check_result.expiration_date,

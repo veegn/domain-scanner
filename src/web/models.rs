@@ -94,7 +94,8 @@ pub struct PublicPublishedScanSummary {
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct PublishedDomainHit {
     pub domain: String,
-    pub available: bool,
+    pub registration_record_absent: bool,
+    pub purchasable: Option<bool>,
     pub expiration_date: Option<String>,
     pub signatures: String,
     pub published_at: String,
@@ -417,7 +418,8 @@ pub struct ScanLogEvent {
 pub struct ScanResultEvent {
     pub event_id: i64,
     pub domain: String,
-    pub available: bool,
+    pub registration_record_absent: bool,
+    pub purchasable: Option<bool>,
     pub expiration_date: Option<String>,
     pub signatures: String,
 }

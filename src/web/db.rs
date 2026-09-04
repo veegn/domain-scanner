@@ -96,11 +96,15 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await
     .context("failed to create dictionaries table")?;
 
+    // `available` remains only so existing databases can keep their table
+    // shape. New code never reads it and always writes false.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS results (
             scan_id TEXT,
             domain TEXT,
             available BOOLEAN,
+            registration_record_absent BOOLEAN NOT NULL DEFAULT 0,
+            purchasable BOOLEAN,
             expiration_date TEXT,
             signatures TEXT,
             PRIMARY KEY (scan_id, domain),
@@ -165,12 +169,15 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await
     .context("failed to create published_scans table")?;
 
+    // The published legacy field is retained for the same upgrade reason.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS published_domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             published_scan_id TEXT NOT NULL,
             domain TEXT NOT NULL,
             available BOOLEAN NOT NULL,
+            registration_record_absent BOOLEAN NOT NULL DEFAULT 0,
+            purchasable BOOLEAN,
             expiration_date TEXT,
             signatures TEXT NOT NULL DEFAULT '',
             published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -180,17 +187,14 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .context("failed to create published_domains table")?;
+    migrate_registration_status_schema(&pool).await?;
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_results_scan_id ON results(scan_id)")
         .execute(&pool)
         .await;
     let _ = sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_results_scan_available_domain ON results(scan_id, available, domain)",
-    )
-    .execute(&pool)
-    .await;
-    let _ = sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_results_scan_available_rowid ON results(scan_id, available, rowid)",
+        "CREATE INDEX IF NOT EXISTS idx_results_scan_record_absent_domain
+         ON results(scan_id, registration_record_absent, domain)",
     )
     .execute(&pool)
     .await;
@@ -254,6 +258,48 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await;
 
     Ok(pool)
+}
+
+async fn migrate_registration_status_schema(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(
+        pool,
+        "results",
+        "registration_record_absent",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(pool, "results", "purchasable", "BOOLEAN").await?;
+
+    add_column_if_missing(
+        pool,
+        "published_domains",
+        "registration_record_absent",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(pool, "published_domains", "purchasable", "BOOLEAN").await?;
+
+    // Legacy `available` rows cannot distinguish authoritative RDAP/WHOIS
+    // absence from an inconclusive DNS miss. Keep the new fields unknown.
+    sqlx::query(
+        "UPDATE published_scans
+         SET result_count = (
+             SELECT COUNT(*)
+             FROM published_domains pd
+             WHERE pd.published_scan_id = published_scans.id
+               AND pd.registration_record_absent = 1
+         )
+         WHERE result_count != (
+             SELECT COUNT(*)
+             FROM published_domains pd
+             WHERE pd.published_scan_id = published_scans.id
+               AND pd.registration_record_absent = 1
+         )",
+    )
+    .execute(pool)
+    .await
+    .context("failed to repair published registration-record counts")?;
+    Ok(())
 }
 
 async fn add_column_if_missing(
@@ -391,7 +437,7 @@ pub async fn load_app_config(pool: &SqlitePool) -> Result<Option<crate::config::
         .fetch_optional(pool)
         .await
         .context("failed to query app_settings")?;
-    
+
     if let Some(r) = row {
         let json_str: String = r.try_get("config_json")?;
         let config: crate::config::AppConfig = serde_json::from_str(&json_str)
@@ -403,17 +449,84 @@ pub async fn load_app_config(pool: &SqlitePool) -> Result<Option<crate::config::
 }
 
 pub async fn save_app_config(pool: &SqlitePool, config: &crate::config::AppConfig) -> Result<()> {
-    let json_str = serde_json::to_string(config)
-        .context("failed to serialize app config")?;
-    
+    let json_str = serde_json::to_string(config).context("failed to serialize app config")?;
+
     sqlx::query(
         "INSERT INTO app_settings (id, config_json) VALUES ('singleton', ?)
-         ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json"
+         ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
     )
     .bind(json_str)
     .execute(pool)
     .await
     .context("failed to save app_settings")?;
-    
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_available_rows_are_not_promoted_to_stronger_claims() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE results (domain TEXT, available BOOLEAN)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE published_scans (
+                id TEXT PRIMARY KEY,
+                result_count INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE published_domains (
+                published_scan_id TEXT,
+                domain TEXT,
+                available BOOLEAN NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO results VALUES ('legacy.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO published_scans VALUES ('publication-1', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO published_domains VALUES ('publication-1', 'legacy.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        migrate_registration_status_schema(&pool).await.unwrap();
+
+        let result = sqlx::query_as::<_, (bool, Option<bool>)>(
+            "SELECT registration_record_absent, purchasable FROM results",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let published = sqlx::query_as::<_, (bool, Option<bool>)>(
+            "SELECT registration_record_absent, purchasable FROM published_domains",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let result_count: i64 = sqlx::query_scalar("SELECT result_count FROM published_scans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(result, (false, None));
+        assert_eq!(published, (false, None));
+        assert_eq!(result_count, 0);
+    }
 }

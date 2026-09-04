@@ -476,7 +476,7 @@
                             </div>
                         </div>
                         <div class="p-4 bg-green-50 rounded-2xl border border-green-100 flex flex-col items-center">
-                            <span class="text-[9px] font-black text-green-500 uppercase mb-2">Detected Available</span>
+                            <span class="text-[9px] font-black text-green-500 uppercase mb-2">No Registration Record</span>
                             <div class="text-3xl font-black text-green-600" id="found">0</div>
                         </div>
                         <div class="p-4 bg-orange-50 rounded-2xl border border-orange-100 flex flex-col items-center">
@@ -527,11 +527,14 @@
                     <!-- Filters & Search -->
                     <div class="p-6 border-b border-gray-50 bg-white space-y-4">
                         <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
-                            <h2 class="text-xl font-black text-gray-900">Available Domains</h2>
+                            <div>
+                                <h2 class="text-xl font-black text-gray-900">Unregistered Candidates</h2>
+                                <p class="text-xs text-amber-600 mt-1">No registration record was found. Purchase availability is not confirmed.</p>
+                            </div>
                             <div class="flex flex-wrap gap-2">
                                 <button onclick="Handlers.rescanTask()" id="btnRescan"
                                     class="hidden text-[10px] bg-orange-500 hover:bg-orange-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-orange-100">Rescan
-                                    Available</button>
+                                    Candidates</button>
                                 <button onclick="Handlers.exportResults()"
                                     class="text-[10px] bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-100">Export
                                     All</button>
@@ -1236,7 +1239,7 @@
             renderResults() {
                 const tableBody = document.getElementById('resultsTable');
                 if (State.currentResults.length === 0) {
-                    tableBody.innerHTML = '<tr><td colspan="3" class="p-20 text-center text-gray-300 italic text-xs uppercase tracking-widest">No availability data detected</td></tr>';
+                    tableBody.innerHTML = '<tr><td colspan="3" class="p-20 text-center text-gray-300 italic text-xs uppercase tracking-widest">No domains without registration records detected</td></tr>';
                     return;
                 }
 
@@ -1264,17 +1267,17 @@
                         </td>
                         <td class="p-4 text-center">
                             <a href="https://www.spaceship.com/domain-search/?query=${encodeURIComponent(r.domain)}" target="_blank" 
-                               class="text-[9px] font-black bg-blue-50 text-blue-600 px-4 py-2 rounded-xl border border-blue-100 hover:bg-blue-600 hover:text-white transition-all uppercase tracking-widest">Register</a>
+                               class="text-[9px] font-black bg-blue-50 text-blue-600 px-4 py-2 rounded-xl border border-blue-100 hover:bg-blue-600 hover:text-white transition-all uppercase tracking-widest">Check Purchase</a>
                         </td>
                     </tr>
                 `).join('');
 
                 if (filtered.length > 500) {
-                    html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Viewing limited to 500 entries (Total Available: ${filtered.length})</td></tr>`;
+                    html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Viewing limited to 500 entries (Total Candidates: ${filtered.length})</td></tr>`;
                 } else {
                     const currentScan = State.scans.find(item => item.id === State.currentId);
                     if (currentScan && currentScan.found > State.currentResults.length) {
-                        html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Loaded ${State.currentResults.length} of ${currentScan.found} available domains</td></tr>`;
+                        html += `<tr><td colspan="3" class="p-8 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">Loaded ${State.currentResults.length} of ${currentScan.found} unregistered candidates</td></tr>`;
                     }
                 }
 
@@ -1511,7 +1514,7 @@
                 const scan = State.scans.find(item => item.id === id);
                 if (!scan) return;
                 if (scan.found <= 0) {
-                    alert('No available domains to publish.');
+                    alert('No domains without registration records to publish.');
                     return;
                 }
                 if (scan.status !== 'finished') {
@@ -1627,11 +1630,11 @@
             },
 
             buildPublishTitle(scan) {
-                return `Available domains for ${this.formatScanSummary(scan)}`;
+                return `Unregistered candidates for ${this.formatScanSummary(scan)}`;
             },
 
             buildPublishDescription(scan) {
-                return `Published results generated from scan ${scan.id.split('-')[0]} with ${scan.found} available domains.`;
+                return `Published results generated from scan ${scan.id.split('-')[0]} with ${scan.found} domains lacking registration records. Purchase availability is not confirmed.`;
             },
 
             compileSearchRegex(q) {
@@ -1652,8 +1655,9 @@
                         'task.summary': { tag: 'DONE', css: 'chip-done' },
                         'domain.queued': { tag: 'QUEUED', css: 'chip-scan' },
                         'domain.scanning': { tag: 'SCAN', css: 'chip-scan' },
-                        'domain.available': { tag: 'OPEN', css: 'chip-open' },
+                        'domain.no_registration_record': { tag: 'NO RECORD', css: 'chip-open' },
                         'domain.registered': { tag: 'TAKEN', css: 'chip-taken' },
+                        'domain.registration_status_unknown': { tag: 'UNKNOWN', css: 'chip-err' },
                         'domain.error': { tag: 'ERR', css: 'chip-err' }
                     };
                     const meta = chipMap[parsed.event] || { tag: parsed.event.split('.').pop().toUpperCase(), css: 'chip-task' };

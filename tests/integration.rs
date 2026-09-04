@@ -113,17 +113,26 @@ async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
 // =============================================================================
 
 #[test]
-fn test_check_result_available() {
-    let r = CheckResult::available();
-    assert!(r.available);
+fn test_check_result_no_registration_record() {
+    let r = CheckResult::no_registration_record();
+    assert!(r.registration_record_absent);
     assert!(r.signatures.is_empty());
     assert!(r.error.is_none());
 }
 
 #[test]
+fn test_check_result_unknown_is_not_a_candidate() {
+    let result = CheckResult::unknown();
+    assert!(!result.registration_record_absent);
+    assert!(!result.has_registration_evidence());
+    assert!(result.signatures.is_empty());
+    assert!(result.error.is_none());
+}
+
+#[test]
 fn test_check_result_registered() {
     let r = CheckResult::registered(vec!["DNS".to_string(), "WHOIS".to_string()]);
-    assert!(!r.available);
+    assert!(!r.registration_record_absent);
     assert_eq!(r.signatures.len(), 2);
     assert!(r.signatures.contains(&"DNS".to_string()));
     assert!(r.signatures.contains(&"WHOIS".to_string()));
@@ -133,7 +142,7 @@ fn test_check_result_registered() {
 #[test]
 fn test_check_result_registered_empty_signatures() {
     let r = CheckResult::registered(vec![]);
-    assert!(!r.available);
+    assert!(!r.registration_record_absent);
     assert!(r.signatures.is_empty());
     assert!(r.error.is_none());
 }
@@ -141,7 +150,7 @@ fn test_check_result_registered_empty_signatures() {
 #[test]
 fn test_check_result_error() {
     let r = CheckResult::error("something went wrong");
-    assert!(!r.available);
+    assert!(!r.registration_record_absent);
     assert!(r.signatures.is_empty());
     assert_eq!(r.error.as_deref(), Some("something went wrong"));
 }
@@ -157,7 +166,7 @@ fn test_check_result_error_from_string() {
 fn test_check_result_clone() {
     let r = CheckResult::registered(vec!["DNS".to_string()]);
     let r2 = r.clone();
-    assert_eq!(r.available, r2.available);
+    assert_eq!(r.registration_record_absent, r2.registration_record_absent);
     assert_eq!(r.signatures, r2.signatures);
 }
 
@@ -257,13 +266,13 @@ async fn test_rdap_bootstrap_uses_local_cache_when_remote_unavailable() {
 }
 
 #[tokio::test]
-async fn test_rdap_mocked_check_registered_available_and_rate_limited() {
+async fn test_rdap_mocked_check_registered_absent_and_rate_limited() {
     let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
     let checker =
         RdapChecker::with_config(std::collections::HashMap::new(), Some(bootstrap_url)).await;
 
     let taken = checker.check("taken.alpha").await;
-    assert!(!taken.available);
+    assert!(!taken.registration_record_absent);
     assert!(taken.signatures.contains(&"RDAP".to_string()));
     assert_eq!(
         taken.expiration_date.as_deref(),
@@ -271,7 +280,7 @@ async fn test_rdap_mocked_check_registered_available_and_rate_limited() {
     );
 
     let free = checker.check("free.alpha").await;
-    assert!(free.available);
+    assert!(free.registration_record_absent);
     assert!(free.error.is_none());
 
     let limited = checker.check("limited.alpha").await;
@@ -325,7 +334,7 @@ async fn test_local_reserved_rfc2606_example() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("example.com").await;
     assert!(
-        !result.available,
+        !result.registration_record_absent,
         "example.com should be reserved (RFC 2606)"
     );
     assert!(result.signatures.contains(&"RESERVED".to_string()));
@@ -335,7 +344,10 @@ async fn test_local_reserved_rfc2606_example() {
 async fn test_local_reserved_rfc2606_test() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("test.org").await;
-    assert!(!result.available, "test.org should be reserved (RFC 2606)");
+    assert!(
+        !result.registration_record_absent,
+        "test.org should be reserved (RFC 2606)"
+    );
 }
 
 #[tokio::test]
@@ -343,7 +355,7 @@ async fn test_local_reserved_rfc2606_invalid() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("invalid.net").await;
     assert!(
-        !result.available,
+        !result.registration_record_absent,
         "invalid.net should be reserved (RFC 2606)"
     );
 }
@@ -352,49 +364,70 @@ async fn test_local_reserved_rfc2606_invalid() {
 async fn test_local_reserved_localhost() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("localhost").await;
-    assert!(!result.available, "localhost should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "localhost should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_local() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("local.dev").await;
-    assert!(!result.available, "local.dev should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "local.dev should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_onion() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("onion.com").await;
-    assert!(!result.available, "onion.com should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "onion.com should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_www() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("www.com").await;
-    assert!(!result.available, "www.com should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "www.com should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_nic() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("nic.uk").await;
-    assert!(!result.available, "nic.uk should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "nic.uk should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_whois_word() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("whois.com").await;
-    assert!(!result.available, "whois.com should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "whois.com should be reserved"
+    );
 }
 
 #[tokio::test]
 async fn test_local_reserved_arpa() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("arpa.net").await;
-    assert!(!result.available, "arpa.net should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "arpa.net should be reserved"
+    );
 }
 
 #[tokio::test]
@@ -402,8 +435,8 @@ async fn test_local_not_reserved_google() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("google.com").await;
     assert!(
-        result.available,
-        "google.com should NOT be locally reserved"
+        !result.registration_record_absent && result.signatures.is_empty(),
+        "passing the local policy check must remain inconclusive"
     );
 }
 
@@ -411,14 +444,18 @@ async fn test_local_not_reserved_google() {
 async fn test_local_not_reserved_random() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("randomdomain12345.io").await;
-    assert!(result.available);
+    assert!(!result.registration_record_absent);
+    assert!(result.signatures.is_empty());
 }
 
 #[tokio::test]
 async fn test_local_case_insensitive() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("EXAMPLE.COM").await;
-    assert!(!result.available, "EXAMPLE.COM should be reserved");
+    assert!(
+        !result.registration_record_absent,
+        "EXAMPLE.COM should be reserved"
+    );
 }
 
 #[tokio::test]
@@ -438,7 +475,7 @@ async fn test_local_should_stop_pipeline_on_reserved() {
 }
 
 #[tokio::test]
-async fn test_local_should_not_stop_pipeline_on_available() {
+async fn test_local_should_not_stop_pipeline_when_inconclusive() {
     let checker = LocalReservedChecker::new();
     let result = checker.check("notreserved.com").await;
     assert!(!checker.should_stop_pipeline(&result));
@@ -457,13 +494,16 @@ async fn test_doh_registered_domain() {
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
     if result.error.is_none() {
-        assert!(!result.available, "google.com should have DNS records");
+        assert!(
+            !result.registration_record_absent,
+            "google.com should have DNS records"
+        );
         assert!(result.signatures.contains(&"DNS".to_string()));
     }
 }
 
 #[tokio::test]
-async fn test_doh_available_domain() {
+async fn test_doh_absence_is_inconclusive() {
     if !live_network_enabled() {
         return;
     }
@@ -478,8 +518,8 @@ async fn test_doh_available_domain() {
     );
     let result = checker.check(&domain).await;
     assert!(
-        result.available,
-        "random domain should not have DNS records"
+        !result.registration_record_absent && result.signatures.is_empty(),
+        "missing DNS records must not imply an absent registration record"
     );
 }
 
@@ -506,15 +546,15 @@ async fn test_doh_should_stop_pipeline_when_registered() {
 
     let checker = DohChecker::new().await;
     let result = checker.check("google.com").await;
-    if !result.available && result.error.is_none() {
+    if !result.registration_record_absent && result.error.is_none() {
         assert!(checker.should_stop_pipeline(&result));
     }
 }
 
 #[tokio::test]
-async fn test_doh_should_not_stop_pipeline_when_available() {
+async fn test_doh_should_not_stop_pipeline_when_inconclusive() {
     let checker = DohChecker::new().await;
-    let result = CheckResult::available();
+    let result = CheckResult::unknown();
     assert!(!checker.should_stop_pipeline(&result));
 }
 
@@ -529,7 +569,7 @@ async fn test_doh_with_custom_servers() {
     assert!(!checker.servers.is_empty());
     let result = checker.check("google.com").await;
     if result.error.is_none() {
-        assert!(!result.available);
+        assert!(!result.registration_record_absent);
     }
 }
 
@@ -591,7 +631,7 @@ async fn test_whois_registered_com() {
     let result = checker.check("google.com").await;
     if result.error.is_none() {
         assert!(
-            !result.available,
+            !result.registration_record_absent,
             "google.com should be registered via WHOIS"
         );
         assert!(result.signatures.contains(&"WHOIS".to_string()));
@@ -604,7 +644,7 @@ async fn test_whois_registered_com() {
 }
 
 #[tokio::test]
-async fn test_whois_available_random() {
+async fn test_whois_explicit_no_record_random() {
     if !live_network_enabled() {
         return;
     }
@@ -622,8 +662,8 @@ async fn test_whois_available_random() {
     let result = checker.check(&domain).await;
     if result.error.is_none() {
         assert!(
-            result.available,
-            "random domain should be available via WHOIS"
+            result.registration_record_absent,
+            "WHOIS should explicitly report no registration record"
         );
     }
 }
@@ -632,7 +672,12 @@ async fn test_whois_available_random() {
 async fn test_whois_unsupported_tld() {
     let checker = WhoisChecker::new();
     let result = checker.check("something.zzzz").await;
-    assert!(result.available, "Unknown TLD should be skipped cleanly");
+    assert!(!result.registration_record_absent);
+    assert!(result.signatures.is_empty());
+    assert!(
+        result.error.is_none(),
+        "unknown TLD should be skipped cleanly"
+    );
 }
 
 #[tokio::test]
@@ -754,7 +799,7 @@ async fn test_registry_with_defaults() {
             .await;
     let names = registry.checker_names();
     assert!(names.contains(&"LocalReserved"));
-    assert!(names.contains(&"ZoneData"));
+    assert!(!names.contains(&"ZoneData"));
     assert!(names.contains(&"DoH"));
     assert!(names.contains(&"RDAP"));
     assert!(names.contains(&"WHOIS"));
@@ -767,37 +812,12 @@ async fn test_registry_checker_order() {
             .await;
     let names = registry.checker_names();
     let local_idx = names.iter().position(|&n| n == "LocalReserved");
-    let zone_data_idx = names.iter().position(|&n| n == "ZoneData");
     let doh_idx = names.iter().position(|&n| n == "DoH");
     let rdap_idx = names.iter().position(|&n| n == "RDAP");
     let whois_idx = names.iter().position(|&n| n == "WHOIS");
     assert!(local_idx < doh_idx, "LocalReserved should come before DoH");
-    assert!(
-        local_idx < zone_data_idx,
-        "LocalReserved should come before ZoneData"
-    );
-    assert!(zone_data_idx < doh_idx, "ZoneData should come before DoH");
     assert!(doh_idx < rdap_idx, "DoH should come before RDAP");
     assert!(rdap_idx < whois_idx, "RDAP should come before WHOIS");
-}
-
-#[tokio::test]
-async fn test_registry_with_zone_data_checker_xyz() {
-    if !std::path::Path::new("data/centralized_zone_data/xyz.txt.gz").exists() {
-        return; // Skip if the zone file isn't present in the environment
-    }
-
-    let config = AppConfig::default();
-    let registry = CheckerRegistry::with_defaults(config, std::collections::HashMap::new()).await;
-
-    // This domain is known to be in the xyz zone file
-    let result = registry.check("0--0--7.xyz").await;
-
-    assert!(!result.available, "Domain should be marked as registered");
-    assert!(
-        result.trace.iter().any(|s| s.contains("ZoneData: registered")),
-        "Trace should indicate it was resolved via the ZoneDataChecker"
-    );
 }
 
 #[tokio::test]
@@ -816,7 +836,7 @@ async fn test_registry_prefers_rdap_before_whois_for_custom_suffix() {
         CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("taken.alpha").await;
 
-    assert!(!result.available);
+    assert!(!result.registration_record_absent);
     assert!(result.signatures.contains(&"RDAP".to_string()));
     assert!(!result.signatures.contains(&"WHOIS".to_string()));
     assert!(result.error.is_none());
@@ -825,7 +845,7 @@ async fn test_registry_prefers_rdap_before_whois_for_custom_suffix() {
 }
 
 #[tokio::test]
-async fn test_registry_keeps_authoritative_available_before_whois_failure() {
+async fn test_registry_keeps_authoritative_no_record_before_whois_failure() {
     let (bootstrap_url, handle) = spawn_mock_rdap_server().await;
 
     let config = AppConfig {
@@ -840,13 +860,13 @@ async fn test_registry_keeps_authoritative_available_before_whois_failure() {
         CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("free.alpha").await;
 
-    assert!(result.available);
+    assert!(result.registration_record_absent);
     assert!(result.error.is_none());
     assert!(
         result
             .trace
             .iter()
-            .any(|step| step.starts_with("RDAP: not found"))
+            .any(|step| step.starts_with("RDAP: no registration record"))
     );
 
     handle.abort();
@@ -858,7 +878,10 @@ async fn test_registry_reserved_domain_stops_early() {
         CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
             .await;
     let result = registry.check("example.com").await;
-    assert!(!result.available, "example.com should be registered");
+    assert!(
+        !result.registration_record_absent,
+        "example.com should be registered"
+    );
     assert!(result.signatures.contains(&"RESERVED".to_string()));
     assert!(
         !result.signatures.contains(&"DNS".to_string()),
@@ -877,13 +900,13 @@ async fn test_registry_registered_workflow() {
             .await;
     let result = registry.check("google.com").await;
     assert!(
-        !result.available,
+        !result.registration_record_absent,
         "google.com should be registered (pipeline)"
     );
 }
 
 #[tokio::test]
-async fn test_registry_available_workflow() {
+async fn test_registry_candidate_workflow() {
     if !live_network_enabled() {
         return;
     }
@@ -899,15 +922,13 @@ async fn test_registry_available_workflow() {
             .as_nanos()
     );
     let result = registry.check(&domain).await;
-    // Accept either: available=true, or error (network issues with WHOIS/DoH)
-    // But should NOT be "registered" (with signatures and no error)
-    if !result.available {
-        assert!(
-            result.error.is_some(),
-            "if not available, should be due to an error, not registration. signatures={:?}",
-            result.signatures
-        );
-    }
+    // A random name may have no record, be unknown, or hit a network error, but
+    // it must not be called registered without evidence.
+    assert!(
+        result.registration_record_absent || result.error.is_some() || result.signatures.is_empty(),
+        "unexpected registration evidence: {:?}",
+        result.signatures
+    );
 }
 
 #[tokio::test]
@@ -934,7 +955,12 @@ async fn test_registry_invalid_domain_no_dot() {
 async fn test_registry_empty() {
     let registry = CheckerRegistry::new();
     let result = registry.check("google.com").await;
-    assert!(result.available, "empty registry should return available");
+    assert!(!result.registration_record_absent);
+    assert!(result.signatures.is_empty());
+    assert!(
+        result.error.is_none(),
+        "empty registry should be inconclusive"
+    );
 }
 
 // =============================================================================
@@ -1411,7 +1437,8 @@ fn test_config_serialization_roundtrip() {
 fn test_domain_result_construction() {
     let result = DomainResult {
         domain: "test.com".to_string(),
-        available: true,
+        registration_record_absent: true,
+        purchasable: None,
         error: None,
         signatures: vec![],
         expiration_date: None,
@@ -1421,14 +1448,15 @@ fn test_domain_result_construction() {
         trace: vec![],
     };
     assert_eq!(result.domain, "test.com");
-    assert!(result.available);
+    assert!(result.registration_record_absent);
 }
 
 #[test]
 fn test_domain_result_with_error() {
     let result = DomainResult {
         domain: "bad.com".to_string(),
-        available: false,
+        registration_record_absent: false,
+        purchasable: None,
         error: Some("timeout".to_string()),
         signatures: vec![],
         expiration_date: None,
@@ -1437,7 +1465,7 @@ fn test_domain_result_with_error() {
         retry_after_secs: None,
         trace: vec![],
     };
-    assert!(!result.available);
+    assert!(!result.registration_record_absent);
     assert_eq!(result.error.as_deref(), Some("timeout"));
 }
 
@@ -1445,7 +1473,8 @@ fn test_domain_result_with_error() {
 fn test_domain_result_serialization() {
     let result = DomainResult {
         domain: "test.com".to_string(),
-        available: true,
+        registration_record_absent: true,
+        purchasable: None,
         error: None,
         signatures: vec!["DNS".to_string()],
         expiration_date: None,
@@ -1457,7 +1486,8 @@ fn test_domain_result_serialization() {
     let json = serde_json::to_string(&result).unwrap();
     let deserialized: DomainResult = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.domain, "test.com");
-    assert!(deserialized.available);
+    assert!(deserialized.registration_record_absent);
+    assert_eq!(deserialized.purchasable, None);
     assert_eq!(deserialized.signatures, vec!["DNS".to_string()]);
 }
 
@@ -1479,7 +1509,7 @@ async fn test_registry_domain_with_many_dots() {
         result.error.is_none(),
         "multi-level domain should not error"
     );
-    assert!(!result.available);
+    assert!(!result.registration_record_absent);
     assert!(result.signatures.contains(&"RDAP".to_string()));
 
     handle.abort();
@@ -1499,7 +1529,7 @@ async fn test_registry_accepts_multi_part_public_suffix() {
         result.error.is_none(),
         "multi-part public suffix should not error"
     );
-    assert!(!result.available);
+    assert!(!result.registration_record_absent);
     assert!(result.signatures.contains(&"RDAP".to_string()));
 
     handle.abort();

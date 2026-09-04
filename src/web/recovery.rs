@@ -109,7 +109,7 @@ async fn repair_scan_counters(db: &SqlitePool) -> u64 {
                  WHERE r.scan_id = scans.id
              ),
              found = (
-                 SELECT COALESCE(SUM(CASE WHEN r.available = 1 THEN 1 ELSE 0 END), 0)
+                 SELECT COALESCE(SUM(CASE WHEN r.registration_record_absent = 1 THEN 1 ELSE 0 END), 0)
                  FROM results r
                  WHERE r.scan_id = scans.id
              )
@@ -119,7 +119,7 @@ async fn repair_scan_counters(db: &SqlitePool) -> u64 {
                  WHERE r.scan_id = scans.id
              )
             OR found != (
-                 SELECT COALESCE(SUM(CASE WHEN r.available = 1 THEN 1 ELSE 0 END), 0)
+                 SELECT COALESCE(SUM(CASE WHEN r.registration_record_absent = 1 THEN 1 ELSE 0 END), 0)
                  FROM results r
                  WHERE r.scan_id = scans.id
              )",
@@ -193,7 +193,8 @@ mod tests {
             "CREATE TABLE results (
                 scan_id TEXT,
                 domain TEXT,
-                available BOOLEAN
+                available BOOLEAN,
+                registration_record_absent BOOLEAN NOT NULL DEFAULT 0
             )",
         )
         .execute(&pool)
@@ -220,11 +221,11 @@ mod tests {
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO results (scan_id, domain, available)
+            "INSERT INTO results (scan_id, domain, available, registration_record_absent)
              VALUES
-                ('run-1', 'a.test', 1),
-                ('run-1', 'b.test', 0),
-                ('pause-1', 'c.test', 1)",
+                ('run-1', 'a.test', 1, 1),
+                ('run-1', 'b.test', 0, 0),
+                ('pause-1', 'c.test', 1, 1)",
         )
         .execute(&pool)
         .await

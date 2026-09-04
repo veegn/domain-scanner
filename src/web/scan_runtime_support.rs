@@ -33,7 +33,8 @@ struct ScanLogRecord {
 
 pub(super) struct PendingResultPersist {
     pub(super) domain: String,
-    pub(super) available: bool,
+    pub(super) registration_record_absent: bool,
+    pub(super) purchasable: Option<bool>,
     pub(super) expiration_date: Option<String>,
     pub(super) signatures: String,
 }
@@ -677,7 +678,8 @@ pub(super) async fn get_result_counts(
     scan_id: &str,
 ) -> Result<(i64, i64), sqlx::Error> {
     let row = sqlx::query(
-        "SELECT COUNT(*) AS processed, COALESCE(SUM(CASE WHEN available = 1 THEN 1 ELSE 0 END), 0) AS found
+        "SELECT COUNT(*) AS processed,
+                COALESCE(SUM(CASE WHEN registration_record_absent = 1 THEN 1 ELSE 0 END), 0) AS found
          FROM results WHERE scan_id = ?",
     )
     .bind(scan_id)
@@ -747,16 +749,23 @@ pub(super) async fn flush_pending_results(
     let batch = std::mem::take(pending);
 
     let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
-        "INSERT OR REPLACE INTO results (scan_id, domain, available, expiration_date, signatures) ",
+        "INSERT OR REPLACE INTO results
+            (scan_id, domain, available, registration_record_absent, purchasable, expiration_date, signatures) ",
     );
     builder.push_values(batch.iter(), |mut row, result| {
         row.push_bind(scan_id)
             .push_bind(&result.domain)
-            .push_bind(result.available)
+            // Never claim purchase availability through the legacy field.
+            .push_bind(false)
+            .push_bind(result.registration_record_absent)
+            .push_bind(result.purchasable)
             .push_bind(&result.expiration_date)
             .push_bind(&result.signatures);
     });
-    builder.push(" RETURNING rowid as event_id, domain, available, expiration_date, signatures");
+    builder.push(
+        " RETURNING rowid as event_id, domain, registration_record_absent, purchasable,
+          expiration_date, signatures",
+    );
 
     match builder
         .build_query_as::<ScanResultEvent>()
@@ -765,7 +774,7 @@ pub(super) async fn flush_pending_results(
     {
         Ok(rows) => {
             for row in rows {
-                if row.available {
+                if row.registration_record_absent {
                     let _ = scan_stream.send(ScanStreamMessage::Result(row));
                 }
             }

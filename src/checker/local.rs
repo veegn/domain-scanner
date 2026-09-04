@@ -83,7 +83,7 @@ impl DomainChecker for LocalReservedChecker {
             CheckResult::registered(vec!["RESERVED".to_string()])
                 .with_trace("LocalReserved: reserved keyword matched")
         } else {
-            CheckResult::available().with_trace("LocalReserved: passed")
+            CheckResult::unknown().with_trace("LocalReserved: no local reservation matched")
         }
     }
 
@@ -93,14 +93,13 @@ impl DomainChecker for LocalReservedChecker {
     }
 
     fn is_authoritative(&self) -> bool {
-        // If we say it's reserved, it's definitely not available
-        // But if we say it's available, we need confirmation from network checkers
+        // A reservation match is definitive; a non-match says nothing about registration.
         false
     }
 
     fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
-        // Stop if found (Reserved). Continue if Available (Not Reserved).
-        !result.available
+        // Stop only when a local reservation matched.
+        result.has_registration_evidence()
     }
 }
 
@@ -114,26 +113,32 @@ mod tests {
 
         // 1. Test reserved word (RFC 2606)
         let result = checker.check("example.com").await;
-        assert!(!result.available, "example.com should be reserved locally");
+        assert!(
+            !result.registration_record_absent,
+            "example.com should be reserved locally"
+        );
         assert!(result.signatures.contains(&"RESERVED".to_string()));
 
         // 2. Test strictly reserved technical term
         let result = checker.check("localhost").await;
-        assert!(!result.available, "localhost should be reserved locally");
+        assert!(
+            !result.registration_record_absent,
+            "localhost should be reserved locally"
+        );
 
-        // 3. Test non-reserved domain (previously reserved in aggressive list, now should be available)
+        // 3. Passing the local policy check must remain inconclusive.
         // 'google.com' is registered, but NOT technically reserved by RFC standards, so local checker should pass it.
         let result = checker.check("google.com").await;
         assert!(
-            result.available,
-            "google.com should NOT be reserved locally (it is registered, but not a reserved word)"
+            !result.registration_record_absent && result.signatures.is_empty(),
+            "google.com should pass locally without implying purchase availability"
         );
 
         // 4. Test another random domain
         let result = checker.check("myveryuniqdomain123456.com").await;
         assert!(
-            result.available,
-            "random long domain should not be reserved locally"
+            !result.registration_record_absent && result.signatures.is_empty(),
+            "random long domain should pass locally without implying purchase availability"
         );
     }
 }

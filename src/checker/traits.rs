@@ -1,6 +1,6 @@
 //! Domain Checker Trait and Common Types
 //!
-//! This module defines the core trait for domain availability checking.
+//! This module defines the core trait for domain registration-record checking.
 //! All domain checker implementations must implement the `DomainChecker` trait.
 //!
 //! # How to Add a New Checker
@@ -18,8 +18,11 @@ use std::fmt::Debug;
 /// Result of a domain check operation
 #[derive(Debug, Clone)]
 pub struct CheckResult {
-    /// Whether the domain is available for registration
-    pub available: bool,
+    /// Whether an authoritative registration-data source reported no record.
+    ///
+    /// This does not mean that the domain can actually be purchased. Registries
+    /// may still reserve or specially price names that have no RDAP/WHOIS record.
+    pub registration_record_absent: bool,
     /// Signatures/indicators found (e.g., "DNS", "RDAP", "WHOIS")
     pub signatures: Vec<String>,
     /// Error message if the check failed
@@ -37,10 +40,10 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
-    /// Create a new result indicating the domain is available
-    pub fn available() -> Self {
+    /// Create a result indicating that no registration record was found.
+    pub fn no_registration_record() -> Self {
         Self {
-            available: true,
+            registration_record_absent: true,
             signatures: vec![],
             error: None,
             expiration_date: None,
@@ -54,7 +57,7 @@ impl CheckResult {
     /// Create a new result indicating the domain is registered/taken
     pub fn registered(signatures: Vec<String>) -> Self {
         Self {
-            available: false,
+            registration_record_absent: false,
             signatures,
             error: None,
             expiration_date: None,
@@ -68,7 +71,7 @@ impl CheckResult {
     /// Create a new result with expiration date
     pub fn registered_with_expiry(signatures: Vec<String>, expiry: Option<String>) -> Self {
         Self {
-            available: false,
+            registration_record_absent: false,
             signatures,
             error: None,
             expiration_date: expiry,
@@ -82,7 +85,7 @@ impl CheckResult {
     /// Create a new result indicating an error occurred
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
-            available: false,
+            registration_record_absent: false,
             signatures: vec![],
             error: Some(msg.into()),
             expiration_date: None,
@@ -99,7 +102,7 @@ impl CheckResult {
 
     pub fn rate_limited_with_retry(msg: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
         Self {
-            available: false,
+            registration_record_absent: false,
             signatures: vec![],
             error: Some(msg.into()),
             expiration_date: None,
@@ -112,7 +115,7 @@ impl CheckResult {
 
     pub fn retryable_error(msg: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
         Self {
-            available: false,
+            registration_record_absent: false,
             signatures: vec![],
             error: Some(msg.into()),
             expiration_date: None,
@@ -121,6 +124,24 @@ impl CheckResult {
             retry_after_secs,
             trace: vec![],
         }
+    }
+
+    /// Create a successful but inconclusive result.
+    pub fn unknown() -> Self {
+        Self {
+            registration_record_absent: false,
+            signatures: vec![],
+            error: None,
+            expiration_date: None,
+            rate_limited: false,
+            retryable: false,
+            retry_after_secs: None,
+            trace: vec![],
+        }
+    }
+
+    pub fn has_registration_evidence(&self) -> bool {
+        !self.registration_record_absent && !self.signatures.is_empty() && self.error.is_none()
     }
 
     pub fn with_trace(mut self, entry: impl Into<String>) -> Self {
@@ -135,8 +156,6 @@ impl CheckResult {
 pub enum CheckerPriority {
     /// Fastest checks (e.g., local reserved rules)
     Local = 0,
-    /// Local zone-file snapshot lookups.
-    ZoneData = 5,
     /// Fast network checks (e.g., DNS over HTTPS)
     Fast = 10,
     /// Standard network checks (e.g., RDAP)
@@ -145,7 +164,7 @@ pub enum CheckerPriority {
     Fallback = 30,
 }
 
-/// Trait for domain availability checkers
+/// Trait for domain registration-record checkers
 ///
 /// Implement this trait to add a new domain checking method.
 ///
@@ -171,7 +190,7 @@ pub enum CheckerPriority {
 ///
 ///     async fn check(&self, domain: &str) -> CheckResult {
 ///         // Your implementation here
-///         CheckResult::available()
+///         CheckResult::unknown()
 ///     }
 ///
 ///     fn supports_tld(&self, tld: &str) -> bool {
@@ -188,13 +207,13 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// Returns the priority of this checker
     fn priority(&self) -> CheckerPriority;
 
-    /// Check if a domain is available
+    /// Check a domain for registration-record evidence
     ///
     /// # Arguments
     /// * `domain` - The full domain name to check (e.g., "example.com")
     ///
     /// # Returns
-    /// A `CheckResult` indicating availability, signatures, and any errors
+    /// A `CheckResult` describing registration-record evidence and any errors
     async fn check(&self, domain: &str) -> CheckResult;
 
     /// Check if this checker supports a given TLD
@@ -226,17 +245,10 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// # Returns
     /// `true` if this result is definitive and subsequent checkers should be skipped.
     fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
-        // Default implementation for backward compatibility logic:
-        // By default, stop only if authoritative AND found registered (available=false).
-        // Checkers should override this to provide specific logic.
-        if !result.available && self.is_authoritative() {
-            true
-        } else {
-            false
-        }
+        self.is_authoritative() && result.has_registration_evidence()
     }
 
-    /// Whether this checker can definitively determine availability
+    /// Whether this checker can definitively determine registration status
     /// (Deprecated: use `should_stop_pipeline` for more control)
     fn is_authoritative(&self) -> bool {
         false

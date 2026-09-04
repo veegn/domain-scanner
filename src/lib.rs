@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainResult {
     pub domain: String,
-    pub available: bool,
+    /// An authoritative registration-data source reported no record.
+    pub registration_record_absent: bool,
+    /// Whether a registrar confirmed that the domain can be purchased.
+    /// None means no commercial availability provider was queried.
+    pub purchasable: Option<bool>,
     pub error: Option<String>,
     pub signatures: Vec<String>,
     pub expiration_date: Option<String>,

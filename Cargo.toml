@@ -3,7 +3,7 @@ name = "domain-scanner"
 version = "1.1.0"
 edition = "2024"
 authors = ["Veegn <veegn.me@gmail.com>"]
-description = "A high-performance, asynchronous domain availability scanner with Web Dashboard and SQLite persistence."
+description = "A high-performance asynchronous domain registration-record scanner with a Web dashboard and SQLite persistence."
 license = "MIT"
 readme = "README.md"
 keywords = ["domain", "scanner", "whois", "dns", "axum"]
@@ -15,7 +15,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 regex = "1.10"
-flate2 = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 async-trait = "0.1"
 anyhow = "1.0"

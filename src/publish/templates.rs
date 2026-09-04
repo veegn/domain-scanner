@@ -503,7 +503,7 @@ pub fn render_index_html(meta: &PublishedPageMeta) -> String {
             <p class="description">{description}</p>
             <div class="stats">
                 <div class="stat">
-                    <div class="stat-label">Available Domains</div>
+                    <div class="stat-label">No Registration Record</div>
                     <div class="stat-value">{result_count}</div>
                 </div>
                 <div class="stat">
@@ -585,7 +585,8 @@ pub fn render_index_html(meta: &PublishedPageMeta) -> String {
             <main class="content">
                 <div class="results-head">
                     <div>
-                        <h2 class="results-title">Available Domain List / 可用域名列表</h2>
+                        <h2 class="results-title">Unregistered Candidates / 未发现注册记录的候选域名</h2>
+                        <div class="footer">Purchase availability is not confirmed / 不代表注册商确认可购买</div>
                         <div class="footer" id="summary">Loading published data / 正在加载数据...</div>
                     </div>
                     <button type="button" id="btn-toggle-filters-mobile-trigger" class="mobile-toggle-btn">Show Filters / 显示筛选</button>

@@ -93,7 +93,11 @@ async fn test_worker_multiple_domains() {
     }
     assert_eq!(results.len(), 2);
     for r in &results {
-        assert!(!r.available, "{} should be registered", r.domain);
+        assert!(
+            !r.registration_record_absent,
+            "{} should have registration evidence",
+            r.domain
+        );
     }
 }
 
