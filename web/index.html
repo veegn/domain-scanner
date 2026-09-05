@@ -870,6 +870,8 @@
             scanStream: null,
             scansStream: null,
             currentResults: [],
+            resultDomains: new Set(),
+            resultRenderScheduled: false,
             selectedDomains: new Set(),
             sortDirection: 'asc',
             searchTimeout: null,
@@ -896,6 +898,7 @@
 
         const LOG_STREAM_WINDOW_SIZE = 40;
         const LOG_STREAM_BUFFER_SIZE = 500;
+        const RESULT_WINDOW_SIZE = 5000;
 
         /**
          * API Interaction Layer
@@ -995,6 +998,7 @@
                             State.currentId = null;
                             document.getElementById('statusArea').classList.add('hidden');
                             State.currentResults = [];
+                            State.resultDomains.clear();
                             UI.syncPublishActions();
                             UI.renderResults();
                         }
@@ -1003,17 +1007,36 @@
                 } catch (e) { alert(e.message); }
             },
 
-            async loadResults() {
-                if (!State.currentId) return;
+            async loadResults(id = State.currentId) {
+                if (!id) return 0;
                 try {
-                    State.currentResults = await this.fetchJson(`api/scan/${State.currentId}/results?limit=5000`);
+                    const rows = await this.fetchJson(`api/scan/${id}/results?latest=true&limit=5000`);
+                    if (State.currentId !== id) return 0;
+                    State.currentResults = rows;
+                    State.resultDomains = new Set(rows.map(item => item.domain));
                     UI.renderResults();
+                    return rows.reduce((max, row) => Math.max(max, Number(row.event_id) || 0), 0);
                 } catch (e) { console.error('Data pull failed:', e); }
+                return 0;
             },
 
-            openScanStream(id) {
+            async loadAllResults(id = State.currentId) {
+                if (!id) return [];
+                const rows = [];
+                let cursor = 0;
+                for (;;) {
+                    const batch = await this.fetchJson(`api/scan/${id}/results?after=${cursor}&limit=5000`);
+                    rows.push(...batch);
+                    if (batch.length < 5000) break;
+                    cursor = batch[batch.length - 1].event_id;
+                }
+                return rows;
+            },
+
+            openScanStream(id, resultAfter = 0) {
                 this.closeScanStream();
-                const url = Routes.api(`api/scan/${id}/stream`);
+                const url = new URL(Routes.api(`api/scan/${id}/stream`));
+                if (resultAfter > 0) url.searchParams.set('result_after', String(resultAfter));
                 const stream = new EventSource(url);
                 State.scanStream = stream;
                 State.lastLogId = 0;
@@ -1024,7 +1047,6 @@
                 State.logNewCount = 0;
                 State.lastActivityDomain = null;
                 State.statusSample = null;
-                State.currentResults = [];
                 UI.setStreamConnection('reconnecting');
                 UI.renderLogStream(State.streamLogs);
                 UI.renderResults();
@@ -1057,25 +1079,29 @@
                 stream.addEventListener('result', (event) => {
                     const result = Utils.parseJson(event.data);
                     if (!result) return;
-                    if (State.currentResults.some(item => item.domain === result.domain)) return;
+                    if (State.resultDomains.has(result.domain)) return;
+                    State.resultDomains.add(result.domain);
                     State.currentResults.push(result);
-                    UI.renderResults();
+                    this.trimResultWindow();
+                    UI.scheduleResultsRender();
                 });
 
                 stream.addEventListener('result_batch', (event) => {
                     const results = Utils.parseJson(event.data);
                     if (!Array.isArray(results)) return;
                     let changed = false;
-                    const seen = new Set(State.currentResults.map(item => item.domain));
 
                     for (const result of results) {
-                        if (seen.has(result.domain)) continue;
-                        seen.add(result.domain);
+                        if (State.resultDomains.has(result.domain)) continue;
+                        State.resultDomains.add(result.domain);
                         State.currentResults.push(result);
                         changed = true;
                     }
 
-                    if (changed) UI.renderResults();
+                    if (changed) {
+                        this.trimResultWindow();
+                        UI.scheduleResultsRender();
+                    }
                 });
 
                 stream.addEventListener('deleted', () => {
@@ -1084,6 +1110,7 @@
                         State.currentId = null;
                         document.getElementById('statusArea').classList.add('hidden');
                         State.currentResults = [];
+                        State.resultDomains.clear();
                         UI.syncPublishActions();
                         UI.renderResults();
                     }
@@ -1111,6 +1138,13 @@
                     State.scanStream = null;
                     UI.setStreamConnection('closed');
                 }
+            },
+
+            trimResultWindow() {
+                const excess = State.currentResults.length - RESULT_WINDOW_SIZE;
+                if (excess <= 0) return;
+                const removed = State.currentResults.splice(0, excess);
+                removed.forEach(item => State.resultDomains.delete(item.domain));
             }
         };
 
@@ -1553,6 +1587,15 @@
                 tableBody.innerHTML = html;
             },
 
+            scheduleResultsRender() {
+                if (State.resultRenderScheduled) return;
+                State.resultRenderScheduled = true;
+                requestAnimationFrame(() => {
+                    State.resultRenderScheduled = false;
+                    this.renderResults();
+                });
+            },
+
             scheduleLogRender() {
                 if (State.streamRenderScheduled) return;
                 State.streamRenderScheduled = true;
@@ -1664,9 +1707,9 @@
                 }
             },
 
-            getFilteredResults() {
+            getFilteredResults(source = State.currentResults) {
                 const query = document.getElementById('domainSearch').value.trim();
-                let filtered = [...State.currentResults];
+                let filtered = [...source];
 
                 if (query) {
                     const re = Utils.compileSearchRegex(query);
@@ -1792,17 +1835,21 @@
          * Interactivity Handlers
          */
         const Handlers = {
-            selectScan(id) {
+            async selectScan(id) {
+                API.closeScanStream();
                 State.currentId = id;
                 State.lastLogId = 0;
                 State.selectedDomains.clear();
                 State.lastActivityDomain = null;
                 State.currentResults = [];
+                State.resultDomains.clear();
                 document.getElementById('currentId').innerText = id;
                 document.getElementById('statusArea').classList.remove('hidden');
                 document.getElementById('logConsole').innerHTML = '<div class="text-gray-600 italic">Streaming data interface...</div>';
                 UI.syncPublishActions();
-                API.openScanStream(id);
+                const resultAfter = await API.loadResults(id);
+                if (State.currentId !== id) return;
+                API.openScanStream(id, resultAfter);
                 API.loadRecentScans();
             },
 
@@ -1852,12 +1899,20 @@
             },
 
             async rescanTask() {
-                if (State.currentResults.length === 0) return;
+                const scan = State.scans.find(item => item.id === State.currentId);
+                if (!scan || scan.found === 0) return;
+                if (scan.found > 50000) {
+                    alert('A rescan can contain at most 50,000 domains. Export the list and split it into smaller scans.');
+                    return;
+                }
                 try {
+                    const results = scan.found > State.currentResults.length
+                        ? await API.loadAllResults(State.currentId)
+                        : State.currentResults;
                     const newId = await API.fetchJson('api/scan', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ domains: State.currentResults.map(r => r.domain) })
+                        body: JSON.stringify({ domains: results.map(r => r.domain) })
                     });
                     this.selectScan(newId);
                 } catch (e) { alert(e.message); }
@@ -1992,6 +2047,7 @@
                     State.currentId = null;
                     document.getElementById('statusArea').classList.add('hidden');
                     State.currentResults = [];
+                    State.resultDomains.clear();
                     UI.syncPublishActions();
                     UI.renderResults();
                 }
@@ -2008,8 +2064,17 @@
                 UI.renderResults();
             },
 
-            exportResults() {
-                const data = State.selectedDomains.size > 0 ? Array.from(State.selectedDomains) : UI.getFilteredResults().map(r => r.domain);
+            async exportResults() {
+                let data;
+                if (State.selectedDomains.size > 0) {
+                    data = Array.from(State.selectedDomains);
+                } else {
+                    const scan = State.scans.find(item => item.id === State.currentId);
+                    const results = scan && scan.found > State.currentResults.length
+                        ? await API.loadAllResults(State.currentId)
+                        : State.currentResults;
+                    data = UI.getFilteredResults(results).map(r => r.domain);
+                }
                 if (data.length === 0) return;
                 const blob = new Blob([data.join('\n')], { type: 'text/plain' });
                 const a = Object.assign(document.createElement('a'), {

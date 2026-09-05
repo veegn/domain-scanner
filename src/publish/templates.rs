@@ -856,10 +856,25 @@ pub fn render_index_html(meta: &PublishedPageMeta) -> String {
 
         fetch('./data.json')
             .then((response) => response.json())
-            .then((payload) => {{
+            .then(async (payload) => {{
+                const rows = Array.isArray(payload.domains) ? [...payload.domains] : [];
+                const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+                // Keep concurrent requests bounded on large publications while
+                // still loading substantially faster than a serial waterfall.
+                for (let i = 0; i < chunks.length; i += 4) {{
+                    const batch = await Promise.all(chunks.slice(i, i + 4).map(async (name) => {{
+                        const response = await fetch('./' + encodeURIComponent(name));
+                        if (!response.ok) throw new Error(`Failed to load ${{name}}`);
+                        const chunk = await response.json();
+                        return Array.isArray(chunk) ? chunk : [];
+                    }}));
+                    batch.forEach(chunk => rows.push(...chunk));
+                }}
+                return rows;
+            }})
+            .then((rows) => {{
                 const vowels = new Set(['a', 'e', 'i', 'o', 'u']);
-                state.rows = Array.isArray(payload.domains) 
-                    ? payload.domains.map(r => {{
+                state.rows = rows.map(r => {{
                         const domainLower = r.domain.toLowerCase();
                         const label = domainLower.split('.')[0];
                         
@@ -919,8 +934,7 @@ pub fn render_index_html(meta: &PublishedPageMeta) -> String {
                             _isAlternating: isAlternating,
                             _pattern: pattern
                         }};
-                    }})
-                    : [];
+                    }});
                 render();
             }})
             .catch(() => {{

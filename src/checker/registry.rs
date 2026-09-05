@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::doh::DohChecker;
 use super::local::LocalReservedChecker;
 use super::rdap::RdapChecker;
-use super::traits::{CheckResult, DomainChecker};
+use super::traits::{CheckResult, DomainChecker, with_network_permits};
 use super::whois::WhoisChecker;
 use crate::config::AppConfig;
 use tracing::{debug, error, info, warn};
@@ -200,6 +200,17 @@ impl CheckerRegistry {
             result.trace = trace_log;
             result
         }
+    }
+
+    /// Run the pipeline with a global limit that applies only while a checker
+    /// performs network I/O. Provider cooldown waits happen before acquiring a
+    /// slot, so one limited service cannot occupy all global capacity.
+    pub async fn check_with_permits(
+        &self,
+        domain: &str,
+        permits: Arc<tokio::sync::Semaphore>,
+    ) -> CheckResult {
+        with_network_permits(permits, self.check(domain)).await
     }
 
     /// Get the list of registered checker names.

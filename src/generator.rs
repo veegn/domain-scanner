@@ -145,12 +145,12 @@ pub fn generate_domains(
 
         let charset_len = charset.len();
         if charset_len > 0 && length > 0 {
-            total_estimated = if regex.is_none() {
-                exact_combination_count(&charset, length, &priority_set)
-            } else {
-                count_matching_combinations(&charset, length, regex.as_ref(), &priority_set)
-                    + priority_set_len
-            };
+            // Regex matching happens in the producer. Counting exact matches
+            // here would traverse the entire search space twice and delay the
+            // first network check. Use the unfiltered upper bound while the
+            // scan runs; the runtime stores the exact processed total when it
+            // finishes.
+            total_estimated = exact_combination_count(&charset, length, &priority_set);
 
             let tx = tx.clone();
             let suffix = suffix.clone();
@@ -263,33 +263,6 @@ fn count_filtered_dictionary_entries(
     count
 }
 
-fn count_matching_combinations(
-    charset: &str,
-    length: usize,
-    regex: Option<&Regex>,
-    priority_set: &HashSet<String>,
-) -> usize {
-    let charset_chars: Vec<char> = charset.chars().collect();
-    let charset_size = charset_chars.len();
-    let total = charset_size.pow(length as u32);
-    let mut count = 0;
-
-    for counter in 0..total {
-        let current = build_combination(counter, &charset_chars, length);
-        if priority_set.contains(&current) {
-            continue;
-        }
-
-        if regex.is_some_and(|r| !r.is_match(&current)) {
-            continue;
-        }
-
-        count += 1;
-    }
-
-    count
-}
-
 fn exact_combination_count(charset: &str, length: usize, priority_set: &HashSet<String>) -> usize {
     let charset_size = charset.len();
     let total = charset_size.pow(length as u32);
@@ -302,17 +275,6 @@ fn exact_combination_count(charset: &str, length: usize, priority_set: &HashSet<
         .count();
 
     total + priority_set.len().saturating_sub(duplicate_priority_count)
-}
-
-fn build_combination(mut counter: usize, charset_chars: &[char], length: usize) -> String {
-    let charset_size = charset_chars.len();
-    let mut current = vec![0_u8; length];
-    for position in (0..length).rev() {
-        let charset_idx = counter % charset_size;
-        current[position] = charset_chars[charset_idx] as u8;
-        counter /= charset_size;
-    }
-    String::from_utf8(current).expect("domain charset is always ASCII")
 }
 
 /// A lazy odometer-based iterator that yields Cartesian product combinations

@@ -360,22 +360,28 @@ async fn test_local_reserved_rfc2606_example() {
 }
 
 #[tokio::test]
-async fn test_local_reserved_rfc2606_test() {
+async fn test_local_special_use_test_is_a_suffix() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("test.org").await;
+    assert!(checker.check("test.org").await.signatures.is_empty());
     assert!(
-        !result.registration_record_absent,
-        "test.org should be reserved (RFC 2606)"
+        checker
+            .check("anything.test")
+            .await
+            .signatures
+            .contains(&"RESERVED".to_string())
     );
 }
 
 #[tokio::test]
-async fn test_local_reserved_rfc2606_invalid() {
+async fn test_local_special_use_invalid_is_a_suffix() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("invalid.net").await;
+    assert!(checker.check("invalid.net").await.signatures.is_empty());
     assert!(
-        !result.registration_record_absent,
-        "invalid.net should be reserved (RFC 2606)"
+        checker
+            .check("anything.invalid")
+            .await
+            .signatures
+            .contains(&"RESERVED".to_string())
     );
 }
 
@@ -392,60 +398,47 @@ async fn test_local_reserved_localhost() {
 #[tokio::test]
 async fn test_local_reserved_local() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("local.dev").await;
+    assert!(checker.check("local.dev").await.signatures.is_empty());
     assert!(
-        !result.registration_record_absent,
-        "local.dev should be reserved"
+        checker
+            .check("host.local")
+            .await
+            .signatures
+            .contains(&"RESERVED".to_string())
     );
 }
 
 #[tokio::test]
 async fn test_local_reserved_onion() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("onion.com").await;
+    assert!(checker.check("onion.com").await.signatures.is_empty());
     assert!(
-        !result.registration_record_absent,
-        "onion.com should be reserved"
+        checker
+            .check("service.onion")
+            .await
+            .signatures
+            .contains(&"RESERVED".to_string())
     );
 }
 
 #[tokio::test]
-async fn test_local_reserved_www() {
+async fn test_local_does_not_assume_registry_policy_words() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("www.com").await;
-    assert!(
-        !result.registration_record_absent,
-        "www.com should be reserved"
-    );
-}
-
-#[tokio::test]
-async fn test_local_reserved_nic() {
-    let checker = LocalReservedChecker::new();
-    let result = checker.check("nic.uk").await;
-    assert!(
-        !result.registration_record_absent,
-        "nic.uk should be reserved"
-    );
-}
-
-#[tokio::test]
-async fn test_local_reserved_whois_word() {
-    let checker = LocalReservedChecker::new();
-    let result = checker.check("whois.com").await;
-    assert!(
-        !result.registration_record_absent,
-        "whois.com should be reserved"
-    );
+    assert!(checker.check("www.com").await.signatures.is_empty());
+    assert!(checker.check("nic.uk").await.signatures.is_empty());
+    assert!(checker.check("whois.com").await.signatures.is_empty());
 }
 
 #[tokio::test]
 async fn test_local_reserved_arpa() {
     let checker = LocalReservedChecker::new();
-    let result = checker.check("arpa.net").await;
+    assert!(checker.check("arpa.net").await.signatures.is_empty());
     assert!(
-        !result.registration_record_absent,
-        "arpa.net should be reserved"
+        checker
+            .check("service.arpa")
+            .await
+            .signatures
+            .contains(&"RESERVED".to_string())
     );
 }
 

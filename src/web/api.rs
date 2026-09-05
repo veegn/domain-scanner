@@ -79,12 +79,21 @@ struct PublicDomainSearchQuery {
 struct ResultsQuery {
     offset: Option<i64>,
     limit: Option<i64>,
+    after: Option<i64>,
+    latest: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ScanStreamQuery {
+    log_after: Option<i64>,
+    result_after: Option<i64>,
 }
 
 async fn start_scan(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<StartScanRequest>,
+    Json(mut payload): Json<StartScanRequest>,
 ) -> ApiResponse {
+    payload.normalize();
     if let Err(e) = payload.validate() {
         return api_error(StatusCode::BAD_REQUEST, e);
     }
@@ -217,7 +226,14 @@ async fn get_results(
 ) -> ApiResponse {
     let offset = query.offset.unwrap_or(0).max(0);
     let limit = query.limit.unwrap_or(500).clamp(1, 5_000);
-    let rows = match fetch_scan_results_page(&state.db, &id, offset, limit).await {
+    let rows = match (query.latest.unwrap_or(false), query.after) {
+        (true, _) => fetch_latest_scan_results(&state.db, &id, limit).await,
+        (false, Some(after)) => {
+            fetch_scan_results_page_after(&state.db, &id, after.max(0), i64::MAX, limit).await
+        }
+        (false, None) => fetch_scan_results_page(&state.db, &id, offset, limit).await,
+    };
+    let rows = match rows {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -369,6 +385,7 @@ async fn search_public_domains(
 async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db = state.db.clone();
     let streams = state.streams.clone();
+    let mut rx = streams.subscribe_scans();
     let current_version = streams.current_scans_version();
 
     let stream = async_stream::stream! {
@@ -393,7 +410,6 @@ async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             }
         }
 
-        let mut rx = streams.subscribe_scans();
         loop {
             match rx.recv().await {
                 Ok(version) => {
@@ -421,7 +437,28 @@ async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let version = streams.current_scans_version();
+                    last_version = version;
+                    match fetch_scan_summaries(&db).await {
+                        Ok(rows) => {
+                            yield Ok::<Event, Infallible>(
+                                Event::default()
+                                    .id(format_scans_event_id(version))
+                                    .event("scans")
+                                    .data(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()))
+                            );
+                        }
+                        Err(err) => {
+                            yield Ok::<Event, Infallible>(
+                                Event::default()
+                                    .event("error")
+                                    .data(json!({ "error": err.to_string() }).to_string())
+                            );
+                            break;
+                        }
+                    }
+                }
             }
         }
     };
@@ -436,7 +473,7 @@ async fn stream_scans(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn get_logs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
-    let rows = match fetch_scan_logs(&state.db, &id, 0).await {
+    let rows = match fetch_latest_scan_logs(&state.db, &id).await {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -447,24 +484,26 @@ async fn get_logs(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
 async fn stream_scan(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<ScanStreamQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let db = state.db.clone();
     let streams = state.streams.clone();
-    let (mut log_cursor, mut result_cursor) = parse_scan_event_id(
+    let (header_log_cursor, header_result_cursor) = parse_scan_event_id(
         headers
             .get("last-event-id")
             .and_then(|value| value.to_str().ok()),
     );
+    let mut log_cursor = header_log_cursor.max(query.log_after.unwrap_or(0)).max(0);
+    let mut result_cursor = header_result_cursor
+        .max(query.result_after.unwrap_or(0))
+        .max(0);
+    // Subscribe before taking the database snapshot. Messages that arrive while
+    // replaying are retained by the receiver and deduplicated by their row ids.
+    let mut rx = streams.subscribe_scan(&id).await;
 
     let stream = async_stream::stream! {
-        match sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-            "SELECT id, status, total, processed, found FROM scans WHERE id = ?",
-        )
-        .bind(&id)
-        .fetch_optional(&db)
-        .await
-        {
+        let initial_status = match fetch_scan_status_row(&db, &id).await {
             Ok(Some((scan_id, status, total, processed, found))) => {
                 yield Ok::<Event, Infallible>(
                     sse_event(
@@ -479,11 +518,13 @@ async fn stream_scan(
                         }),
                     )
                 );
+                status
             }
             Ok(None) => {
                 yield Ok::<Event, Infallible>(
                     sse_event_without_id("deleted", json!({ "id": id }))
                 );
+                streams.cleanup_scan(&id).await;
                 return;
             }
             Err(err) => {
@@ -492,63 +533,94 @@ async fn stream_scan(
                 );
                 return;
             }
-        }
+        };
 
-        match fetch_scan_logs(&db, &id, log_cursor).await {
-            Ok(mut rows) => {
-                // A fresh subscription receives the newest page; replay it in
-                // chronological order before switching to live events.
-                if log_cursor == 0 {
+        let (log_high_water, result_high_water) = match fetch_scan_stream_high_water(&db, &id).await {
+            Ok(high_water) => high_water,
+            Err(err) => {
+                yield Ok::<Event, Infallible>(
+                    sse_event_without_id("error", json!({ "error": err.to_string() }))
+                );
+                return;
+            }
+        };
+
+        if log_cursor == 0 {
+            match fetch_latest_scan_logs(&db, &id).await {
+                Ok(mut rows) => {
                     rows.reverse();
+                    for log in rows {
+                        log_cursor = log.id.max(log_cursor);
+                        yield Ok::<Event, Infallible>(
+                            sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
+                        );
+                    }
                 }
-                for log in rows {
-                    log_cursor = log.id.max(log_cursor);
+                Err(err) => {
                     yield Ok::<Event, Infallible>(
-                        sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
+                        sse_event_without_id("error", json!({ "error": err.to_string() }))
                     );
+                    return;
                 }
             }
-            Err(err) => {
-                yield Ok::<Event, Infallible>(
-                    sse_event_without_id("error", json!({ "error": err.to_string() }))
-                );
-                return;
+        } else {
+            while log_cursor < log_high_water {
+                match fetch_scan_logs_page(&db, &id, log_cursor, log_high_water, 200).await {
+                    Ok(rows) if rows.is_empty() => break,
+                    Ok(rows) => {
+                        for log in rows {
+                            log_cursor = log.id;
+                            yield Ok::<Event, Infallible>(
+                                sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        yield Ok::<Event, Infallible>(
+                            sse_event_without_id("error", json!({ "error": err.to_string() }))
+                        );
+                        return;
+                    }
+                }
             }
         }
 
-        match fetch_scan_results(&db, &id, result_cursor).await {
-            Ok(rows) => {
-                for batch in rows.chunks(100) {
-                    if let Some(last) = batch.last() {
-                        result_cursor = result_cursor.max(last.event_id);
-                    }
+        while result_cursor < result_high_water {
+            match fetch_scan_results_page_after(&db, &id, result_cursor, result_high_water, 500).await {
+                Ok(rows) if rows.is_empty() => break,
+                Ok(rows) => {
+                    result_cursor = rows.last().map(|row| row.event_id).unwrap_or(result_cursor);
                     yield Ok::<Event, Infallible>(
                         sse_serialized_event(
                             "result_batch",
                             format_scan_event_id(log_cursor, result_cursor),
-                            batch,
+                            &rows,
                         )
                     );
                 }
-            }
-            Err(err) => {
-                yield Ok::<Event, Infallible>(
-                    sse_event_without_id("error", json!({ "error": err.to_string() }))
-                );
-                return;
+                Err(err) => {
+                    yield Ok::<Event, Infallible>(
+                        sse_event_without_id("error", json!({ "error": err.to_string() }))
+                    );
+                    return;
+                }
             }
         }
 
-        let mut rx = streams.subscribe_scan(&id).await;
-        let mut pending: Option<ScanStreamMessage> = None;
-        loop {
-            let next = if let Some(message) = pending.take() {
-                Ok(message)
-            } else {
-                rx.recv().await
-            };
+        if is_quiescent_scan_status(&initial_status) {
+            yield Ok::<Event, Infallible>(
+                sse_event(
+                    "complete",
+                    format_scan_event_id(log_cursor, result_cursor),
+                    json!({ "id": id }),
+                )
+            );
+            streams.cleanup_scan(&id).await;
+            return;
+        }
 
-            match next {
+        loop {
+            match rx.recv().await {
                 Ok(ScanStreamMessage::Status(status)) => {
                     yield Ok::<Event, Infallible>(
                         sse_serialized_event(
@@ -559,33 +631,26 @@ async fn stream_scan(
                     );
                 }
                 Ok(ScanStreamMessage::Log(log)) => {
-                    log_cursor = log_cursor.max(log.id);
+                    if log.id > 0 && log.id <= log_cursor {
+                        continue;
+                    }
+                    if log.id > 0 {
+                        log_cursor = log.id;
+                    }
                     yield Ok::<Event, Infallible>(
                         sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
                     );
                 }
                 Ok(ScanStreamMessage::Result(result)) => {
-                    let mut batch = vec![result];
-                    loop {
-                        match rx.try_recv() {
-                            Ok(ScanStreamMessage::Result(result)) => batch.push(result),
-                            Ok(other) => {
-                                pending = Some(other);
-                                break;
-                            }
-                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                        }
+                    if result.event_id <= result_cursor {
+                        continue;
                     }
-                    if let Some(last) = batch.last() {
-                        result_cursor = result_cursor.max(last.event_id);
-                    }
+                    result_cursor = result.event_id;
                     yield Ok::<Event, Infallible>(
                         sse_serialized_event(
                             "result_batch",
                             format_scan_event_id(log_cursor, result_cursor),
-                            &batch,
+                            &[result],
                         )
                     );
                 }
@@ -610,7 +675,96 @@ async fn stream_scan(
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (next_log_high_water, next_result_high_water) =
+                        match fetch_scan_stream_high_water(&db, &id).await {
+                            Ok(high_water) => high_water,
+                            Err(err) => {
+                                yield Ok::<Event, Infallible>(
+                                    sse_event_without_id("error", json!({ "error": err.to_string() }))
+                                );
+                                break;
+                            }
+                        };
+
+                    while log_cursor < next_log_high_water {
+                        match fetch_scan_logs_page(&db, &id, log_cursor, next_log_high_water, 200).await {
+                            Ok(rows) if rows.is_empty() => break,
+                            Ok(rows) => {
+                                for log in rows {
+                                    log_cursor = log.id;
+                                    yield Ok::<Event, Infallible>(
+                                        sse_serialized_event("log", format_scan_event_id(log_cursor, result_cursor), &log)
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                yield Ok::<Event, Infallible>(
+                                    sse_event_without_id("error", json!({ "error": err.to_string() }))
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    while result_cursor < next_result_high_water {
+                        match fetch_scan_results_page_after(&db, &id, result_cursor, next_result_high_water, 500).await {
+                            Ok(rows) if rows.is_empty() => break,
+                            Ok(rows) => {
+                                result_cursor = rows.last().map(|row| row.event_id).unwrap_or(result_cursor);
+                                yield Ok::<Event, Infallible>(
+                                    sse_serialized_event(
+                                        "result_batch",
+                                        format_scan_event_id(log_cursor, result_cursor),
+                                        &rows,
+                                    )
+                                );
+                            }
+                            Err(err) => {
+                                yield Ok::<Event, Infallible>(
+                                    sse_event_without_id("error", json!({ "error": err.to_string() }))
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    match fetch_scan_status_row(&db, &id).await {
+                        Ok(Some((scan_id, status, total, processed, found))) => {
+                            yield Ok::<Event, Infallible>(
+                                sse_event(
+                                    "status",
+                                    format_scan_event_id(log_cursor, result_cursor),
+                                    json!({
+                                        "id": scan_id,
+                                        "status": &status,
+                                        "total": total,
+                                        "processed": processed,
+                                        "found": found,
+                                    }),
+                                )
+                            );
+                            if !is_quiescent_scan_status(&status) {
+                                continue;
+                            }
+                            yield Ok::<Event, Infallible>(
+                                sse_event(
+                                    "complete",
+                                    format_scan_event_id(log_cursor, result_cursor),
+                                    json!({ "id": id }),
+                                )
+                            );
+                            break;
+                        }
+                        Ok(None) => {
+                            yield Ok::<Event, Infallible>(
+                                sse_event("deleted", format_scan_event_id(log_cursor, result_cursor), json!({ "id": id }))
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     };
@@ -692,53 +846,89 @@ async fn fetch_scan_exists(db: &sqlx::SqlitePool, id: &str) -> Result<bool, sqlx
         .map(|count| count > 0)
 }
 
-async fn fetch_scan_logs(
+async fn fetch_latest_scan_logs(
+    db: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<Vec<LogRow>, sqlx::Error> {
+    sqlx::query_as::<_, LogRow>(
+        "SELECT id, message, level, created_at
+         FROM scan_logs
+         WHERE scan_id = ?
+         ORDER BY id DESC
+         LIMIT 200",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
+
+async fn fetch_scan_logs_page(
     db: &sqlx::SqlitePool,
     id: &str,
     after_id: i64,
+    through_id: i64,
+    limit: i64,
 ) -> Result<Vec<LogRow>, sqlx::Error> {
-    if after_id == 0 {
-        sqlx::query_as::<_, LogRow>(
-            "SELECT id, message, level, created_at
-             FROM scan_logs
-             WHERE scan_id = ?
-             ORDER BY id DESC
-             LIMIT 200",
-        )
-        .bind(id)
-        .fetch_all(db)
-        .await
-    } else {
-        sqlx::query_as::<_, LogRow>(
-            "SELECT id, message, level, created_at
-             FROM scan_logs
-             WHERE scan_id = ? AND id > ?
-             ORDER BY id ASC
-             LIMIT 200",
-        )
-        .bind(id)
-        .bind(after_id)
-        .fetch_all(db)
-        .await
-    }
+    sqlx::query_as::<_, LogRow>(
+        "SELECT id, message, level, created_at
+         FROM scan_logs
+         WHERE scan_id = ? AND id > ? AND id <= ?
+         ORDER BY id ASC
+         LIMIT ?",
+    )
+    .bind(id)
+    .bind(after_id)
+    .bind(through_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
 }
 
-async fn fetch_scan_results(
+async fn fetch_scan_results_page_after(
     db: &sqlx::SqlitePool,
     id: &str,
     after_event_id: i64,
+    through_event_id: i64,
+    limit: i64,
 ) -> Result<Vec<ResultRow>, sqlx::Error> {
     sqlx::query_as::<_, ResultRow>(
         "SELECT rowid as event_id, domain, registration_record_absent, purchasable,
                 expiration_date, signatures
          FROM results
-         WHERE scan_id = ? AND registration_record_absent = 1 AND rowid > ?
-         ORDER BY rowid ASC",
+         WHERE scan_id = ? AND registration_record_absent = 1
+           AND rowid > ? AND rowid <= ?
+         ORDER BY rowid ASC
+         LIMIT ?",
     )
     .bind(id)
     .bind(after_event_id)
+    .bind(through_event_id)
+    .bind(limit)
     .fetch_all(db)
     .await
+}
+
+async fn fetch_scan_stream_high_water(
+    db: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<(i64, i64), sqlx::Error> {
+    let log_id = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(id), 0) FROM scan_logs WHERE scan_id = ?",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await?;
+    let result_id = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(rowid), 0) FROM results WHERE scan_id = ? AND registration_record_absent = 1",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await?;
+    Ok((log_id, result_id))
+}
+
+fn is_quiescent_scan_status(status: &str) -> bool {
+    matches!(status, "finished" | "failed" | "cancelled" | "paused")
 }
 
 async fn fetch_scan_results_page(
@@ -760,6 +950,27 @@ async fn fetch_scan_results_page(
     .bind(offset)
     .fetch_all(db)
     .await
+}
+
+async fn fetch_latest_scan_results(
+    db: &sqlx::SqlitePool,
+    id: &str,
+    limit: i64,
+) -> Result<Vec<ResultRow>, sqlx::Error> {
+    let mut rows = sqlx::query_as::<_, ResultRow>(
+        "SELECT rowid as event_id, domain, registration_record_absent, purchasable,
+                expiration_date, signatures
+         FROM results
+         WHERE scan_id = ? AND registration_record_absent = 1
+         ORDER BY rowid DESC
+         LIMIT ?",
+    )
+    .bind(id)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    rows.reverse();
+    Ok(rows)
 }
 
 async fn fetch_published_scan_summaries(
@@ -1327,5 +1538,102 @@ async fn update_settings(
     match crate::web::save_app_config(&state.db, &payload).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn scan_stream_pages_cover_the_snapshot_without_gaps() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE scan_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT,
+                message TEXT,
+                level TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE results (
+                scan_id TEXT,
+                domain TEXT,
+                registration_record_absent BOOLEAN,
+                purchasable BOOLEAN,
+                expiration_date TEXT,
+                signatures TEXT
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 450)
+             INSERT INTO scan_logs (scan_id, message, level)
+             SELECT 'scan-1', printf('log-%d', x), 'INFO' FROM n",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 1200)
+             INSERT INTO results
+                (scan_id, domain, registration_record_absent, purchasable, expiration_date, signatures)
+             SELECT 'scan-1', printf('domain-%04d.test', x), 1, NULL, NULL, 'WHOIS' FROM n",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let (log_high_water, result_high_water) =
+            fetch_scan_stream_high_water(&db, "scan-1").await.unwrap();
+        assert_eq!((log_high_water, result_high_water), (450, 1200));
+
+        let mut log_cursor = 0;
+        let mut log_count = 0;
+        while log_cursor < log_high_water {
+            let page = fetch_scan_logs_page(&db, "scan-1", log_cursor, log_high_water, 137)
+                .await
+                .unwrap();
+            log_cursor = page.last().unwrap().id;
+            log_count += page.len();
+        }
+        assert_eq!(log_count, 450);
+
+        let mut result_cursor = 0;
+        let mut result_count = 0;
+        while result_cursor < result_high_water {
+            let page =
+                fetch_scan_results_page_after(&db, "scan-1", result_cursor, result_high_water, 137)
+                    .await
+                    .unwrap();
+            result_cursor = page.last().unwrap().event_id;
+            result_count += page.len();
+        }
+        assert_eq!(result_count, 1200);
+
+        let latest = fetch_latest_scan_results(&db, "scan-1", 500).await.unwrap();
+        assert_eq!(latest.first().unwrap().event_id, 701);
+        assert_eq!(latest.last().unwrap().event_id, 1200);
+    }
+
+    #[test]
+    fn scan_event_cursor_is_round_trippable_and_clamped() {
+        assert_eq!(
+            parse_scan_event_id(Some(&format_scan_event_id(42, 99))),
+            (42, 99)
+        );
+        assert_eq!(parse_scan_event_id(Some("l:-2;r:-3")), (0, 0));
     }
 }

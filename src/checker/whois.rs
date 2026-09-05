@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
-use super::traits::{CheckResult, CheckerPriority, DomainChecker};
+use super::traits::{CheckResult, CheckerPriority, DomainChecker, acquire_network_permit};
 
 /// Pre-compiled WHOIS expiry date regexes (compiled once, reused on every WHOIS call).
 static EXPIRY_REGEXES: OnceLock<Vec<regex::Regex>> = OnceLock::new();
@@ -68,7 +68,7 @@ fn rate_regexes() -> &'static Vec<regex::Regex> {
 pub struct WhoisChecker {
     ip_cache: Arc<RwLock<HashMap<String, IpAddr>>>,
     server_map: Arc<HashMap<String, String>>,
-    cb: Arc<CircuitBreaker>,
+    breaker_map: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
     throttle_map: Arc<RwLock<HashMap<String, Arc<Mutex<WhoisServerThrottle>>>>>,
     cache_path: Arc<PathBuf>,
     cache_entries: Arc<Mutex<HashMap<String, WhoisRateLimitCacheEntry>>>,
@@ -155,7 +155,7 @@ impl WhoisChecker {
         Self {
             ip_cache: Arc::new(RwLock::new(HashMap::new())),
             server_map: Arc::new(normalize_server_map(custom_servers)),
-            cb: Arc::new(CircuitBreaker::new(5, 120)),
+            breaker_map: Arc::new(RwLock::new(HashMap::new())),
             throttle_map: Arc::new(RwLock::new(initial_throttles)),
             cache_path: Arc::new(cache_path),
             cache_entries: Arc::new(Mutex::new(cache_entries)),
@@ -174,6 +174,18 @@ impl WhoisChecker {
         guard
             .entry(server.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(WhoisServerThrottle::new())))
+            .clone()
+    }
+
+    async fn breaker_for_server(&self, server: &str) -> Arc<CircuitBreaker> {
+        if let Some(existing) = self.breaker_map.read().await.get(server).cloned() {
+            return existing;
+        }
+        self.breaker_map
+            .write()
+            .await
+            .entry(server.to_string())
+            .or_insert_with(|| Arc::new(CircuitBreaker::new(5, 120)))
             .clone()
     }
 
@@ -344,6 +356,9 @@ impl WhoisChecker {
 
     async fn query_whois(&self, domain: &str, server: &str) -> Result<String, String> {
         self.wait_for_turn(server).await;
+        let _permit = acquire_network_permit()
+            .await
+            .map_err(|_| "global network limiter closed".to_string())?;
 
         let (server_host, server_port) = parse_server_endpoint(server);
         let ip = self
@@ -582,11 +597,6 @@ impl DomainChecker for WhoisChecker {
     }
 
     async fn check(&self, domain: &str) -> CheckResult {
-        if !self.cb.allow_request() {
-            return CheckResult::rate_limited_with_retry("WHOIS circuit breaker open", Some(60))
-                .with_trace("WHOIS: circuit breaker open");
-        }
-
         let suffix = if let Some(suffix) = self.matching_suffix(domain) {
             suffix
         } else if domain.contains('.') {
@@ -600,13 +610,18 @@ impl DomainChecker for WhoisChecker {
         } else {
             return CheckResult::unknown().with_trace(format!("WHOIS: no server for {}", suffix));
         };
+        let breaker = self.breaker_for_server(server).await;
+        let Some(_circuit_request) = breaker.acquire_request() else {
+            return CheckResult::retryable_error("WHOIS server circuit breaker open", Some(120))
+                .with_trace(format!("WHOIS: circuit breaker open for {}", server));
+        };
 
         match self.query_whois(domain, server).await {
             Ok(response) => {
                 let response = response.trim();
 
                 if response.is_empty() {
-                    self.cb.record_failure();
+                    breaker.record_failure();
                     warn!(
                         target: "domain_scanner::checker::whois",
                         context = "query",
@@ -622,7 +637,7 @@ impl DomainChecker for WhoisChecker {
                 }
 
                 if self.is_rate_limited(response) {
-                    self.cb.record_failure();
+                    breaker.record_failure();
                     let hint = self.sniff_rate_limit_hint(response);
                     let retry_after = self.record_rate_limit(server, hint).await;
                     warn!(
@@ -642,20 +657,20 @@ impl DomainChecker for WhoisChecker {
 
                 match self.classify_response(response, domain) {
                     WhoisResponseClassification::NoRegistrationRecord => {
-                        self.cb.record_success();
+                        breaker.record_success();
                         self.record_success(server).await;
                         CheckResult::no_registration_record()
                             .with_trace(format!("WHOIS: no registration record via {}", server))
                     }
                     WhoisResponseClassification::Registered => {
-                        self.cb.record_success();
+                        breaker.record_success();
                         self.record_success(server).await;
                         let expiry = self.extract_expiry(response);
                         CheckResult::registered_with_expiry(vec!["WHOIS".to_string()], expiry)
                             .with_trace(format!("WHOIS: registered via {}", server))
                     }
                     classification => {
-                        self.cb.record_failure();
+                        breaker.record_failure();
                         warn!(
                             target: "domain_scanner::checker::whois",
                             context = "query",
@@ -678,7 +693,7 @@ impl DomainChecker for WhoisChecker {
                 }
             }
             Err(e) => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 if let Some(reason) = transient_whois_error_reason(&e) {
                     let retry_after = self.record_transient_failure(server, reason).await;
                     warn!(

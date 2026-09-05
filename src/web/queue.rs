@@ -3,7 +3,7 @@ use super::scan_runtime::{add_event_log, run_scan_logic};
 use crate::checker::CheckerRegistry;
 use crate::config::SchedulerConfig;
 use serde_json::json;
-use sqlx::{Row, sqlite::SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -129,7 +129,7 @@ async fn schedule_ready_tasks(
     global_check_permits: Arc<Semaphore>,
 ) {
     while active_scheduler_keys.len() < max_parallel_tlds {
-        let candidates = fetch_ready_task_candidates(db).await;
+        let candidates = fetch_ready_task_candidates(db, active_scheduler_keys).await;
         let Some(task) = candidates
             .into_iter()
             .map(PendingScanTask::from_row)
@@ -279,22 +279,33 @@ impl PendingScanTask {
     }
 }
 
-async fn fetch_ready_task_candidates(db: &SqlitePool) -> Vec<sqlx::sqlite::SqliteRow> {
-    match sqlx::query(
+async fn fetch_ready_task_candidates(
+    db: &SqlitePool,
+    active_scheduler_keys: &HashSet<String>,
+) -> Vec<sqlx::sqlite::SqliteRow> {
+    let mut query = QueryBuilder::<Sqlite>::new(
         "
         SELECT s.id, s.length, s.suffix, s.pattern, s.regex, s.processed, s.found, s.scheduler_key,
                p.priority_words, p.domains, p.dictionary_words, p.prefix, p.postfix, p.dictionary_id, p.dictionary_ids, p.separator, p.format_template
         FROM scans s
         LEFT JOIN scan_payloads p ON s.id = p.scan_id
         WHERE s.status = 'pending'
-          AND (s.retry_not_before IS NULL OR s.retry_not_before <= ?)
-        ORDER BY s.priority DESC, s.created_at ASC LIMIT 50
+          AND (s.retry_not_before IS NULL OR s.retry_not_before <= ",
+    );
+    query.push_bind(now_epoch_seconds()).push(")");
+    if !active_scheduler_keys.is_empty() {
+        query.push(" AND COALESCE(s.scheduler_key, '') NOT IN (");
+        let mut keys = query.separated(", ");
+        for key in active_scheduler_keys {
+            keys.push_bind(key);
+        }
+        keys.push_unseparated(")");
+    }
+    query.push(
+        " ORDER BY s.priority DESC, s.created_at ASC LIMIT 50
     ",
-    )
-    .bind(now_epoch_seconds())
-    .fetch_all(db)
-    .await
-    {
+    );
+    match query.build().fetch_all(db).await {
         Ok(rows) => rows,
         Err(e) => {
             error!(

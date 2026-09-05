@@ -1,6 +1,6 @@
 # Domain Scanner (Rust Web Edition)
 
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](./Dockerfile)
 
@@ -33,7 +33,7 @@ docker run -d -p 3000:3000 -v ./data:/app/data -v ./logs:/app/logs ghcr.io/veegn
 
 ### 本地运行
 
-需要 Rust 1.85+。
+需要 Rust 1.88+。
 
 ```bash
 git clone https://github.com/veegn/domain-scanner.git

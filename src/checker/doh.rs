@@ -11,10 +11,10 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::circuit_breaker::CircuitBreaker;
-use super::traits::{CheckResult, CheckerPriority, DomainChecker};
+use super::traits::{CheckResult, CheckerPriority, DomainChecker, acquire_network_permit};
 
 /// Default DoH server URL
 pub const DEFAULT_DOH_SERVERS: &[&str] = &[
@@ -35,13 +35,48 @@ static DOH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 #[derive(Deserialize, Debug)]
 struct DohAnswer {
-    // Fields are parsed but not used directly
+    name: String,
+    #[serde(rename = "type")]
+    record_type: u16,
+}
+
+#[derive(Deserialize, Debug)]
+struct DohQuestion {
+    name: String,
+    #[serde(rename = "type")]
+    record_type: u16,
 }
 
 #[derive(Deserialize, Debug)]
 struct DohResponse {
+    #[serde(rename = "Status")]
+    status: u16,
+    #[serde(rename = "Question", default)]
+    question: Vec<DohQuestion>,
     #[serde(rename = "Answer")]
     answer: Option<Vec<DohAnswer>>,
+}
+
+fn normalized_dns_name(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn validate_doh_response(response: &DohResponse, domain: &str) -> Result<bool, &'static str> {
+    if response.status != 0 {
+        return Err("DNS response status was not NOERROR");
+    }
+    let requested = normalized_dns_name(domain);
+    if !response.question.iter().any(|question| {
+        question.record_type == 2 && normalized_dns_name(&question.name) == requested
+    }) {
+        return Err("DNS response question did not match the requested NS lookup");
+    }
+    Ok(response
+        .answer
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|answer| answer.record_type == 2 && normalized_dns_name(&answer.name) == requested))
 }
 
 /// DNS over HTTPS checker
@@ -54,8 +89,8 @@ pub struct DohChecker {
     pub servers: Vec<String>,
     /// Current server index for round-robin
     pub current_idx: AtomicUsize,
-    /// Circuit breaker to prevent cascading failures
-    pub cb: Arc<CircuitBreaker>,
+    /// Circuit breakers are isolated per provider.
+    breaker_map: Arc<RwLock<std::collections::HashMap<String, Arc<CircuitBreaker>>>>,
     throttle_map: Arc<RwLock<std::collections::HashMap<String, Arc<Mutex<DohServerThrottle>>>>>,
 }
 
@@ -71,86 +106,21 @@ impl DohChecker {
         Self::with_servers(vec![]).await
     }
 
-    /// Create a new DoH checker with custom servers (or defaults if empty)
-    /// Performs latency checks at startup.
+    /// Create a new DoH checker with custom servers (or defaults if empty).
+    /// Providers are evaluated by real requests; startup itself performs no
+    /// network I/O, which keeps boot and offline tests deterministic.
     pub async fn with_servers(mut servers: Vec<String>) -> Self {
         if servers.is_empty() {
             servers = DEFAULT_DOH_SERVERS.iter().map(|s| s.to_string()).collect();
         }
-
-        // Latency check
-        let mut healthy_servers = Vec::new();
-        let mut slow_servers = Vec::new();
-        for server in &servers {
-            let start = Instant::now();
-            let test_url = format!("{}?name=apple.com.&type=A", server);
-
-            match DOH_CLIENT
-                .get(&test_url)
-                .header("Accept", "application/dns-json")
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let elapsed = start.elapsed();
-                    let latency_ms = elapsed.as_millis();
-                    if resp.status().is_success() {
-                        if latency_ms < 250 {
-                            healthy_servers.push(server.clone());
-                        } else {
-                            slow_servers.push(server.clone());
-                        }
-                    } else if resp.status().is_server_error() {
-                        warn!(
-                            target: "domain_scanner::checker::doh",
-                            context = "startup",
-                            server,
-                            status = %resp.status(),
-                            "DoH latency probe failed"
-                        );
-                    }
-                }
-                Err(e) => debug!(
-                    target: "domain_scanner::checker::doh",
-                    context = "startup",
-                    server,
-                    error = %e,
-                    "DoH latency probe request error"
-                ),
-            }
-        }
-
-        let final_servers = if !healthy_servers.is_empty() {
-            info!(
-                target: "domain_scanner::checker::doh",
-                context = "startup",
-                selected = healthy_servers.len(),
-                slow_fallback = slow_servers.len(),
-                "selected healthy DoH servers"
-            );
-            healthy_servers
-        } else if !slow_servers.is_empty() {
-            warn!(
-                target: "domain_scanner::checker::doh",
-                context = "startup",
-                selected = slow_servers.len(),
-                "no fast DoH servers found; using slow fallback"
-            );
-            slow_servers
-        } else {
-            warn!(
-                target: "domain_scanner::checker::doh",
-                context = "startup",
-                fallback = servers.len(),
-                "all DoH probes failed; using original server list"
-            );
-            servers
-        };
+        servers.retain(|server| !server.trim().is_empty());
+        servers.sort();
+        servers.dedup();
 
         Self {
-            servers: final_servers,
+            servers,
             current_idx: AtomicUsize::new(0),
-            cb: Arc::new(CircuitBreaker::new(20, 30)),
+            breaker_map: Arc::new(RwLock::new(std::collections::HashMap::new())),
             throttle_map: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
@@ -172,6 +142,18 @@ impl DohChecker {
                     next_allowed_at: Instant::now(),
                 }))
             })
+            .clone()
+    }
+
+    async fn breaker_for_server(&self, server: &str) -> Arc<CircuitBreaker> {
+        if let Some(existing) = self.breaker_map.read().await.get(server).cloned() {
+            return existing;
+        }
+        self.breaker_map
+            .write()
+            .await
+            .entry(server.to_string())
+            .or_insert_with(|| Arc::new(CircuitBreaker::new(20, 30)))
             .clone()
     }
 
@@ -288,11 +270,6 @@ impl DomainChecker for DohChecker {
     }
 
     async fn check(&self, domain: &str) -> CheckResult {
-        if !self.cb.allow_request() {
-            return CheckResult::rate_limited("DoH circuit breaker open")
-                .with_trace("DoH: circuit breaker open");
-        }
-
         if self.servers.is_empty() {
             warn!(
                 target: "domain_scanner::checker::doh",
@@ -306,7 +283,19 @@ impl DomainChecker for DohChecker {
 
         // Prefer a currently ready provider, falling back to round-robin when all are cooling down.
         let server = self.select_server().await;
+        let breaker = self.breaker_for_server(server).await;
+        let Some(_circuit_request) = breaker.acquire_request() else {
+            return CheckResult::retryable_error("DoH provider circuit breaker open", Some(30))
+                .with_trace(format!("DoH: circuit breaker open for {}", server));
+        };
         self.wait_for_turn(server).await;
+        let _permit = match acquire_network_permit().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return CheckResult::retryable_error("global network limiter closed", Some(1))
+                    .with_trace("DoH: global network limiter closed");
+            }
+        };
 
         let url = format!("{}?name={}.&type=NS", server, domain);
 
@@ -318,7 +307,7 @@ impl DomainChecker for DohChecker {
         {
             Ok(r) => r,
             Err(e) => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let retry_after = self.record_transient_failure(server, None).await;
                 debug!(
                     target: "domain_scanner::checker::doh",
@@ -340,7 +329,7 @@ impl DomainChecker for DohChecker {
         if !resp.status().is_success() {
             let status = resp.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let retry_after = self.record_rate_limit(server, retry_after).await;
                 warn!(
                     target: "domain_scanner::checker::doh",
@@ -356,7 +345,7 @@ impl DomainChecker for DohChecker {
                 .with_trace(format!("DoH: HTTP 429 via {}", server));
             }
             if status.is_server_error() {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let retry_after = self.record_transient_failure(server, retry_after).await;
                 return CheckResult::retryable_error(
                     format!("DoH returned transient HTTP {}", status),
@@ -364,7 +353,7 @@ impl DomainChecker for DohChecker {
                 )
                 .with_trace(format!("DoH: HTTP {} via {}", status, server));
             }
-            self.cb.record_failure();
+            breaker.record_failure();
             debug!(
                 target: "domain_scanner::checker::doh",
                 context = "request",
@@ -379,12 +368,10 @@ impl DomainChecker for DohChecker {
                 .with_trace(format!("DoH: HTTP {} via {}", resp.status(), server));
         }
 
-        self.cb.record_success();
-        self.record_success(server).await;
-
         let result: DohResponse = match resp.json().await {
             Ok(r) => r,
             Err(err) => {
+                breaker.record_failure();
                 debug!(
                     target: "domain_scanner::checker::doh",
                     context = "response",
@@ -402,17 +389,36 @@ impl DomainChecker for DohChecker {
             }
         };
 
-        if let Some(answers) = result.answer
-            && !answers.is_empty()
-        {
-            return CheckResult::registered(vec!["DNS".to_string()])
-                .with_trace(format!("DoH: NS records found via {}", server));
+        if result.status == 2 {
+            breaker.record_failure();
+            let retry_after = self.record_transient_failure(server, None).await;
+            return CheckResult::retryable_error(
+                "DoH returned DNS SERVFAIL",
+                Some(retry_after.as_secs().max(1)),
+            )
+            .with_trace(format!("DoH: DNS SERVFAIL via {}", server));
         }
 
-        CheckResult::unknown().with_trace(format!(
-            "DoH: no NS records via {}; registration status remains unknown",
-            server
-        ))
+        match validate_doh_response(&result, domain) {
+            Ok(has_ns) => {
+                breaker.record_success();
+                self.record_success(server).await;
+                if has_ns {
+                    CheckResult::registered(vec!["DNS".to_string()])
+                        .with_trace(format!("DoH: NS records found via {}", server))
+                } else {
+                    CheckResult::unknown().with_trace(format!(
+                        "DoH: no matching NS records via {}; registration status remains unknown",
+                        server
+                    ))
+                }
+            }
+            Err(reason) => {
+                breaker.record_failure();
+                CheckResult::error(reason)
+                    .with_trace(format!("DoH: invalid DNS response via {}", server))
+            }
+        }
     }
 
     fn supports_tld(&self, _tld: &str) -> bool {
@@ -454,6 +460,35 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_requested_ns_evidence() {
+        let valid: DohResponse = serde_json::from_str(
+            r#"{"Status":0,"Question":[{"name":"example.com.","type":2}],"Answer":[{"name":"example.com.","type":2}]}"#,
+        ).unwrap();
+        assert_eq!(validate_doh_response(&valid, "example.com"), Ok(true));
+
+        let wrong_owner: DohResponse = serde_json::from_str(
+            r#"{"Status":0,"Question":[{"name":"example.com.","type":2}],"Answer":[{"name":"other.com.","type":2}]}"#,
+        ).unwrap();
+        assert_eq!(
+            validate_doh_response(&wrong_owner, "example.com"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_or_failed_dns_payloads() {
+        let mismatch: DohResponse = serde_json::from_str(
+            r#"{"Status":0,"Question":[{"name":"other.com.","type":2}],"Answer":[{"name":"example.com.","type":2}]}"#,
+        ).unwrap();
+        assert!(validate_doh_response(&mismatch, "example.com").is_err());
+
+        let servfail: DohResponse =
+            serde_json::from_str(r#"{"Status":2,"Question":[{"name":"example.com.","type":2}]}"#)
+                .unwrap();
+        assert!(validate_doh_response(&servfail, "example.com").is_err());
+    }
 
     fn live_network_enabled() -> bool {
         std::env::var("DOMAIN_SCANNER_LIVE_TESTS")

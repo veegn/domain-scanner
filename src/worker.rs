@@ -1,6 +1,7 @@
 use crate::DomainResult;
 use crate::checker::{CheckResult, CheckerRegistry};
 use async_channel::Receiver;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -209,6 +210,20 @@ fn now_epoch_millis() -> u64 {
         .as_millis() as u64
 }
 
+async fn while_running<T>(stop_signal: &AtomicU8, future: impl Future<Output = T>) -> Option<T> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Some(result),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {
+                if stop_signal.load(Ordering::Relaxed) != 0 {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 pub async fn worker(
     id: usize,
     jobs: Receiver<String>,
@@ -239,16 +254,23 @@ pub async fn worker(
             break;
         }
 
-        let domain_name = jobs.recv().await.ok();
+        let Some(domain_name) = while_running(&stop_signal, jobs.recv()).await else {
+            break;
+        };
+        let domain_name = domain_name.ok();
 
         match domain_name {
             Some(domain) => {
                 // Notify scanning
-                if results
-                    .send(crate::WorkerMessage::Scanning(domain.clone()))
-                    .await
-                    .is_err()
-                {
+                let Some(scanning_sent) = while_running(
+                    &stop_signal,
+                    results.send(crate::WorkerMessage::Scanning(domain.clone())),
+                )
+                .await
+                else {
+                    break;
+                };
+                if scanning_sent.is_err() {
                     warn!(
                         target: "domain_scanner::worker",
                         context = "publish",
@@ -258,22 +280,16 @@ pub async fn worker(
                     break;
                 }
 
-                let permit = match global_check_permits.clone().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        warn!(
-                            target: "domain_scanner::worker",
-                            context = "throttle",
-                            worker_id = id,
-                            "global checker semaphore closed"
-                        );
-                        break;
-                    }
-                };
-
                 // Use the registry to check the domain
-                let check_result: CheckResult = registry.check(&domain).await;
-                drop(permit);
+                let Some(check_result) = while_running(
+                    &stop_signal,
+                    registry.check_with_permits(&domain, global_check_permits.clone()),
+                )
+                .await
+                else {
+                    break;
+                };
+                let check_result: CheckResult = check_result;
 
                 // Determine if WHOIS/RDAP was reached (for adaptive delay)
                 let reached_rate_limited_service = check_result.trace.iter().any(|s| {
@@ -303,11 +319,15 @@ pub async fn worker(
                     trace: check_result.trace,
                 };
 
-                if results
-                    .send(crate::WorkerMessage::Result(result))
-                    .await
-                    .is_err()
-                {
+                let Some(result_sent) = while_running(
+                    &stop_signal,
+                    results.send(crate::WorkerMessage::Result(result)),
+                )
+                .await
+                else {
+                    break;
+                };
+                if result_sent.is_err() {
                     warn!(
                         target: "domain_scanner::worker",
                         context = "publish",
@@ -327,8 +347,12 @@ pub async fn worker(
                     break;
                 }
 
-                if reached_rate_limited_service {
-                    tokio::time::sleep(throttle.current_delay()).await;
+                if reached_rate_limited_service
+                    && while_running(&stop_signal, tokio::time::sleep(throttle.current_delay()))
+                        .await
+                        .is_none()
+                {
+                    break;
                 }
             }
             None => {

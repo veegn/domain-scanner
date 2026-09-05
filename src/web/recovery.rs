@@ -17,10 +17,12 @@ impl StartupRecovery {
 }
 
 pub async fn recover_startup_tasks(db: &SqlitePool) -> StartupRecovery {
+    // Repair only unfinished rows while their transient status still tells us
+    // which scans may have been interrupted.
+    let repaired_counters = repair_scan_counters(db).await;
     let recovered_running = mark_stale_running_as_pending(db).await;
     let recovered_cancelling = mark_stale_cancelling_as_cancelled(db).await;
     let recovered_pausing = mark_stale_pausing_as_paused(db).await;
-    let repaired_counters = repair_scan_counters(db).await;
     let ready_scan_ids = fetch_ready_scan_ids(db).await;
 
     StartupRecovery {
@@ -113,7 +115,8 @@ async fn repair_scan_counters(db: &SqlitePool) -> u64 {
                  FROM results r
                  WHERE r.scan_id = scans.id
              )
-         WHERE processed != (
+         WHERE status IN ('running', 'pending', 'pausing', 'paused', 'cancelling')
+           AND (processed != (
                  SELECT COUNT(*)
                  FROM results r
                  WHERE r.scan_id = scans.id
@@ -122,7 +125,7 @@ async fn repair_scan_counters(db: &SqlitePool) -> u64 {
                  SELECT COALESCE(SUM(CASE WHEN r.registration_record_absent = 1 THEN 1 ELSE 0 END), 0)
                  FROM results r
                  WHERE r.scan_id = scans.id
-             )",
+             ))",
     )
     .execute(db)
     .await

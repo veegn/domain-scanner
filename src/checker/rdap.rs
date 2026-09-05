@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
-use super::traits::{CheckResult, CheckerPriority, DomainChecker};
+use super::traits::{CheckResult, CheckerPriority, DomainChecker, acquire_network_permit};
 
 static RDAP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -34,7 +34,7 @@ const BUILTIN_RDAP_ENDPOINTS: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct RdapChecker {
     endpoint_map: Arc<HashMap<String, String>>,
-    cb: Arc<CircuitBreaker>,
+    breaker_map: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
     throttle_map: Arc<RwLock<HashMap<String, Arc<Mutex<RdapEndpointThrottle>>>>>,
     throttle_cache_path: Arc<PathBuf>,
     throttle_cache_entries: Arc<Mutex<HashMap<String, RdapRateLimitCacheEntry>>>,
@@ -176,7 +176,7 @@ impl RdapChecker {
 
         Self {
             endpoint_map: Arc::new(endpoint_map),
-            cb: Arc::new(CircuitBreaker::new(10, 60)),
+            breaker_map: Arc::new(RwLock::new(HashMap::new())),
             throttle_map: Arc::new(RwLock::new(initial_throttles)),
             throttle_cache_path: Arc::new(throttle_cache_path),
             throttle_cache_entries: Arc::new(Mutex::new(throttle_cache_entries)),
@@ -221,6 +221,18 @@ impl RdapChecker {
                     next_allowed_at: Instant::now(),
                 }))
             })
+            .clone()
+    }
+
+    async fn breaker_for_endpoint(&self, endpoint: &str) -> Arc<CircuitBreaker> {
+        if let Some(existing) = self.breaker_map.read().await.get(endpoint).cloned() {
+            return existing;
+        }
+        self.breaker_map
+            .write()
+            .await
+            .entry(endpoint.to_string())
+            .or_insert_with(|| Arc::new(CircuitBreaker::new(10, 60)))
             .clone()
     }
 
@@ -354,11 +366,6 @@ impl DomainChecker for RdapChecker {
     }
 
     async fn check(&self, domain: &str) -> CheckResult {
-        if !self.cb.allow_request() {
-            return CheckResult::retryable_error("RDAP circuit breaker open", Some(60))
-                .with_trace("RDAP: circuit breaker open");
-        }
-
         if !domain.contains('.') {
             return CheckResult::error("Invalid domain").with_trace("RDAP: invalid domain");
         }
@@ -368,7 +375,20 @@ impl DomainChecker for RdapChecker {
                 .with_trace("RDAP: unsupported suffix");
         };
 
+        let breaker = self.breaker_for_endpoint(&endpoint).await;
+        let Some(_circuit_request) = breaker.acquire_request() else {
+            return CheckResult::retryable_error("RDAP endpoint circuit breaker open", Some(60))
+                .with_trace(format!("RDAP: circuit breaker open for {}", endpoint));
+        };
+
         self.wait_for_turn(&endpoint).await;
+        let _permit = match acquire_network_permit().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return CheckResult::retryable_error("global network limiter closed", Some(1))
+                    .with_trace("RDAP: global network limiter closed");
+            }
+        };
 
         let url = format!("{}domain/{}", ensure_trailing_slash(&endpoint), domain);
         let response = match RDAP_CLIENT
@@ -379,7 +399,7 @@ impl DomainChecker for RdapChecker {
         {
             Ok(response) => response,
             Err(err) => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 if err.is_timeout() {
                     let retry_after = self.record_transient_failure(&endpoint, None).await;
                     return CheckResult::retryable_error(
@@ -400,13 +420,13 @@ impl DomainChecker for RdapChecker {
         match response.status() {
             reqwest::StatusCode::OK => {
                 if !has_json_content_type(response.headers()) {
-                    self.cb.record_failure();
+                    breaker.record_failure();
                     return CheckResult::error("RDAP returned a non-JSON success response")
                         .with_trace(format!("RDAP: invalid content type via {}", endpoint));
                 }
                 match response.json::<RdapDomainResponse>().await {
                     Ok(payload) if is_domain_response_for(&payload, domain) => {
-                        self.cb.record_success();
+                        breaker.record_success();
                         self.record_success(&endpoint).await;
                         CheckResult::registered_with_expiry(
                             vec!["RDAP".to_string()],
@@ -415,12 +435,12 @@ impl DomainChecker for RdapChecker {
                         .with_trace(format!("RDAP: registered via {}", endpoint))
                     }
                     Ok(_) => {
-                        self.cb.record_failure();
+                        breaker.record_failure();
                         CheckResult::error("RDAP response did not identify the requested domain")
                             .with_trace(format!("RDAP: mismatched domain object via {}", endpoint))
                     }
                     Err(err) => {
-                        self.cb.record_failure();
+                        breaker.record_failure();
                         CheckResult::error(format!("RDAP parse failed: {}", err))
                             .with_trace(format!("RDAP: parse failed via {}", endpoint))
                     }
@@ -430,18 +450,18 @@ impl DomainChecker for RdapChecker {
                 let is_json = has_json_content_type(response.headers());
                 let body = response.text().await.unwrap_or_default();
                 if is_json && is_valid_rdap_not_found(&body) {
-                    self.cb.record_success();
+                    breaker.record_success();
                     self.record_success(&endpoint).await;
                     CheckResult::no_registration_record()
                         .with_trace(format!("RDAP: no registration record via {}", endpoint))
                 } else {
-                    self.cb.record_failure();
+                    breaker.record_failure();
                     CheckResult::error("RDAP returned an unverified HTTP 404 response")
                         .with_trace(format!("RDAP: unverified HTTP 404 via {}", endpoint))
                 }
             }
             reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let retry_after = self.record_rate_limit(&endpoint, retry_after).await;
                 CheckResult::rate_limited_with_retry(
                     "RDAP rate limit exceeded (HTTP 429)",
@@ -450,7 +470,7 @@ impl DomainChecker for RdapChecker {
                 .with_trace(format!("RDAP: HTTP 429 via {}", endpoint))
             }
             reqwest::StatusCode::FORBIDDEN => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let body = response.text().await.unwrap_or_default();
                 if retry_after.is_none() && !looks_like_rdap_access_limit(&body) {
                     return CheckResult::error("RDAP access denied (HTTP 403)")
@@ -468,7 +488,7 @@ impl DomainChecker for RdapChecker {
                     || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                     || status == reqwest::StatusCode::GATEWAY_TIMEOUT =>
             {
-                self.cb.record_failure();
+                breaker.record_failure();
                 let retry_after = self.record_transient_failure(&endpoint, retry_after).await;
                 CheckResult::retryable_error(
                     format!("RDAP returned transient HTTP {}", status),
@@ -477,7 +497,7 @@ impl DomainChecker for RdapChecker {
                 .with_trace(format!("RDAP: HTTP {} via {}", status, endpoint))
             }
             status => {
-                self.cb.record_failure();
+                breaker.record_failure();
                 CheckResult::error(format!("RDAP returned HTTP {}", status))
                     .with_trace(format!("RDAP: HTTP {} via {}", status, endpoint))
             }

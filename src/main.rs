@@ -111,11 +111,58 @@ async fn main() {
     let task_control = web::models::TaskControl::default();
     let streams = web::models::StreamHub::default();
 
-    // 7. Start background task worker
-    let worker_db = db.clone();
-    let worker_task_control = task_control.clone();
+    // 7. Build application state before recovery, but do not start the
+    // scheduler until every stale status has been normalized.
+    let state = Arc::new(web::AppState {
+        db,
+        task_tx: tx,
+        task_control,
+        streams,
+    });
+
+    // 8. Recover stale transient statuses and repair interrupted tasks before
+    // any scheduler can claim a pending row.
+    let recovery = web::recover_startup_tasks(&state.db).await;
+    let recovered_publications =
+        match domain_scanner::publish::recover_incomplete_publications(&state.db).await {
+            Ok(count) => count,
+            Err(error) => {
+                error!(
+                    target: "domain_scanner::main",
+                    context = "publication_recovery",
+                    error = %error,
+                    "failed to reconcile incomplete publications"
+                );
+                std::process::exit(1);
+            }
+        };
+
+    info!(
+        target: "domain_scanner::main",
+        context = "task_resume",
+        resumable_tasks = recovery.ready_scan_ids.len(),
+        recovered_running = recovery.recovered_running,
+        recovered_cancelling = recovery.recovered_cancelling,
+        recovered_pausing = recovery.recovered_pausing,
+        repaired_counters = recovery.repaired_counters,
+        recovered_publications,
+        "startup task scan complete"
+    );
+
+    for id in &recovery.ready_scan_ids {
+        warn!(
+            target: "domain_scanner::main",
+            context = "task_resume",
+            scan_id = %id,
+            "re-queueing unfinished task"
+        );
+    }
+
+    // 9. Start the background scheduler after recovery.
+    let worker_db = state.db.clone();
+    let worker_task_control = state.task_control.clone();
     let worker_registry = registry.clone();
-    let worker_streams = streams.clone();
+    let worker_streams = state.streams.clone();
     let worker_scheduler_config = scheduler_config.clone();
     let global_check_permits = Arc::new(Semaphore::new(scheduler_config.max_global_checks.max(1)));
     let worker_global_check_permits = global_check_permits.clone();
@@ -131,37 +178,6 @@ async fn main() {
         )
         .await;
     });
-
-    // 8. Setup web state
-    let state = Arc::new(web::AppState {
-        db,
-        task_tx: tx,
-        task_control,
-        streams,
-    });
-
-    // 9. Recover stale transient statuses and resume ready unfinished tasks.
-    let recovery = web::recover_startup_tasks(&state.db).await;
-
-    info!(
-        target: "domain_scanner::main",
-        context = "task_resume",
-        resumable_tasks = recovery.ready_scan_ids.len(),
-        recovered_running = recovery.recovered_running,
-        recovered_cancelling = recovery.recovered_cancelling,
-        recovered_pausing = recovery.recovered_pausing,
-        repaired_counters = recovery.repaired_counters,
-        "startup task scan complete"
-    );
-
-    for id in &recovery.ready_scan_ids {
-        warn!(
-            target: "domain_scanner::main",
-            context = "task_resume",
-            scan_id = %id,
-            "re-queueing unfinished task"
-        );
-    }
 
     if recovery.should_wake_worker() {
         let _ = state.task_tx.try_send(());

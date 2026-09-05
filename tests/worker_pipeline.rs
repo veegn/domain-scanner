@@ -1,5 +1,6 @@
 use async_channel::bounded;
-use domain_scanner::checker::CheckerRegistry;
+use async_trait::async_trait;
+use domain_scanner::checker::{CheckResult, CheckerPriority, CheckerRegistry, DomainChecker};
 use domain_scanner::config::AppConfig;
 use domain_scanner::generator;
 use domain_scanner::web::models::TaskSignal;
@@ -16,12 +17,37 @@ fn live_network_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug)]
+struct StubChecker;
+
+#[async_trait]
+impl DomainChecker for StubChecker {
+    fn name(&self) -> &'static str {
+        "Stub"
+    }
+    fn priority(&self) -> CheckerPriority {
+        CheckerPriority::Local
+    }
+    async fn check(&self, _domain: &str) -> CheckResult {
+        CheckResult::registered(vec!["STUB".to_string()])
+    }
+    fn supports_tld(&self, _tld: &str) -> bool {
+        true
+    }
+    fn should_stop_pipeline(&self, _result: &CheckResult) -> bool {
+        true
+    }
+}
+
+fn stub_registry() -> Arc<CheckerRegistry> {
+    let mut registry = CheckerRegistry::new();
+    registry.add_checker(Arc::new(StubChecker));
+    Arc::new(registry)
+}
+
 #[tokio::test]
 async fn test_worker_processes_domains() {
-    let registry = Arc::new(
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await,
-    );
+    let registry = stub_registry();
     let (job_tx, job_rx) = bounded(10);
     let (result_tx, mut result_rx) = mpsc::channel(10);
     let reg_clone = registry.clone();
@@ -58,10 +84,7 @@ async fn test_worker_processes_domains() {
 
 #[tokio::test]
 async fn test_worker_multiple_domains() {
-    let registry = Arc::new(
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await,
-    );
+    let registry = stub_registry();
     let (job_tx, job_rx) = bounded(10);
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let reg_clone = registry.clone();
@@ -103,10 +126,7 @@ async fn test_worker_multiple_domains() {
 
 #[tokio::test]
 async fn test_worker_multiple_workers_share_jobs() {
-    let registry = Arc::new(
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await,
-    );
+    let registry = stub_registry();
     let (job_tx, job_rx) = bounded(100);
     let (result_tx, mut result_rx) = mpsc::channel(100);
     let throttle = Arc::new(worker::WorkerThrottle::new(Duration::from_millis(0), 3));

@@ -1,29 +1,32 @@
 use anyhow::{Context, Result};
-use sqlx::{Row, sqlite::SqlitePool};
+use sqlx::{
+    Row,
+    sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+    },
+};
 use std::collections::HashMap;
+use std::str::FromStr;
+use std::time::Duration;
 use tracing::{info, warn};
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 
 pub async fn init_db() -> Result<SqlitePool> {
     std::fs::create_dir_all("data").context("failed to create data directory")?;
-    let pool = SqlitePool::connect("sqlite:data/scans.db?mode=rwc")
+    let options = SqliteConnectOptions::from_str("sqlite:data/scans.db")
+        .context("failed to build SQLite connection options")?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("temp_store", "MEMORY");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
         .await
         .context("failed to open SQLite database at data/scans.db")?;
-
-    let pragmas = [
-        "PRAGMA foreign_keys = ON;",
-        "PRAGMA journal_mode = WAL;",
-        "PRAGMA synchronous = NORMAL;",
-        "PRAGMA busy_timeout = 5000;",
-        "PRAGMA temp_store = MEMORY;",
-    ];
-    for pragma in pragmas {
-        sqlx::query(pragma)
-            .execute(&pool)
-            .await
-            .with_context(|| format!("failed to apply database pragma: {pragma}"))?;
-    }
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS app_settings (
@@ -34,6 +37,15 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .context("failed to create app_settings table")?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .context("failed to create schema_migrations table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scans (
@@ -130,6 +142,23 @@ pub async fn init_db() -> Result<SqlitePool> {
     .context("failed to create scan_logs table")?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS scan_retries (
+            scan_id TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            next_retry_at INTEGER NOT NULL,
+            error TEXT,
+            rate_limited BOOLEAN NOT NULL DEFAULT 0,
+            retry_after_secs INTEGER,
+            PRIMARY KEY (scan_id, domain),
+            FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .context("failed to create scan_retries table")?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS tlds (
             suffix TEXT PRIMARY KEY,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -188,6 +217,7 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await
     .context("failed to create published_domains table")?;
     migrate_registration_status_schema(&pool).await?;
+    run_data_migrations(&pool).await?;
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_results_scan_id ON results(scan_id)")
         .execute(&pool)
@@ -195,6 +225,12 @@ pub async fn init_db() -> Result<SqlitePool> {
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_results_scan_record_absent_domain
          ON results(scan_id, registration_record_absent, domain)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_results_scan_record_absent
+         ON results(scan_id, registration_record_absent)",
     )
     .execute(&pool)
     .await;
@@ -211,6 +247,11 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_scans_retry_not_before ON scans(status, retry_not_before)",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_scan_retries_due ON scan_retries(scan_id, next_retry_at)",
     )
     .execute(&pool)
     .await;
@@ -279,8 +320,26 @@ async fn migrate_registration_status_schema(pool: &SqlitePool) -> Result<()> {
     .await?;
     add_column_if_missing(pool, "published_domains", "purchasable", "BOOLEAN").await?;
 
+    Ok(())
+}
+
+async fn run_data_migrations(pool: &SqlitePool) -> Result<()> {
+    let applied =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE version = 1")
+            .fetch_one(pool)
+            .await
+            .context("failed to inspect data migration version")?;
+    if applied != 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin data migration")?;
     // Legacy `available` rows cannot distinguish authoritative RDAP/WHOIS
-    // absence from an inconclusive DNS miss. Keep the new fields unknown.
+    // absence from an inconclusive DNS miss. Keep the new fields unknown and
+    // repair the derived publication count exactly once.
     sqlx::query(
         "UPDATE published_scans
          SET result_count = (
@@ -296,9 +355,16 @@ async fn migrate_registration_status_schema(pool: &SqlitePool) -> Result<()> {
                AND pd.registration_record_absent = 1
          )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("failed to repair published registration-record counts")?;
+    sqlx::query("INSERT INTO schema_migrations(version) VALUES (1)")
+        .execute(&mut *tx)
+        .await
+        .context("failed to record data migration")?;
+    tx.commit()
+        .await
+        .context("failed to commit data migration")?;
     Ok(())
 }
 
@@ -475,6 +541,15 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "CREATE TABLE published_scans (
                 id TEXT PRIMARY KEY,
                 result_count INTEGER NOT NULL DEFAULT 0
@@ -507,6 +582,8 @@ mod tests {
             .unwrap();
 
         migrate_registration_status_schema(&pool).await.unwrap();
+        run_data_migrations(&pool).await.unwrap();
+        run_data_migrations(&pool).await.unwrap();
 
         let result = sqlx::query_as::<_, (bool, Option<bool>)>(
             "SELECT registration_record_absent, purchasable FROM results",
@@ -528,5 +605,10 @@ mod tests {
         assert_eq!(result, (false, None));
         assert_eq!(published, (false, None));
         assert_eq!(result_count, 0);
+        let migrations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(migrations, 1);
     }
 }

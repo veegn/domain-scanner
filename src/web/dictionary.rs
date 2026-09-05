@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::{FromRow, SqlitePool};
+use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
 use uuid::Uuid;
@@ -10,6 +11,14 @@ use super::models::{validate_domain, validate_domain_fragment};
 
 const DICTIONARY_ROOT: &str = "data/dictionaries";
 const MAX_DICTIONARY_WORDS: usize = 2_000_000;
+
+fn parse_dictionary_words(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.lines()
+        .map(|line| line.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|word| !word.is_empty() && seen.insert(word.clone()))
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct DictionarySummary {
@@ -37,11 +46,7 @@ pub async fn create_dictionary(
 
     let text = String::from_utf8(body.to_vec()).context("dictionary file is not valid UTF-8")?;
 
-    let words: Vec<&str> = text
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let words = parse_dictionary_words(&text);
 
     if words.is_empty() {
         anyhow::bail!("dictionary file is empty");
@@ -72,7 +77,8 @@ pub async fn create_dictionary(
         .await
         .context("failed to create dictionaries directory")?;
 
-    fs::write(&file_path, &text)
+    let normalized_text = format!("{}\n", words.join("\n"));
+    fs::write(&file_path, normalized_text)
         .await
         .context("failed to write dictionary file")?;
 
@@ -128,10 +134,8 @@ pub async fn get_dictionary_words(id: &str, offset: usize, limit: usize) -> Resu
         .await
         .context("failed to read dictionary file")?;
 
-    let words: Vec<String> = text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+    let words: Vec<String> = parse_dictionary_words(&text)
+        .into_iter()
         .skip(offset)
         .take(limit)
         .collect();
@@ -145,13 +149,7 @@ pub async fn load_dictionary_words(id: &str) -> Result<Vec<String>> {
         .await
         .context("failed to read dictionary file for scan")?;
 
-    let words: Vec<String> = text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    Ok(words)
+    Ok(parse_dictionary_words(&text))
 }
 
 pub async fn load_multiple_dictionary_words(ids: &[String]) -> Result<Vec<Vec<String>>> {

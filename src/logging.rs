@@ -1,11 +1,10 @@
 use crate::config::LoggingConfig;
-use chrono::Local;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
@@ -85,69 +84,23 @@ fn build_file_writer(
         return None;
     }
 
-    cleanup_old_logs(
-        &config.directory,
-        &config.file_prefix,
-        config.max_files.max(1),
-    );
-
-    let file_path = daily_log_path(&config.directory, &config.file_prefix);
-    let file_appender = tracing_appender::rolling::never(
-        file_path.parent().unwrap_or_else(|| Path::new(".")),
-        file_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("domain-scanner.log"),
-    );
-    let (writer, guard) = tracing_appender::non_blocking(file_appender);
-    Some((writer, guard))
-}
-
-fn daily_log_path(directory: &Path, prefix: &str) -> PathBuf {
-    let date = Local::now().format("%Y-%m-%d").to_string();
-    directory.join(format!("{}-{}.log", prefix, date))
-}
-
-fn cleanup_old_logs(directory: &Path, prefix: &str, keep: usize) {
-    let read_dir = match fs::read_dir(directory) {
-        Ok(read_dir) => read_dir,
+    let file_appender = match RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(&config.file_prefix)
+        .filename_suffix("log")
+        .max_log_files(config.max_files.max(1))
+        .build(&config.directory)
+    {
+        Ok(appender) => appender,
         Err(err) => {
             eprintln!(
-                "failed to read log directory {}: {}",
-                directory.display(),
+                "failed to initialize rolling log appender in {}: {}",
+                config.directory.display(),
                 err
             );
-            return;
+            return None;
         }
     };
-
-    let mut log_files: Vec<(PathBuf, std::time::SystemTime)> = read_dir
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if !name.starts_with(prefix) || !name.ends_with(".log") {
-                return None;
-            }
-            let modified = entry
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            Some((path, modified))
-        })
-        .collect();
-
-    if log_files.len() <= keep {
-        return;
-    }
-
-    log_files.sort_by_key(|(_, modified)| *modified);
-    let remove_count = log_files.len().saturating_sub(keep);
-
-    for (path, _) in log_files.into_iter().take(remove_count) {
-        if let Err(err) = fs::remove_file(&path) {
-            eprintln!("failed to remove old log file {}: {}", path.display(), err);
-        }
-    }
+    let (writer, guard) = tracing_appender::non_blocking(file_appender);
+    Some((writer, guard))
 }

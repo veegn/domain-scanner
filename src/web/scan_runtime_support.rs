@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -56,7 +57,7 @@ pub(super) struct ScanRuntimeState {
     pub(super) pending_log_flush: Vec<PendingLogPersist>,
     pub(super) deferred_retries: HashMap<String, crate::DomainResult>,
     pub(super) deferred_retry_ready_at: HashMap<String, Instant>,
-    pub(super) replay_round: u32,
+    pub(super) retry_attempts: HashMap<String, u32>,
 }
 
 impl ScanRuntimeState {
@@ -71,7 +72,7 @@ impl ScanRuntimeState {
             pending_log_flush: Vec::with_capacity(LOG_FLUSH_BATCH_SIZE),
             deferred_retries: HashMap::new(),
             deferred_retry_ready_at: HashMap::new(),
-            replay_round: 0,
+            retry_attempts: HashMap::new(),
         }
     }
 
@@ -155,47 +156,25 @@ pub(super) async fn prepare_job_feeder(
     streams: &StreamHub,
     scan_id: &str,
     params: &StartScanRequest,
-    _resume_processed: i64,
     jobs_tx: &async_channel::Sender<String>,
     feeder_done: Arc<AtomicBool>,
+    feeder_error: Arc<Mutex<Option<String>>>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
     task_control: TaskControl,
 ) -> Result<i64, ()> {
     let scan_stream = streams.sender_for_scan(scan_id).await;
-    let already_processed = match get_processed_domains(db, scan_id).await {
-        Ok(domains) => Arc::new(domains),
-        Err(err) => {
-            let _ = add_event_log(
-                db,
-                streams,
-                scan_id,
-                "ERROR",
-                "storage.resume_state_failed",
-                None,
-                Some("Failed to load processed domains for resume".to_string()),
-                vec![("error", json!(err.to_string()))],
-            )
-            .await;
-            let _ = sqlx::query(
-                "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-            )
-            .bind(scan_id)
-            .execute(db)
-            .await;
-            return Err(());
-        }
-    };
 
     if let Some(domains) = params.domains.clone() {
         let total = domains.len() as i64;
         spawn_domain_feeder(
             domains,
-            already_processed.clone(),
+            db.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "manual",
             feeder_done,
+            feeder_error,
             pending_domains,
             task_signal,
             scan_stream.clone(),
@@ -251,10 +230,11 @@ pub(super) async fn prepare_job_feeder(
 
         spawn_combinator_feeder(
             combinator,
-            already_processed.clone(),
+            db.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             feeder_done,
+            feeder_error,
             pending_domains,
             task_signal,
             scan_stream.clone(),
@@ -309,11 +289,12 @@ pub(super) async fn prepare_job_feeder(
 
         spawn_domain_feeder(
             domains,
-            already_processed.clone(),
+            db.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "dictionary",
             feeder_done,
+            feeder_error,
             pending_domains,
             task_signal,
             scan_stream.clone(),
@@ -340,11 +321,12 @@ pub(super) async fn prepare_job_feeder(
 
         spawn_domain_feeder(
             domains,
-            already_processed.clone(),
+            db.clone(),
             jobs_tx.clone(),
             scan_id.to_string(),
             "dictionary",
             feeder_done,
+            feeder_error,
             pending_domains,
             task_signal,
             scan_stream.clone(),
@@ -352,17 +334,28 @@ pub(super) async fn prepare_job_feeder(
         return Ok(total);
     }
 
-    let domain_gen = match generator::generate_domains(
+    let generator_args = (
         params.length,
         params.suffix.clone(),
         params.pattern.clone(),
         params.regex.clone().unwrap_or_default(),
-        "".to_string(),
         params.priority_words.clone().unwrap_or_default(),
-        0,
-    ) {
-        Ok(generator) => generator,
-        Err(err) => {
+    );
+    let domain_gen = match tokio::task::spawn_blocking(move || {
+        generator::generate_domains(
+            generator_args.0,
+            generator_args.1,
+            generator_args.2,
+            generator_args.3,
+            "".to_string(),
+            generator_args.4,
+            0,
+        )
+    })
+    .await
+    {
+        Ok(Ok(generator)) => generator,
+        Ok(Err(err)) => {
             let _ = add_event_log(
                 db,
                 streams,
@@ -371,6 +364,27 @@ pub(super) async fn prepare_job_feeder(
                 "generator.failed",
                 None,
                 Some("Failed to generate domains".to_string()),
+                vec![("error", json!(err.to_string()))],
+            )
+            .await;
+            let _ = sqlx::query(
+                "UPDATE scans SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(scan_id)
+            .execute(db)
+            .await;
+            task_control.unregister(scan_id);
+            return Err(());
+        }
+        Err(err) => {
+            let _ = add_event_log(
+                db,
+                streams,
+                scan_id,
+                "ERROR",
+                "generator.join_failed",
+                None,
+                Some("Domain generator task failed".to_string()),
                 vec![("error", json!(err.to_string()))],
             )
             .await;
@@ -400,10 +414,11 @@ pub(super) async fn prepare_job_feeder(
     let total = domain_gen.total_count as i64;
     spawn_generator_feeder(
         domain_gen,
-        already_processed,
+        db.clone(),
         jobs_tx.clone(),
         scan_id.to_string(),
         feeder_done,
+        feeder_error,
         pending_domains,
         task_signal,
         scan_stream.clone(),
@@ -422,43 +437,38 @@ fn emit_queued_event(scan_stream: &broadcast::Sender<ScanStreamMessage>, domain:
 
 fn spawn_domain_feeder(
     domains: Vec<String>,
-    already_processed: Arc<HashSet<String>>,
+    db: SqlitePool,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     source: &'static str,
     feeder_done: Arc<AtomicBool>,
+    feeder_error: Arc<Mutex<Option<String>>>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
-        for domain in domains {
-            if already_processed.contains(&domain) {
-                continue;
+        for batch in domains.chunks(500) {
+            match enqueue_unprocessed_batch(
+                &db,
+                &scan_id,
+                source,
+                batch,
+                &jobs_tx,
+                &pending_domains,
+                &task_signal,
+                &scan_stream,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    *feeder_error.lock().expect("feeder error mutex poisoned") =
+                        Some(error.to_string());
+                    break;
+                }
             }
-            if TaskControl::signal(&task_signal) != TaskSignal::Run {
-                debug!(
-                    target: "domain_scanner::queue",
-                    context = "feeder",
-                    scan_id = %scan_id,
-                    source,
-                    "feeder interrupted"
-                );
-                break;
-            }
-            pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain.clone()).await.is_err() {
-                debug!(
-                    target: "domain_scanner::queue",
-                    context = "feeder",
-                    scan_id = %scan_id,
-                    source,
-                    "feeder stopped because job queue closed"
-                );
-                pending_domains.fetch_sub(1, Ordering::Relaxed);
-                break;
-            }
-            emit_queued_event(&scan_stream, &domain);
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -466,20 +476,19 @@ fn spawn_domain_feeder(
 
 fn spawn_generator_feeder(
     domain_gen: generator::DomainGenerator,
-    already_processed: Arc<HashSet<String>>,
+    db: SqlitePool,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     feeder_done: Arc<AtomicBool>,
+    feeder_error: Arc<Mutex<Option<String>>>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
         let mut generated = domain_gen.domains;
+        let mut batch = Vec::with_capacity(500);
         while let Some(domain) = generated.recv().await {
-            if already_processed.contains(&domain) {
-                continue;
-            }
             if TaskControl::signal(&task_signal) != TaskSignal::Run {
                 debug!(
                     target: "domain_scanner::queue",
@@ -490,19 +499,45 @@ fn spawn_generator_feeder(
                 );
                 break;
             }
-            pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain.clone()).await.is_err() {
-                debug!(
-                    target: "domain_scanner::queue",
-                    context = "feeder",
-                    scan_id = %scan_id,
-                    source = "generator",
-                    "generator feeder stopped because job queue closed"
-                );
-                pending_domains.fetch_sub(1, Ordering::Relaxed);
-                break;
+            batch.push(domain);
+            if batch.len() == 500 {
+                match enqueue_unprocessed_batch(
+                    &db,
+                    &scan_id,
+                    "generator",
+                    &batch,
+                    &jobs_tx,
+                    &pending_domains,
+                    &task_signal,
+                    &scan_stream,
+                )
+                .await
+                {
+                    Ok(true) => batch.clear(),
+                    Ok(false) => break,
+                    Err(error) => {
+                        *feeder_error.lock().expect("feeder error mutex poisoned") =
+                            Some(error.to_string());
+                        break;
+                    }
+                }
             }
-            emit_queued_event(&scan_stream, &domain);
+        }
+        if !batch.is_empty()
+            && TaskControl::signal(&task_signal) == TaskSignal::Run
+            && let Err(error) = enqueue_unprocessed_batch(
+                &db,
+                &scan_id,
+                "generator",
+                &batch,
+                &jobs_tx,
+                &pending_domains,
+                &task_signal,
+                &scan_stream,
+            )
+            .await
+        {
+            *feeder_error.lock().expect("feeder error mutex poisoned") = Some(error.to_string());
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
@@ -510,19 +545,18 @@ fn spawn_generator_feeder(
 
 fn spawn_combinator_feeder(
     mut combinator: DictionaryCombinator,
-    already_processed: Arc<HashSet<String>>,
+    db: SqlitePool,
     jobs_tx: async_channel::Sender<String>,
     scan_id: String,
     feeder_done: Arc<AtomicBool>,
+    feeder_error: Arc<Mutex<Option<String>>>,
     pending_domains: Arc<AtomicUsize>,
     task_signal: Arc<AtomicU8>,
     scan_stream: broadcast::Sender<ScanStreamMessage>,
 ) {
     tokio::spawn(async move {
+        let mut batch = Vec::with_capacity(500);
         for domain in combinator.by_ref() {
-            if already_processed.contains(&domain) {
-                continue;
-            }
             if TaskControl::signal(&task_signal) != TaskSignal::Run {
                 debug!(
                     target: "domain_scanner::queue",
@@ -533,22 +567,107 @@ fn spawn_combinator_feeder(
                 );
                 break;
             }
-            pending_domains.fetch_add(1, Ordering::Relaxed);
-            if jobs_tx.send(domain.clone()).await.is_err() {
-                debug!(
-                    target: "domain_scanner::queue",
-                    context = "feeder",
-                    scan_id = %scan_id,
-                    source = "combinator",
-                    "combinator feeder stopped because job queue closed"
-                );
-                pending_domains.fetch_sub(1, Ordering::Relaxed);
-                break;
+            batch.push(domain);
+            if batch.len() == 500 {
+                match enqueue_unprocessed_batch(
+                    &db,
+                    &scan_id,
+                    "combinator",
+                    &batch,
+                    &jobs_tx,
+                    &pending_domains,
+                    &task_signal,
+                    &scan_stream,
+                )
+                .await
+                {
+                    Ok(true) => batch.clear(),
+                    Ok(false) => break,
+                    Err(error) => {
+                        *feeder_error.lock().expect("feeder error mutex poisoned") =
+                            Some(error.to_string());
+                        break;
+                    }
+                }
             }
-            emit_queued_event(&scan_stream, &domain);
+        }
+        if !batch.is_empty()
+            && TaskControl::signal(&task_signal) == TaskSignal::Run
+            && let Err(error) = enqueue_unprocessed_batch(
+                &db,
+                &scan_id,
+                "combinator",
+                &batch,
+                &jobs_tx,
+                &pending_domains,
+                &task_signal,
+                &scan_stream,
+            )
+            .await
+        {
+            *feeder_error.lock().expect("feeder error mutex poisoned") = Some(error.to_string());
         }
         feeder_done.store(true, Ordering::Relaxed);
     });
+}
+
+async fn enqueue_unprocessed_batch(
+    db: &SqlitePool,
+    scan_id: &str,
+    source: &'static str,
+    domains: &[String],
+    jobs_tx: &async_channel::Sender<String>,
+    pending_domains: &AtomicUsize,
+    task_signal: &AtomicU8,
+    scan_stream: &broadcast::Sender<ScanStreamMessage>,
+) -> Result<bool, sqlx::Error> {
+    if domains.is_empty() {
+        return Ok(true);
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT domain FROM (
+            SELECT domain FROM results WHERE scan_id = ",
+    );
+    query
+        .push_bind(scan_id)
+        .push(" UNION SELECT domain FROM scan_retries WHERE scan_id = ")
+        .push_bind(scan_id)
+        .push(") WHERE domain IN (");
+    let mut separated = query.separated(", ");
+    for domain in domains {
+        separated.push_bind(domain);
+    }
+    separated.push_unseparated(")");
+    let processed: HashSet<String> = query
+        .build_query_scalar()
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .collect();
+
+    for domain in domains {
+        if processed.contains(domain) {
+            continue;
+        }
+        if TaskControl::signal(task_signal) != TaskSignal::Run {
+            debug!(
+                target: "domain_scanner::queue",
+                context = "feeder",
+                scan_id,
+                source,
+                "feeder interrupted"
+            );
+            return Ok(false);
+        }
+        pending_domains.fetch_add(1, Ordering::Relaxed);
+        if jobs_tx.send(domain.clone()).await.is_err() {
+            pending_domains.fetch_sub(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        emit_queued_event(scan_stream, domain);
+    }
+    Ok(true)
 }
 
 pub(super) async fn initialize_scan_counters(
@@ -693,16 +812,45 @@ pub(super) async fn get_result_counts(
     ))
 }
 
-async fn get_processed_domains(
+pub(super) async fn load_persisted_retries(
     db: &SqlitePool,
     scan_id: &str,
-) -> Result<HashSet<String>, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, String>("SELECT domain FROM results WHERE scan_id = ?")
-        .bind(scan_id)
-        .fetch_all(db)
-        .await?;
-
-    Ok(rows.into_iter().collect())
+    state: &mut ScanRuntimeState,
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, i64, i64, Option<String>, bool, Option<i64>)>(
+        "SELECT domain, attempt, next_retry_at, error, rate_limited, retry_after_secs
+         FROM scan_retries WHERE scan_id = ?",
+    )
+    .bind(scan_id)
+    .fetch_all(db)
+    .await?;
+    let now_epoch = chrono::Utc::now().timestamp();
+    for (domain, attempt, next_retry_at, error, rate_limited, retry_after_secs) in rows {
+        let wait_secs = next_retry_at.saturating_sub(now_epoch).max(0) as u64;
+        state.deferred_retry_ready_at.insert(
+            domain.clone(),
+            Instant::now() + Duration::from_secs(wait_secs),
+        );
+        state
+            .retry_attempts
+            .insert(domain.clone(), attempt.max(0) as u32);
+        state.deferred_retries.insert(
+            domain.clone(),
+            crate::DomainResult {
+                domain,
+                registration_record_absent: false,
+                purchasable: None,
+                error,
+                signatures: Vec::new(),
+                expiration_date: None,
+                rate_limited,
+                retryable: true,
+                retry_after_secs: retry_after_secs.map(|value| value.max(0) as u64),
+                trace: Vec::new(),
+            },
+        );
+    }
+    Ok(())
 }
 
 pub(super) async fn flush_pending_state_logs(
@@ -819,10 +967,22 @@ async fn persist_pending_result_batch(
           expiration_date, signatures",
     );
 
+    let mut tx = db.begin().await?;
     let rows = builder
         .build_query_as::<ScanResultEvent>()
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
+
+    let mut delete_retries =
+        QueryBuilder::<Sqlite>::new("DELETE FROM scan_retries WHERE scan_id = ");
+    delete_retries.push_bind(scan_id).push(" AND domain IN (");
+    let mut separated = delete_retries.separated(", ");
+    for result in &pending[..batch_len] {
+        separated.push_bind(&result.domain);
+    }
+    separated.push_unseparated(")");
+    delete_retries.build().execute(&mut *tx).await?;
+    tx.commit().await?;
 
     pending.drain(..batch_len);
     for row in rows {
@@ -939,6 +1099,56 @@ mod persistence_tests {
     }
 
     #[tokio::test]
+    async fn resume_filter_queries_processed_domains_in_bounded_batches() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE results (scan_id TEXT, domain TEXT)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE scan_retries (scan_id TEXT, domain TEXT)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO results VALUES ('scan-1', 'done.test')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scan_retries VALUES ('scan-1', 'retry.test')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let domains = vec![
+            "done.test".to_string(),
+            "new-a.test".to_string(),
+            "retry.test".to_string(),
+            "new-b.test".to_string(),
+        ];
+        let (jobs_tx, jobs_rx) = async_channel::bounded(4);
+        let pending = AtomicUsize::new(0);
+        let signal = AtomicU8::new(TaskSignal::Run as u8);
+        let (scan_stream, _) = broadcast::channel(4);
+
+        let keep_running = enqueue_unprocessed_batch(
+            &db,
+            "scan-1",
+            "test",
+            &domains,
+            &jobs_tx,
+            &pending,
+            &signal,
+            &scan_stream,
+        )
+        .await
+        .unwrap();
+
+        assert!(keep_running);
+        assert_eq!(pending.load(Ordering::Relaxed), 2);
+        assert_eq!(jobs_rx.recv().await.unwrap(), "new-a.test");
+        assert_eq!(jobs_rx.recv().await.unwrap(), "new-b.test");
+    }
+
+    #[tokio::test]
     async fn result_batch_is_only_removed_after_successful_insert() {
         let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query(
@@ -950,6 +1160,16 @@ mod persistence_tests {
                 purchasable BOOLEAN,
                 expiration_date TEXT,
                 signatures TEXT,
+                PRIMARY KEY (scan_id, domain)
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE scan_retries (
+                scan_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
                 PRIMARY KEY (scan_id, domain)
             )",
         )

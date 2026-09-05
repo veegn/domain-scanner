@@ -2,8 +2,8 @@ use super::models::{ScanStreamMessage, StartScanRequest, StreamHub, TaskControl,
 use super::scan_runtime_support::{
     COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, STATUS_PUBLISH_INTERVAL,
     ScanRuntimeState, WORKER_DELAY_MS, flush_pending_results, flush_pending_state_logs,
-    flush_scan_buffers, get_result_counts, initialize_scan_counters, prepare_job_feeder,
-    publish_scan_status, queue_event_log, rate_limited_service,
+    flush_scan_buffers, get_result_counts, initialize_scan_counters, load_persisted_retries,
+    prepare_job_feeder, publish_scan_status, queue_event_log, rate_limited_service,
 };
 pub(super) use super::scan_runtime_support::{add_event_log, mark_scan_running};
 use crate::checker::CheckerRegistry;
@@ -12,6 +12,7 @@ use async_channel::{Sender as JobSender, bounded};
 use serde_json::json;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
@@ -52,6 +53,7 @@ pub(super) async fn run_scan_logic(
 
     let (jobs_tx, jobs_rx) = bounded::<String>(1000);
     let feeder_done = Arc::new(AtomicBool::new(false));
+    let feeder_error = Arc::new(Mutex::new(None));
     let pending_domains = Arc::new(AtomicUsize::new(0));
 
     let total = match prepare_job_feeder(
@@ -59,9 +61,9 @@ pub(super) async fn run_scan_logic(
         streams,
         scan_id,
         &params,
-        resume_processed,
         &jobs_tx,
         feeder_done.clone(),
+        feeder_error.clone(),
         pending_domains.clone(),
         task_signal.clone(),
         task_control.clone(),
@@ -111,6 +113,31 @@ pub(super) async fn run_scan_logic(
         return;
     }
 
+    let mut state = ScanRuntimeState::new(resume_processed, resume_found);
+    if let Err(err) = load_persisted_retries(db, scan_id, &mut state).await {
+        let retry_at = now_epoch_seconds().saturating_add(30);
+        let _ =
+            sqlx::query("UPDATE scans SET status = 'pending', retry_not_before = ? WHERE id = ?")
+                .bind(retry_at)
+                .bind(scan_id)
+                .execute(db)
+                .await;
+        let _ = add_event_log(
+            db,
+            streams,
+            scan_id,
+            "ERROR",
+            "storage.retries_load_failed",
+            None,
+            Some("Failed to restore deferred retries".to_string()),
+            vec![("error", json!(err.to_string()))],
+        )
+        .await;
+        streams.cleanup_scan(scan_id).await;
+        task_control.unregister(scan_id);
+        return;
+    }
+
     let (tx_results, mut rx_results) = mpsc::channel(100);
     let worker_throttle = Arc::new(worker::WorkerThrottle::new(
         Duration::from_millis(WORKER_DELAY_MS),
@@ -130,7 +157,6 @@ pub(super) async fn run_scan_logic(
     }
     drop(tx_results);
 
-    let mut state = ScanRuntimeState::new(resume_processed, resume_found);
     streams.notify_scans();
     publish_scan_status(
         &scan_stream,
@@ -161,6 +187,10 @@ pub(super) async fn run_scan_logic(
             Ok(Some(msg)) => msg,
             Ok(None) => break,
             Err(_) => {
+                if TaskControl::signal(&task_signal) != TaskSignal::Run {
+                    jobs_rx.close();
+                    jobs_tx.take();
+                }
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
                     && state.deferred_retries.is_empty()
@@ -257,7 +287,74 @@ pub(super) async fn run_scan_logic(
         }
     }
 
-    queue_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
+    let feeder_failure = feeder_error
+        .lock()
+        .expect("feeder error mutex poisoned")
+        .take();
+    if let Some(feeder_failure) = feeder_failure {
+        let _ = sqlx::query("DELETE FROM scan_retries WHERE scan_id = ?")
+            .bind(scan_id)
+            .execute(db)
+            .await;
+        if let Err(err) = flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await {
+            transition_after_storage_failure(
+                db,
+                streams,
+                &scan_stream,
+                scan_id,
+                total,
+                TaskSignal::Run,
+                &state,
+                &err,
+            )
+            .await;
+        } else {
+            let _ = add_event_log(
+                db,
+                streams,
+                scan_id,
+                "ERROR",
+                "feeder.failed",
+                None,
+                Some("Failed to restore the scan input stream".to_string()),
+                vec![("error", json!(feeder_failure))],
+            )
+            .await;
+            let _ = sqlx::query(
+                "UPDATE scans SET status = 'failed', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(state.processed)
+            .bind(state.found)
+            .bind(scan_id)
+            .execute(db)
+            .await;
+            publish_scan_status(
+                &scan_stream,
+                scan_id,
+                "failed",
+                total,
+                state.processed,
+                state.found,
+                0,
+            )
+            .await;
+            streams.notify_scans();
+        }
+        let _ = scan_stream.send(ScanStreamMessage::Complete(scan_id.to_string()));
+        streams.cleanup_scan(scan_id).await;
+        task_control.unregister(scan_id);
+        return;
+    }
+
+    let final_signal = TaskControl::signal(&task_signal);
+    if final_signal == TaskSignal::Run {
+        queue_exhausted_retries(db, &scan_stream, scan_id, total, &mut state).await;
+    } else if final_signal == TaskSignal::Cancel {
+        let _ = sqlx::query("DELETE FROM scan_retries WHERE scan_id = ?")
+            .bind(scan_id)
+            .execute(db)
+            .await;
+    }
     if let Err(err) = flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await {
         transition_after_storage_failure(
             db,
@@ -326,18 +423,24 @@ pub(super) async fn run_scan_logic(
 
     flush_pending_state_logs(db, &scan_stream, scan_id, &mut state).await;
 
+    let final_total = if signal == TaskSignal::Run {
+        state.processed
+    } else {
+        total
+    };
     let stmt = match signal {
         TaskSignal::Cancel => {
-            "UPDATE scans SET status = 'cancelled', processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
+            "UPDATE scans SET status = 'cancelled', total = ?, processed = ?, found = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
         }
         TaskSignal::Pause => {
-            "UPDATE scans SET status = 'paused', processed = ?, found = ?, retry_not_before = NULL WHERE id = ?"
+            "UPDATE scans SET status = 'paused', total = ?, processed = ?, found = ?, retry_not_before = NULL WHERE id = ?"
         }
         TaskSignal::Run => {
-            "UPDATE scans SET status = 'finished', processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
+            "UPDATE scans SET status = 'finished', total = ?, processed = ?, found = ?, retry_not_before = NULL, finished_at = CURRENT_TIMESTAMP WHERE id = ?"
         }
     };
     if let Err(err) = sqlx::query(stmt)
+        .bind(final_total)
         .bind(state.processed)
         .bind(state.found)
         .bind(scan_id)
@@ -364,7 +467,7 @@ pub(super) async fn run_scan_logic(
         &scan_stream,
         scan_id,
         status,
-        total,
+        final_total,
         state.processed,
         state.found,
         0,
@@ -381,6 +484,13 @@ fn should_handle_drained_feeder(feeder_done: &AtomicBool, pending_domains: &Atom
     feeder_done.load(Ordering::Relaxed) && pending_domains.load(Ordering::Relaxed) == 0
 }
 
+fn now_epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 async fn handle_drained_feeder(
     db: &SqlitePool,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
@@ -390,7 +500,7 @@ async fn handle_drained_feeder(
     pending_domains: &Arc<AtomicUsize>,
     state: &mut ScanRuntimeState,
 ) {
-    if !state.deferred_retries.is_empty() && state.replay_round < MAX_EXCEPTION_REPLAY_ROUNDS {
+    if !state.deferred_retries.is_empty() {
         let now = Instant::now();
         let domains: Vec<String> = state
             .deferred_retries
@@ -408,35 +518,38 @@ async fn handle_drained_feeder(
             return;
         }
 
-        state.replay_round += 1;
-        let replay_count = domains.len();
-
-        let _ = queue_event_log(
-            &mut state.pending_log_flush,
-            db,
-            scan_stream,
-            scan_id,
-            "WARN",
-            "task.exception_replay_scheduled",
-            None,
-            Some("Scheduling deferred exception replay".to_string()),
-            vec![
-                ("round", json!(state.replay_round)),
-                ("domains", json!(replay_count)),
-            ],
-        )
-        .await;
-
+        let mut scheduled = 0usize;
         if let Some(sender) = jobs_tx.as_ref() {
             for domain in domains {
-                pending_domains.fetch_add(1, Ordering::Relaxed);
-                if sender.send(domain.clone()).await.is_err() {
-                    pending_domains.fetch_sub(1, Ordering::Relaxed);
-                    break;
+                match sender.try_send(domain.clone()) {
+                    Ok(()) => {
+                        pending_domains.fetch_add(1, Ordering::Relaxed);
+                        state.deferred_retries.remove(&domain);
+                        state.deferred_retry_ready_at.remove(&domain);
+                        scheduled += 1;
+                    }
+                    Err(async_channel::TrySendError::Full(_)) => break,
+                    Err(async_channel::TrySendError::Closed(_)) => {
+                        jobs_tx.take();
+                        break;
+                    }
                 }
-                state.deferred_retries.remove(&domain);
-                state.deferred_retry_ready_at.remove(&domain);
             }
+        }
+
+        if scheduled > 0 {
+            let _ = queue_event_log(
+                &mut state.pending_log_flush,
+                db,
+                scan_stream,
+                scan_id,
+                "WARN",
+                "task.exception_replay_scheduled",
+                None,
+                Some("Scheduling deferred exception replay".to_string()),
+                vec![("domains", json!(scheduled))],
+            )
+            .await;
         }
 
         state.last_published_deferred = state.deferred_count();
@@ -512,6 +625,37 @@ async fn handle_retryable_result(
         .error
         .clone()
         .unwrap_or_else(|| "transient failure".to_string());
+    let next_attempt = state.retry_attempts.get(&res.domain).copied().unwrap_or(0) + 1;
+    if next_attempt > MAX_EXCEPTION_REPLAY_ROUNDS {
+        state.retry_attempts.remove(&res.domain);
+        state.deferred_retry_ready_at.remove(&res.domain);
+        state.deferred_retries.remove(&res.domain);
+        state.processed += 1;
+        let _ = queue_event_log(
+            &mut state.pending_log_flush,
+            db,
+            scan_stream,
+            scan_id,
+            "ERROR",
+            "domain.retry_exhausted",
+            Some(res.domain.as_str()),
+            Some(reason),
+            vec![("replay_rounds", json!(MAX_EXCEPTION_REPLAY_ROUNDS))],
+        )
+        .await;
+        state
+            .pending_result_flush
+            .push(super::scan_runtime_support::PendingResultPersist {
+                domain: res.domain,
+                registration_record_absent: false,
+                purchasable: None,
+                expiration_date: None,
+                signatures: String::new(),
+            });
+        flush_retry_terminal_results_if_needed(db, scan_stream, scan_id, state).await;
+        return;
+    }
+
     let _ = queue_event_log(
         &mut state.pending_log_flush,
         db,
@@ -522,7 +666,7 @@ async fn handle_retryable_result(
         Some(res.domain.as_str()),
         Some(reason),
         vec![
-            ("replay_round", json!(state.replay_round + 1)),
+            ("replay_round", json!(next_attempt)),
             ("rate_limited", json!(res.rate_limited)),
             ("retry_after_secs", json!(res.retry_after_secs.unwrap_or(0))),
             ("source", json!(limited_service.unwrap_or("unknown"))),
@@ -530,8 +674,60 @@ async fn handle_retryable_result(
     )
     .await;
 
-    let ready_at =
-        Instant::now() + Duration::from_secs(res.retry_after_secs.unwrap_or(0).min(24 * 60 * 60));
+    let retry_after_secs = res.retry_after_secs.unwrap_or(0).min(24 * 60 * 60);
+    let ready_at = Instant::now() + Duration::from_secs(retry_after_secs);
+    let next_retry_at = now_epoch_seconds().saturating_add(retry_after_secs as i64);
+    if let Err(err) = sqlx::query(
+        "INSERT INTO scan_retries
+            (scan_id, domain, attempt, next_retry_at, error, rate_limited, retry_after_secs)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scan_id, domain) DO UPDATE SET
+            attempt = excluded.attempt,
+            next_retry_at = excluded.next_retry_at,
+            error = excluded.error,
+            rate_limited = excluded.rate_limited,
+            retry_after_secs = excluded.retry_after_secs",
+    )
+    .bind(scan_id)
+    .bind(&res.domain)
+    .bind(next_attempt as i64)
+    .bind(next_retry_at)
+    .bind(&res.error)
+    .bind(res.rate_limited)
+    .bind(retry_after_secs as i64)
+    .execute(db)
+    .await
+    {
+        error!(target: "domain_scanner::queue", context = "storage", scan_id = %scan_id,
+            domain = %res.domain, error = %err, "failed to persist deferred retry");
+        let _ = queue_event_log(
+            &mut state.pending_log_flush,
+            db,
+            scan_stream,
+            scan_id,
+            "ERROR",
+            "storage.retry_persist_failed",
+            Some(res.domain.as_str()),
+            Some("Could not persist retry state; recording an inconclusive result".to_string()),
+            vec![("error", json!(err.to_string()))],
+        )
+        .await;
+        state.processed += 1;
+        state
+            .pending_result_flush
+            .push(super::scan_runtime_support::PendingResultPersist {
+                domain: res.domain,
+                registration_record_absent: false,
+                purchasable: None,
+                expiration_date: None,
+                signatures: String::new(),
+            });
+        flush_retry_terminal_results_if_needed(db, scan_stream, scan_id, state).await;
+        return;
+    }
+    state
+        .retry_attempts
+        .insert(res.domain.clone(), next_attempt);
     state
         .deferred_retry_ready_at
         .insert(res.domain.clone(), ready_at);
@@ -549,6 +745,29 @@ async fn handle_retryable_result(
             deferred,
         )
         .await;
+    }
+}
+
+async fn flush_retry_terminal_results_if_needed(
+    db: &SqlitePool,
+    scan_stream: &broadcast::Sender<ScanStreamMessage>,
+    scan_id: &str,
+    state: &mut ScanRuntimeState,
+) {
+    if state.pending_result_flush.len() < super::scan_runtime_support::RESULT_FLUSH_BATCH_SIZE {
+        return;
+    }
+    if let Err(err) =
+        flush_pending_results(db, scan_stream, scan_id, &mut state.pending_result_flush).await
+    {
+        error!(
+            target: "domain_scanner::queue",
+            context = "storage",
+            scan_id = %scan_id,
+            error = %err,
+            pending = state.pending_result_flush.len(),
+            "failed to flush terminal retry results; retaining them for finalization"
+        );
     }
 }
 
@@ -742,6 +961,7 @@ async fn queue_exhausted_retries(
     }
 
     state.deferred_retry_ready_at.clear();
+    state.retry_attempts.clear();
     let exhausted: Vec<crate::DomainResult> =
         state.deferred_retries.drain().map(|(_, res)| res).collect();
 
@@ -863,4 +1083,60 @@ async fn transition_after_storage_failure(
     )
     .await;
     streams.notify_scans();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_replay_never_blocks_the_result_consumer_on_a_full_queue() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let (scan_stream, _) = broadcast::channel(8);
+        let (jobs_tx, jobs_rx) = bounded(2);
+        let mut jobs_tx = Some(jobs_tx);
+        let pending_domains = Arc::new(AtomicUsize::new(0));
+        let mut state = ScanRuntimeState::new(0, 0);
+
+        for index in 0..5 {
+            let domain = format!("retry-{index}.test");
+            state
+                .deferred_retry_ready_at
+                .insert(domain.clone(), Instant::now());
+            state.deferred_retries.insert(
+                domain.clone(),
+                crate::DomainResult {
+                    domain,
+                    registration_record_absent: false,
+                    purchasable: None,
+                    error: Some("temporary".to_string()),
+                    signatures: Vec::new(),
+                    expiration_date: None,
+                    rate_limited: false,
+                    retryable: true,
+                    retry_after_secs: None,
+                    trace: Vec::new(),
+                },
+            );
+        }
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            handle_drained_feeder(
+                &db,
+                &scan_stream,
+                "scan-1",
+                5,
+                &mut jobs_tx,
+                &pending_domains,
+                &mut state,
+            ),
+        )
+        .await
+        .expect("retry scheduling must not await queue capacity");
+
+        assert_eq!(jobs_rx.len(), 2);
+        assert_eq!(pending_domains.load(Ordering::Relaxed), 2);
+        assert_eq!(state.deferred_retries.len(), 3);
+    }
 }

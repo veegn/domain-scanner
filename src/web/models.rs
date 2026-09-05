@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
@@ -169,6 +169,27 @@ impl TaskControl {
 }
 
 impl StartScanRequest {
+    pub fn normalize(&mut self) {
+        fn normalize_unique(values: &mut Option<Vec<String>>, trim_root_dot: bool) {
+            let Some(values) = values else {
+                return;
+            };
+            let mut seen = HashSet::with_capacity(values.len());
+            values.retain_mut(|value| {
+                *value = value.trim().to_ascii_lowercase();
+                if trim_root_dot {
+                    *value = value.trim_end_matches('.').to_string();
+                }
+                seen.insert(value.clone())
+            });
+        }
+
+        normalize_unique(&mut self.domains, true);
+        normalize_unique(&mut self.dictionary_words, true);
+        normalize_unique(&mut self.priority_words, false);
+        normalize_unique(&mut self.dictionary_ids, false);
+    }
+
     pub fn scheduler_key(&self) -> String {
         if !self.suffix.trim().is_empty() {
             return normalize_scheduler_suffix(&self.suffix);
@@ -707,6 +728,28 @@ mod tests {
         request.suffix = ".Co.Uk".to_string();
 
         assert_eq!(request.scheduler_key(), "co.uk");
+    }
+
+    #[test]
+    fn normalize_deduplicates_user_supplied_inputs() {
+        let mut request = base_multi_dictionary_request();
+        request.dictionary_ids = Some(vec![
+            " dict-a ".to_string(),
+            "DICT-A".to_string(),
+            "dict-b".to_string(),
+        ]);
+        request.domains = Some(vec![
+            " Example.COM. ".to_string(),
+            "example.com".to_string(),
+        ]);
+
+        request.normalize();
+
+        assert_eq!(
+            request.dictionary_ids,
+            Some(vec!["dict-a".to_string(), "dict-b".to_string()])
+        );
+        assert_eq!(request.domains, Some(vec!["example.com".to_string()]));
     }
 
     #[test]

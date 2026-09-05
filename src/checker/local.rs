@@ -9,49 +9,29 @@ use std::sync::LazyLock;
 
 use super::traits::{CheckResult, CheckerPriority, DomainChecker};
 
-// Conservative list of strictly reserved words (RFC 2606, etc.)
-// These are names that are technically reserved or invalid for registration
-// across standardized TLDs.
-static RESERVED_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    let mut s = HashSet::new();
-    let words = vec![
-        // RFC 2606 Reserved Names
-        "example",
-        "invalid",
-        "localhost",
-        "test",
-        // Special use
-        "local",
-        "onion",
-        // Standard Restrictions (often blocked at registry level)
-        "www",
-        "nic",
-        "whois",
+// IANA special-use names apply to the listed domain and its descendants. They
+// are suffix rules; a label such as `test` is not reserved under every TLD.
+static SPECIAL_USE_SUFFIXES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        "alt",
         "arpa",
-    ];
-    for w in words {
-        s.insert(w);
-    }
-    s
+        "example",
+        "example.com",
+        "example.net",
+        "example.org",
+        "invalid",
+        "local",
+        "localhost",
+        "onion",
+        "test",
+    ])
 });
 
 fn is_reserved_domain(domain: &str) -> bool {
-    let domain_lower = domain.to_lowercase();
-    let parts: Vec<&str> = domain_lower.split('.').collect();
-
-    if parts.is_empty() {
-        return false;
-    }
-
-    // Check strict lists based on the SLD (Second Level Domain) or the first part
-    // For "example.com", we check "example"
-    let sld = parts[0];
-
-    if RESERVED_WORDS.contains(sld) {
-        return true;
-    }
-
-    false
+    let domain_lower = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    SPECIAL_USE_SUFFIXES
+        .iter()
+        .any(|suffix| domain_lower == *suffix || domain_lower.ends_with(&format!(".{suffix}")))
 }
 
 /// Local reserved domain checker
@@ -111,7 +91,7 @@ mod tests {
     async fn test_local_reserved() {
         let checker = LocalReservedChecker::new();
 
-        // 1. Test reserved word (RFC 2606)
+        // RFC 2606 reserves this exact domain and its descendants.
         let result = checker.check("example.com").await;
         assert!(
             !result.registration_record_absent,
@@ -119,7 +99,7 @@ mod tests {
         );
         assert!(result.signatures.contains(&"RESERVED".to_string()));
 
-        // 2. Test strictly reserved technical term
+        // Special-use single-label names are recognized by this local checker.
         let result = checker.check("localhost").await;
         assert!(
             !result.registration_record_absent,
@@ -140,5 +120,14 @@ mod tests {
             !result.registration_record_absent && result.signatures.is_empty(),
             "random long domain should pass locally without implying purchase availability"
         );
+
+        let result = checker.check("test.org").await;
+        assert!(
+            result.signatures.is_empty(),
+            "a first label is not a suffix rule"
+        );
+
+        let result = checker.check("anything.test").await;
+        assert!(result.signatures.contains(&"RESERVED".to_string()));
     }
 }

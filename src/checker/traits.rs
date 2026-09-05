@@ -14,6 +14,29 @@
 
 use async_trait::async_trait;
 use std::fmt::Debug;
+use std::future::Future;
+use std::sync::Arc;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+
+tokio::task_local! {
+    static NETWORK_PERMITS: Arc<Semaphore>;
+}
+
+pub(crate) async fn with_network_permits<T>(
+    permits: Arc<Semaphore>,
+    future: impl Future<Output = T>,
+) -> T {
+    NETWORK_PERMITS.scope(permits, future).await
+}
+
+/// Acquire a global slot immediately before network I/O. Direct checker tests
+/// do not install a task-local semaphore and therefore run without a slot.
+pub(crate) async fn acquire_network_permit() -> Result<Option<OwnedSemaphorePermit>, AcquireError> {
+    match NETWORK_PERMITS.try_with(Clone::clone) {
+        Ok(permits) => permits.acquire_owned().await.map(Some),
+        Err(_) => Ok(None),
+    }
+}
 
 /// Result of a domain check operation
 #[derive(Debug, Clone)]
