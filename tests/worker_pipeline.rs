@@ -6,6 +6,7 @@ use domain_scanner::generator;
 use domain_scanner::web::models::TaskSignal;
 use domain_scanner::worker;
 use domain_scanner::{DomainResult, WorkerMessage};
+use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 use std::time::Duration;
@@ -15,6 +16,25 @@ fn live_network_enabled() -> bool {
     std::env::var("DOMAIN_SCANNER_LIVE_TESTS")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+async fn build_default_registry() -> CheckerRegistry {
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE api_rate_limits (
+            scope TEXT PRIMARY KEY,
+            next_allowed_at_ms INTEGER NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new(), db).await
 }
 
 #[derive(Debug)]
@@ -183,10 +203,7 @@ async fn test_full_pipeline_with_generator_and_worker() {
         return;
     }
 
-    let registry = Arc::new(
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await,
-    );
+    let registry = Arc::new(build_default_registry().await);
     let dg = generator::generate_domains(
         1,
         ".zzzztest".to_string(),

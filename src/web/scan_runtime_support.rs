@@ -994,6 +994,9 @@ async fn persist_pending_log_batch(
 }
 
 pub(super) fn rate_limited_service(res: &crate::DomainResult) -> Option<&'static str> {
+    if res.trace.iter().any(|step| step.starts_with("DNSHE: ")) {
+        return Some("dnshe");
+    }
     if res.trace.iter().any(|step| step.starts_with("WHOIS: ")) {
         return Some("whois");
     }
@@ -1005,7 +1008,9 @@ pub(super) fn rate_limited_service(res: &crate::DomainResult) -> Option<&'static
     }
 
     let err = res.error.as_deref()?.to_ascii_uppercase();
-    if err.contains("WHOIS") {
+    if err.contains("DNSHE") {
+        Some("dnshe")
+    } else if err.contains("WHOIS") {
         Some("whois")
     } else if err.contains("RDAP") {
         Some("rdap")

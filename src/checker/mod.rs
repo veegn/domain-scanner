@@ -12,6 +12,7 @@
 //! # Built-in Checkers
 //!
 //! - **LocalReservedChecker**: Checks against local reserved domain rules (fastest, no network)
+//! - **DnsheChecker**: Queries DNSHE-managed third-level registrations
 //! - **DohChecker**: DNS over HTTPS queries to check for DNS records
 //! - **RdapChecker**: Queries authoritative RDAP registration data
 //! - **WhoisChecker**: Uses explicit WHOIS responses as a fallback
@@ -30,11 +31,15 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use domain_scanner::checker::{CheckerRegistry, CheckResult};
+//! use domain_scanner::checker::CheckerRegistry;
+//! use domain_scanner::config::AppConfig;
+//! use domain_scanner::web;
+//! use std::collections::HashMap;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let registry = CheckerRegistry::with_defaults(None);
+//!     let db = web::init_db().await.unwrap();
+//!     let registry = CheckerRegistry::with_defaults(AppConfig::default(), HashMap::new(), db).await;
 //!     let result = registry.check("example.com").await;
 //!     
 //!     if result.registration_record_absent {
@@ -46,6 +51,7 @@
 //! ```
 
 pub mod circuit_breaker;
+pub mod dnshe;
 pub mod doh;
 pub mod local;
 pub mod rdap;
@@ -54,6 +60,7 @@ pub mod traits;
 pub mod whois;
 
 // Re-export main types for convenience
+pub use dnshe::DnsheChecker;
 pub use doh::DohChecker;
 pub use local::LocalReservedChecker;
 pub use rdap::RdapChecker;

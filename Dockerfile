@@ -15,7 +15,7 @@ RUN cargo build --release
 FROM alpine:latest
 
 # Install runtime dependencies
-# - ca-certificates: Required for HTTPS requests (DoH/RDAP)
+# - ca-certificates: Required for HTTPS requests (DNSHE/DoH/RDAP)
 # - tzdata: Required for correct log timestamps
 RUN apk add --no-cache ca-certificates tzdata
 

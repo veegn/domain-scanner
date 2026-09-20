@@ -4,24 +4,24 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](./Dockerfile)
 
-一个基于 Rust、Axum 和 SQLite 的异步域名注册记录扫描工具。项目提供 Web 控制台、任务队列、实时 SSE 状态流、DoH/RDAP/WHOIS 多源检查、字典组合扫描、公开结果发布和公开域名前缀搜索。
+一个基于 Rust、Axum 和 SQLite 的异步域名注册记录扫描工具。项目提供 Web 控制台、任务队列、实时 SSE 状态流、DNSHE/DoH/RDAP/WHOIS 多源检查、字典组合扫描、公开结果发布和公开域名前缀搜索。
 
-> **重要：**“未发现注册记录”只表示权威 RDAP/WHOIS 响应明确未找到记录，不等于注册商确认该域名当前可购买。溢价、保留、注册局策略、实时库存和渠道限制仍须向注册商查询。
+> **重要：**“未发现注册记录”只表示权威 DNSHE/RDAP/WHOIS 响应明确未找到记录，不等于注册商确认该域名当前可购买。溢价、保留、注册局策略、实时库存和渠道限制仍须向注册商查询。
 
 ## 核心功能
 
 - Web 控制台：创建扫描任务，查看进度，暂停、恢复、取消任务，发布完成结果。
 - 实时更新：任务列表、单任务状态、扫描日志和未发现注册记录的候选域名通过 SSE 推送。
 - 扫描来源：支持生成式扫描、手动域名列表、内联字典、持久化字典和多字典组合。
-- 多源检查：内置 LocalReserved、DoH、RDAP 和 WHOIS 检查器。
+- 多源检查：内置 LocalReserved、DNSHE、DoH、RDAP 和 WHOIS 检查器。
 - 任务恢复：候选域名与生成游标在同一事务中保存，恢复时补齐未完成候选并从游标继续生成，支持乱序完成。
-- 限流处理：DoH、RDAP、WHOIS 按服务端点控制请求间隔，冷却请求进入有界延期队列；到期重试与新候选交替执行，等待配额不消耗失败重试次数。
+- 限流处理：DNSHE 在全部任务和支持后缀间共享固定的 30 次/分钟限制；其他网络检查器按服务端点控制请求间隔。冷却请求进入有界延期队列，到期重试与新候选交替执行，等待配额不消耗失败重试次数。
 - 候选去重：对最终拼接出的域名进行规范化和持久化去重，避免字典组合碰撞产生重复网络请求。
 - 公开发布：完成后的扫描可以发布为静态页面，并写入公开搜索索引。
 
 ## 合规使用
 
-本工具仅用于个人域名资产管理、学术研究和合法的域名注册记录分析。大量查询可能触发 DoH、RDAP 或 WHOIS 服务商的限制，请控制任务规模并遵守相关服务条款。不要使用本工具进行商标侵权、恶意抢注或绕过第三方服务限制。
+本工具仅用于个人域名资产管理、学术研究和合法的域名注册记录分析。大量查询可能触发 DNSHE、DoH、RDAP 或 WHOIS 服务商的限制，请控制任务规模并遵守相关服务条款。不要使用本工具进行商标侵权、恶意抢注或绕过第三方服务限制。
 
 ## 快速开始
 
@@ -29,7 +29,11 @@
 
 ```bash
 docker pull ghcr.io/veegn/domain-scanner:latest
-docker run -d -p 3000:3000 -v ./data:/app/data -v ./logs:/app/logs ghcr.io/veegn/domain-scanner
+docker run -d -p 3000:3000 \
+  -e DNSHE_API_KEY=your-api-key \
+  -e DNSHE_API_SECRET=your-api-secret \
+  -v ./data:/app/data -v ./logs:/app/logs \
+  ghcr.io/veegn/domain-scanner
 ```
 
 ### 本地运行
@@ -39,6 +43,8 @@ docker run -d -p 3000:3000 -v ./data:/app/data -v ./logs:/app/logs ghcr.io/veegn
 ```bash
 git clone https://github.com/veegn/domain-scanner.git
 cd domain-scanner
+export DNSHE_API_KEY="your-api-key"
+export DNSHE_API_SECRET="your-api-secret"
 cargo run --release -- --port 3000
 ```
 
@@ -87,6 +93,14 @@ http://localhost:3000/published.html
 - `rdap_bootstrap_url`：RDAP bootstrap 数据源，默认使用 IANA `dns.json`。
 - `scheduler`：同时运行的 TLD 分组数、每任务 worker 数、全局网络请求并发上限。服务端点仍保留请求间隔和 `Retry-After` 退避；增加 worker 不会跳过这些限制。
 - `logging`：控制台日志、文件日志目录、文件名前缀和保留数量。
+
+### DNSHE 三级域名
+
+`l.cd`、`us.ci`、`bot.cd`、`de5.net`、`ccwu.cc`、`ddns.ge` 和 `bbroot.com` 使用 DNSHE 官方 JSON WHOIS API。凭据只从 `DNSHE_API_KEY` 和 `DNSHE_API_SECRET` 环境变量读取，不会保存到配置数据库或通过设置接口返回。
+
+这些后缀只接受“一个前缀标签 + 后缀”的三级域名。DNSHE 查询间隔至少为 2001 毫秒，即所有任务、worker 和七个后缀合计不超过 30 次/分钟。限流时间保存在 `data/scans.db`，通过原子更新协调使用同一数据库的进程，应用重启不会清空尚未到期的请求间隔。DNSHE 返回错误或限流时不会回退到父级 RDAP/WHOIS，以免产生错误的“未发现注册记录”结果。
+
+同一组 DNSHE 凭据不要同时用于未共享该数据库的其他部署或外部程序；这些请求不在本项目的限流统计范围内。
 
 ## 数据目录
 

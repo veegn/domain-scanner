@@ -11,6 +11,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
+const DNSHE_SUFFIX_SEED_SQL: &str = "INSERT OR IGNORE INTO tlds (suffix) VALUES ('l.cd'), ('us.ci'), ('bot.cd'), \
+     ('de5.net'), ('ccwu.cc'), ('ddns.ge'), ('bbroot.com')";
 
 pub async fn init_db() -> Result<SqlitePool> {
     std::fs::create_dir_all("data").context("failed to create data directory")?;
@@ -46,6 +48,10 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .context("failed to create schema_migrations table")?;
+    sqlx::query(crate::checker::dnshe::DNSHE_RATE_LIMIT_SCHEMA_SQL)
+        .execute(&pool)
+        .await
+        .context("failed to create persistent API rate-limit table")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scans (
@@ -448,6 +454,17 @@ pub async fn seed_defaults(pool: &SqlitePool) {
         .await
         .unwrap_or(0);
 
+    // This catalog addition must also run for existing installations whose
+    // general seed tables are already populated.
+    if let Err(e) = sqlx::query(DNSHE_SUFFIX_SEED_SQL).execute(pool).await {
+        warn!(
+            target: "domain_scanner::db",
+            context = "seed",
+            error = %e,
+            "could not add DNSHE suffixes to the TLD catalog"
+        );
+    }
+
     if tld_count > 0 && whois_count > 0 {
         return;
     }
@@ -573,6 +590,42 @@ pub async fn save_app_config(pool: &SqlitePool, config: &crate::config::AppConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn seed_defaults_adds_dnshe_suffixes_to_existing_catalogs() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE tlds (suffix TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE whois_servers (tld TEXT PRIMARY KEY, server TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tlds (suffix) VALUES ('com')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO whois_servers (tld, server) VALUES ('com', 'whois.example.test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        seed_defaults(&pool).await;
+
+        let suffixes = load_tlds(&pool).await;
+        for suffix in crate::checker::dnshe::DNSHE_SUPPORTED_SUFFIXES {
+            assert!(suffixes.iter().any(|stored| stored == suffix));
+        }
+        let dnshe_whois_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM whois_servers WHERE tld IN \
+             ('l.cd', 'us.ci', 'bot.cd', 'de5.net', 'ccwu.cc', 'ddns.ge', 'bbroot.com')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dnshe_whois_rows, 0);
+    }
 
     #[tokio::test]
     async fn legacy_available_rows_are_not_promoted_to_stronger_claims() {

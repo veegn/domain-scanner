@@ -14,6 +14,7 @@ use domain_scanner::checker::{
 };
 use domain_scanner::config::AppConfig;
 use domain_scanner::generator;
+use sqlx::sqlite::SqlitePoolOptions;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -24,6 +25,28 @@ fn live_network_enabled() -> bool {
     std::env::var("DOMAIN_SCANNER_LIVE_TESTS")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+async fn build_default_registry(
+    config: AppConfig,
+    whois_servers: HashMap<String, String>,
+) -> CheckerRegistry {
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE api_rate_limits (
+            scope TEXT PRIMARY KEY,
+            next_allowed_at_ms INTEGER NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    CheckerRegistry::with_defaults(config, whois_servers, db).await
 }
 
 async fn spawn_mock_rdap_server() -> (String, JoinHandle<()>) {
@@ -819,10 +842,10 @@ fn test_circuit_breaker_multiple_successes_no_effect() {
 #[tokio::test]
 async fn test_registry_with_defaults() {
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let names = registry.checker_names();
     assert!(names.contains(&"LocalReserved"));
+    assert!(names.contains(&"DNSHE"));
     assert!(!names.contains(&"ZoneData"));
     assert!(names.contains(&"DoH"));
     assert!(names.contains(&"RDAP"));
@@ -832,14 +855,18 @@ async fn test_registry_with_defaults() {
 #[tokio::test]
 async fn test_registry_checker_order() {
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let names = registry.checker_names();
     let local_idx = names.iter().position(|&n| n == "LocalReserved");
+    let dnshe_idx = names.iter().position(|&n| n == "DNSHE");
     let doh_idx = names.iter().position(|&n| n == "DoH");
     let rdap_idx = names.iter().position(|&n| n == "RDAP");
     let whois_idx = names.iter().position(|&n| n == "WHOIS");
-    assert!(local_idx < doh_idx, "LocalReserved should come before DoH");
+    assert!(
+        local_idx < dnshe_idx,
+        "LocalReserved should come before DNSHE"
+    );
+    assert!(dnshe_idx < doh_idx, "DNSHE should come before DoH");
     assert!(doh_idx < rdap_idx, "DoH should come before RDAP");
     assert!(rdap_idx < whois_idx, "RDAP should come before WHOIS");
 }
@@ -856,8 +883,7 @@ async fn test_registry_prefers_rdap_before_whois_for_custom_suffix() {
         ..AppConfig::default()
     };
 
-    let registry =
-        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let registry = build_default_registry(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("taken.alpha").await;
 
     assert!(!result.registration_record_absent);
@@ -880,8 +906,7 @@ async fn test_registry_keeps_authoritative_no_record_before_whois_failure() {
         ..AppConfig::default()
     };
 
-    let registry =
-        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let registry = build_default_registry(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("free.alpha").await;
 
     assert!(result.registration_record_absent);
@@ -908,8 +933,7 @@ async fn test_registry_falls_back_to_whois_after_unverified_rdap_404() {
         ..AppConfig::default()
     };
 
-    let registry =
-        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let registry = build_default_registry(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("unverified-404.alpha").await;
 
     assert!(!result.registration_record_absent);
@@ -927,8 +951,7 @@ async fn test_registry_falls_back_to_whois_after_unverified_rdap_404() {
 #[tokio::test]
 async fn test_registry_reserved_domain_stops_early() {
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("example.com").await;
     assert!(
         !result.registration_record_absent,
@@ -948,8 +971,7 @@ async fn test_registry_registered_workflow() {
     }
 
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("google.com").await;
     assert!(
         !result.registration_record_absent,
@@ -964,8 +986,7 @@ async fn test_registry_candidate_workflow() {
     }
 
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let domain = format!(
         "test-pipeline-avail-{}.com",
         std::time::SystemTime::now()
@@ -986,8 +1007,7 @@ async fn test_registry_candidate_workflow() {
 #[tokio::test]
 async fn test_registry_invalid_domain_empty() {
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("").await;
     assert!(result.error.is_some(), "empty string should be an error");
     assert_eq!(result.error.unwrap(), "Invalid domain format");
@@ -996,8 +1016,7 @@ async fn test_registry_invalid_domain_empty() {
 #[tokio::test]
 async fn test_registry_invalid_domain_no_dot() {
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("singleword").await;
     assert!(result.error.is_some(), "single word should be an error");
     assert_eq!(result.error.unwrap(), "Invalid domain format");
@@ -1562,8 +1581,7 @@ async fn test_registry_domain_with_many_dots() {
         rdap_bootstrap_url: Some(bootstrap_url),
         ..AppConfig::default()
     };
-    let registry =
-        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let registry = build_default_registry(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("subdomain.taken.alpha").await;
     assert!(
         result.error.is_none(),
@@ -1582,8 +1600,7 @@ async fn test_registry_accepts_multi_part_public_suffix() {
         rdap_bootstrap_url: Some(bootstrap_url),
         ..AppConfig::default()
     };
-    let registry =
-        CheckerRegistry::with_defaults(config.clone(), config.whois_servers.clone()).await;
+    let registry = build_default_registry(config.clone(), config.whois_servers.clone()).await;
     let result = registry.check("taken.co.alpha").await;
     assert!(
         result.error.is_none(),
@@ -1602,8 +1619,7 @@ async fn test_registry_single_char_domain() {
     }
 
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("a.com").await;
     assert!(
         result.error.is_none() || result.retryable,
@@ -1618,8 +1634,7 @@ async fn test_registry_numeric_domain() {
     }
 
     let registry =
-        CheckerRegistry::with_defaults(AppConfig::default(), std::collections::HashMap::new())
-            .await;
+        build_default_registry(AppConfig::default(), std::collections::HashMap::new()).await;
     let result = registry.check("123.com").await;
     assert!(
         result.error.is_none(),
@@ -1630,7 +1645,8 @@ async fn test_registry_numeric_domain() {
 
 #[tokio::test]
 async fn test_checker_priority_ordering() {
-    assert!(CheckerPriority::Local < CheckerPriority::Fast);
+    assert!(CheckerPriority::Local < CheckerPriority::Provider);
+    assert!(CheckerPriority::Provider < CheckerPriority::Fast);
     assert!(CheckerPriority::Fast < CheckerPriority::Standard);
     assert!(CheckerPriority::Standard < CheckerPriority::Fallback);
 }

@@ -215,6 +215,8 @@ impl CheckResult {
 pub enum CheckerPriority {
     /// Fastest checks (e.g., local reserved rules)
     Local = 0,
+    /// Provider-specific authoritative APIs that own selected domain routes
+    Provider = 5,
     /// Fast network checks (e.g., DNS over HTTPS)
     Fast = 10,
     /// Standard network checks (e.g., RDAP)
@@ -294,6 +296,16 @@ pub trait DomainChecker: Send + Sync + Debug {
     /// Check whether this checker supports the domain's effective suffix.
     fn supports_domain(&self, domain: &str) -> bool {
         self.matching_suffix(domain).is_some()
+    }
+
+    /// Whether this checker exclusively owns network registration-data checks
+    /// for the domain. Local policy checkers may still run before it.
+    ///
+    /// Provider-managed child registrations may not exist in the parent
+    /// registry's RDAP or WHOIS data. An exclusive route prevents an upstream
+    /// provider error from becoming a false "no registration record" result.
+    fn exclusive_for_domain(&self, _domain: &str) -> bool {
+        false
     }
 
     /// Determine if the checking pipeline should stop after this result.

@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use sqlx::SqlitePool;
+
+use super::dnshe::DnsheChecker;
 use super::doh::DohChecker;
 use super::local::LocalReservedChecker;
 use super::rdap::RdapChecker;
@@ -40,16 +43,32 @@ impl CheckerRegistry {
     ///
     /// Default checkers (in priority order):
     /// 1. `LocalReservedChecker` — fast local reserved-name check (no network)
-    /// 2. `DohChecker`           — DNS-over-HTTPS
-    /// 3. `RdapChecker`          — RDAP protocol
-    /// 4. `WhoisChecker`         — legacy WHOIS fallback
+    /// 2. `DnsheChecker`         — authoritative DNSHE child-domain API
+    /// 3. `DohChecker`           — DNS-over-HTTPS
+    /// 4. `RdapChecker`          — RDAP protocol
+    /// 5. `WhoisChecker`         — legacy WHOIS fallback
     ///
     /// `whois_servers` is loaded from the database (merged with config.json overrides)
     /// by the caller before this function is invoked.
-    pub async fn with_defaults(config: AppConfig, whois_servers: HashMap<String, String>) -> Self {
+    /// The SQLite gate coordinates the fixed DNSHE request interval across
+    /// restarts and across application processes that use the same database.
+    pub async fn with_defaults(
+        config: AppConfig,
+        whois_servers: HashMap<String, String>,
+        db: SqlitePool,
+    ) -> Self {
+        Self::with_dnshe_checker(config, whois_servers, DnsheChecker::from_env_with_db(db)).await
+    }
+
+    async fn with_dnshe_checker(
+        config: AppConfig,
+        whois_servers: HashMap<String, String>,
+        dnshe_checker: DnsheChecker,
+    ) -> Self {
         let mut registry = Self::new();
 
         registry.add_checker(Arc::new(LocalReservedChecker::new()));
+        registry.add_checker(Arc::new(dnshe_checker));
         let doh_checker = DohChecker::with_servers(config.doh_servers.clone()).await;
         registry.add_checker(Arc::new(doh_checker));
 
@@ -111,15 +130,33 @@ impl CheckerRegistry {
         let mut request_failed = false;
         let mut trace_log = Vec::new();
 
+        let has_exclusive_route = self
+            .checkers
+            .iter()
+            .any(|checker| checker.exclusive_for_domain(domain));
+        let is_eligible = |checker: &Arc<dyn DomainChecker>| {
+            !has_exclusive_route
+                || checker.priority() == super::traits::CheckerPriority::Local
+                || checker.exclusive_for_domain(domain)
+        };
+
         let start = resume_checker
             .and_then(|name| {
                 self.checkers
                     .iter()
                     .position(|checker| checker.name() == name)
             })
+            .filter(|index| is_eligible(&self.checkers[*index]))
             .unwrap_or(0);
 
         for checker in &self.checkers[start..] {
+            if !is_eligible(checker) {
+                trace_log.push(format!(
+                    "{}: skipped because another checker owns this domain route",
+                    checker.name()
+                ));
+                continue;
+            }
             if !checker.supports_domain(domain) {
                 trace_log.push(format!("{}: skipped unsupported suffix", checker.name()));
                 continue;
@@ -248,5 +285,104 @@ impl CheckerRegistry {
     /// Get the list of registered checker names.
     pub fn checker_names(&self) -> Vec<&'static str> {
         self.checkers.iter().map(|c| c.name()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct StubChecker {
+        name: &'static str,
+        priority: super::super::traits::CheckerPriority,
+        exclusive: bool,
+        result: CheckResult,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl DomainChecker for StubChecker {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn priority(&self) -> super::super::traits::CheckerPriority {
+            self.priority
+        }
+
+        async fn check(&self, _domain: &str) -> CheckResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+
+        fn supports_tld(&self, _tld: &str) -> bool {
+            true
+        }
+
+        fn exclusive_for_domain(&self, domain: &str) -> bool {
+            self.exclusive && domain.ends_with(".us.ci")
+        }
+    }
+
+    #[tokio::test]
+    async fn exclusive_checker_error_never_falls_through_to_generic_sources() {
+        let exclusive_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(Arc::new(StubChecker {
+            name: "DNSHE",
+            priority: super::super::traits::CheckerPriority::Provider,
+            exclusive: true,
+            result: CheckResult::retryable_error("DNSHE timeout", Some(30))
+                .with_trace("DNSHE: timeout"),
+            calls: Arc::clone(&exclusive_calls),
+        }));
+        registry.add_checker(Arc::new(StubChecker {
+            name: "Fallback",
+            priority: super::super::traits::CheckerPriority::Fallback,
+            exclusive: false,
+            result: CheckResult::no_registration_record(),
+            calls: Arc::clone(&fallback_calls),
+        }));
+        registry.sort_by_priority();
+
+        let result = registry.check("name.us.ci").await;
+
+        assert!(result.retryable);
+        assert_eq!(result.resume_checker.as_deref(), Some("DNSHE"));
+        assert_eq!(exclusive_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert!(!result.registration_record_absent);
+    }
+
+    #[tokio::test]
+    async fn stale_generic_resume_checkpoint_restarts_an_exclusive_route() {
+        let exclusive_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(Arc::new(StubChecker {
+            name: "DNSHE",
+            priority: super::super::traits::CheckerPriority::Provider,
+            exclusive: true,
+            result: CheckResult::registered(vec!["DNSHE".to_string()]),
+            calls: Arc::clone(&exclusive_calls),
+        }));
+        registry.add_checker(Arc::new(StubChecker {
+            name: "Fallback",
+            priority: super::super::traits::CheckerPriority::Fallback,
+            exclusive: false,
+            result: CheckResult::no_registration_record(),
+            calls: Arc::clone(&fallback_calls),
+        }));
+        registry.sort_by_priority();
+
+        let result = registry.check_from("name.us.ci", Some("Fallback")).await;
+
+        assert!(result.has_registration_evidence());
+        assert_eq!(exclusive_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
     }
 }

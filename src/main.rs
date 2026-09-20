@@ -99,7 +99,8 @@ async fn main() {
     );
 
     // 5. Build checker registry
-    let registry = Arc::new(CheckerRegistry::with_defaults(config, whois_servers).await);
+    let registry =
+        Arc::new(CheckerRegistry::with_defaults(config, whois_servers, db.clone()).await);
     info!(
         target: "domain_scanner::main",
         context = "checker_registry",
