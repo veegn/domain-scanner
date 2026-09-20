@@ -55,6 +55,26 @@ impl CircuitBreaker {
             })
     }
 
+    /// Inspect availability without consuming the single half-open probe.
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        if self.failures.load(Ordering::Relaxed) < self.fail_threshold {
+            return None;
+        }
+        let now = Self::current_time();
+        let ready_at = self
+            .last_failure_time
+            .load(Ordering::Relaxed)
+            .saturating_add(self.recovery_timeout_sec)
+            .saturating_add(1);
+        if now < ready_at {
+            Some(ready_at - now)
+        } else if self.half_open_probe_until.load(Ordering::Acquire) > now {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
     fn try_claim_request(&self) -> Option<u64> {
         let failures = self.failures.load(Ordering::Relaxed);
 

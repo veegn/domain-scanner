@@ -157,6 +157,15 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await
     .context("failed to create scan_retries table")?;
+    add_column_if_missing(
+        &pool,
+        "scan_retries",
+        "deferred",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(&pool, "scan_retries", "resume_checker", "TEXT").await?;
+    create_candidate_tables(&pool).await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS tlds (
@@ -299,6 +308,38 @@ pub async fn init_db() -> Result<SqlitePool> {
     .await;
 
     Ok(pool)
+}
+
+pub(super) async fn create_candidate_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS scan_generation (
+            scan_id TEXT PRIMARY KEY,
+            cursor INTEGER NOT NULL DEFAULT 0,
+            fingerprint TEXT NOT NULL,
+            FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS scan_candidates (
+            scan_id TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            completed BOOLEAN NOT NULL DEFAULT 0,
+            PRIMARY KEY (scan_id, domain),
+            FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_scan_candidates_position
+         ON scan_candidates(scan_id, completed, position, domain)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn migrate_registration_status_schema(pool: &SqlitePool) -> Result<()> {

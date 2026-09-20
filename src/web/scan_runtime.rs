@@ -1,9 +1,9 @@
 use super::models::{ScanStreamMessage, StartScanRequest, StreamHub, TaskControl, TaskSignal};
 use super::scan_runtime_support::{
     COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, STATUS_PUBLISH_INTERVAL,
-    ScanRuntimeState, WORKER_DELAY_MS, flush_pending_results, flush_pending_state_logs,
-    flush_scan_buffers, get_result_counts, initialize_scan_counters, load_persisted_retries,
-    prepare_job_feeder, publish_scan_status, queue_event_log, rate_limited_service,
+    ScanRuntimeState, flush_pending_results, flush_pending_state_logs, flush_scan_buffers,
+    get_result_counts, initialize_scan_counters, load_persisted_retries, prepare_job_feeder,
+    publish_scan_status, queue_event_log, rate_limited_service,
 };
 pub(super) use super::scan_runtime_support::{add_event_log, mark_scan_running};
 use crate::checker::CheckerRegistry;
@@ -51,68 +51,6 @@ pub(super) async fn run_scan_logic(
     )
     .await;
 
-    let (jobs_tx, jobs_rx) = bounded::<String>(1000);
-    let feeder_done = Arc::new(AtomicBool::new(false));
-    let feeder_error = Arc::new(Mutex::new(None));
-    let pending_domains = Arc::new(AtomicUsize::new(0));
-
-    let total = match prepare_job_feeder(
-        db,
-        streams,
-        scan_id,
-        &params,
-        &jobs_tx,
-        feeder_done.clone(),
-        feeder_error.clone(),
-        pending_domains.clone(),
-        task_signal.clone(),
-        task_control.clone(),
-    )
-    .await
-    {
-        Ok(total) => total,
-        Err(()) => {
-            streams.cleanup_scan(scan_id).await;
-            task_control.unregister(scan_id);
-            return;
-        }
-    };
-    let mut jobs_tx = Some(jobs_tx);
-
-    let _ = add_event_log(
-        db,
-        streams,
-        scan_id,
-        "INFO",
-        "worker.pool",
-        None,
-        Some("Spawning worker threads".to_string()),
-        vec![
-            ("size", json!(workers_per_scan)),
-            ("delay_ms", json!(WORKER_DELAY_MS)),
-            ("total", json!(total)),
-        ],
-    )
-    .await;
-
-    if let Err(err) =
-        initialize_scan_counters(db, scan_id, total, resume_processed, resume_found).await
-    {
-        let _ = add_event_log(
-            db,
-            streams,
-            scan_id,
-            "ERROR",
-            "storage.counters_init_failed",
-            None,
-            Some("Failed to initialize scan counters".to_string()),
-            vec![("error", json!(err.to_string()))],
-        )
-        .await;
-        task_control.unregister(scan_id);
-        return;
-    }
-
     let mut state = ScanRuntimeState::new(resume_processed, resume_found);
     if let Err(err) = load_persisted_retries(db, scan_id, &mut state).await {
         let retry_at = now_epoch_seconds().saturating_add(30);
@@ -137,22 +75,87 @@ pub(super) async fn run_scan_logic(
         task_control.unregister(scan_id);
         return;
     }
+    // Bound both ready and delayed work. A cooling provider must not cause an
+    // entire multi-million-domain input to become an in-memory retry backlog.
+    let candidate_window = workers_per_scan.saturating_mul(2).clamp(16, 128);
+    let candidate_slots = Arc::new(Semaphore::new(
+        candidate_window.saturating_sub(state.deferred_count() as usize),
+    ));
+    let (jobs_tx, jobs_rx) = bounded::<String>(candidate_window);
+    let (retries_tx, retries_rx) = bounded::<worker::RetryJob>(workers_per_scan.max(1));
+    let feeder_done = Arc::new(AtomicBool::new(false));
+    let feeder_error = Arc::new(Mutex::new(None));
+    let pending_domains = Arc::new(AtomicUsize::new(0));
+
+    let total = match prepare_job_feeder(
+        db,
+        streams,
+        scan_id,
+        &params,
+        &jobs_tx,
+        feeder_done.clone(),
+        feeder_error.clone(),
+        pending_domains.clone(),
+        task_signal.clone(),
+        task_control.clone(),
+        candidate_slots.clone(),
+    )
+    .await
+    {
+        Ok(total) => total,
+        Err(()) => {
+            streams.cleanup_scan(scan_id).await;
+            task_control.unregister(scan_id);
+            return;
+        }
+    };
+    let mut jobs_tx = Some(jobs_tx);
+
+    let _ = add_event_log(
+        db,
+        streams,
+        scan_id,
+        "INFO",
+        "worker.pool",
+        None,
+        Some("Spawning worker threads".to_string()),
+        vec![
+            ("size", json!(workers_per_scan)),
+            ("candidate_window", json!(candidate_window)),
+            ("total", json!(total)),
+        ],
+    )
+    .await;
+
+    if let Err(err) =
+        initialize_scan_counters(db, scan_id, total, resume_processed, resume_found).await
+    {
+        let _ = add_event_log(
+            db,
+            streams,
+            scan_id,
+            "ERROR",
+            "storage.counters_init_failed",
+            None,
+            Some("Failed to initialize scan counters".to_string()),
+            vec![("error", json!(err.to_string()))],
+        )
+        .await;
+        task_control.unregister(scan_id);
+        return;
+    }
 
     let (tx_results, mut rx_results) = mpsc::channel(100);
-    let worker_throttle = Arc::new(worker::WorkerThrottle::new(
-        Duration::from_millis(WORKER_DELAY_MS),
-        workers_per_scan,
-    ));
 
     for id in 1..=workers_per_scan {
         let jobs = jobs_rx.clone();
         let tx = tx_results.clone();
-        let throttle = worker_throttle.clone();
+        let retries = retries_rx.clone();
         let reg = registry.clone();
         let signal_clone = task_signal.clone();
         let permits = global_check_permits.clone();
         tokio::spawn(async move {
-            worker::worker(id, jobs, tx, throttle, reg, signal_clone, permits).await;
+            worker::worker_with_retries(id, jobs, retries, tx, reg, signal_clone, permits).await;
         });
     }
     drop(tx_results);
@@ -169,27 +172,55 @@ pub(super) async fn run_scan_logic(
     )
     .await;
 
+    let metrics_started = Instant::now();
+    let mut provider_deferrals = 0u64;
+    let mut failed_attempts = 0u64;
+    let mut conclusive_results = 0u64;
+    let mut last_buffer_flush = Instant::now();
     loop {
-        if should_handle_drained_feeder(&feeder_done, &pending_domains) {
-            handle_drained_feeder(
-                db,
-                &scan_stream,
-                scan_id,
-                total,
-                &mut jobs_tx,
-                &pending_domains,
-                &mut state,
-            )
-            .await;
+        if TaskControl::signal(&task_signal) == TaskSignal::Run {
+            schedule_due_retries(&retries_tx, &pending_domains, &mut state);
+        } else {
+            jobs_rx.close();
+            retries_rx.close();
+            jobs_tx.take();
+        }
+        if should_handle_drained_feeder(&feeder_done, &pending_domains)
+            && state.deferred_retries.is_empty()
+        {
+            jobs_tx.take();
+            retries_tx.close();
         }
 
-        let msg = match tokio::time::timeout(Duration::from_millis(100), rx_results.recv()).await {
+        // Flush partial batches too: at one result per second a size-only
+        // flush otherwise leaves results invisible and uncommitted for 50s.
+        if last_buffer_flush.elapsed() >= Duration::from_secs(1) {
+            if let Err(err) =
+                flush_scan_buffers(db, streams, &scan_stream, scan_id, &mut state).await
+            {
+                error!(scan_id, error = %err, "periodic result flush failed; retaining buffers");
+            }
+            last_buffer_flush = Instant::now();
+        }
+        let wake_after = state
+            .deferred_queue
+            .next_deadline()
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(10))
+            })
+            .unwrap_or(Duration::from_millis(100))
+            .min(Duration::from_millis(100));
+        let msg = match tokio::time::timeout(wake_after, rx_results.recv()).await {
             Ok(Some(msg)) => msg,
             Ok(None) => break,
             Err(_) => {
                 if TaskControl::signal(&task_signal) != TaskSignal::Run {
                     jobs_rx.close();
+                    retries_rx.close();
                     jobs_tx.take();
+                    retries_tx.close();
                 }
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
@@ -203,6 +234,7 @@ pub(super) async fn run_scan_logic(
 
         if TaskControl::signal(&task_signal) != TaskSignal::Run {
             jobs_rx.close();
+            retries_rx.close();
             jobs_tx.take();
             let _ = add_event_log(
                 db,
@@ -235,7 +267,16 @@ pub(super) async fn run_scan_logic(
                 ));
             }
             crate::WorkerMessage::Result(res) => {
-                if !res.trace.is_empty() {
+                if res.deferred {
+                    provider_deferrals += 1;
+                } else if res.retryable {
+                    failed_attempts += 1;
+                } else if res.registration_record_absent
+                    || (!res.signatures.is_empty() && res.error.is_none())
+                {
+                    conclusive_results += 1;
+                }
+                if !res.deferred && !res.trace.is_empty() {
                     let _ = queue_event_log(
                         &mut state.pending_log_flush,
                         db,
@@ -253,16 +294,11 @@ pub(super) async fn run_scan_logic(
                 pending_domains.fetch_sub(1, Ordering::Relaxed);
 
                 if res.retryable {
-                    handle_retryable_result(
-                        db,
-                        &scan_stream,
-                        scan_id,
-                        &worker_throttle,
-                        &mut state,
-                        res,
-                        total,
-                    )
-                    .await;
+                    if handle_retryable_result(db, &scan_stream, scan_id, &mut state, res, total)
+                        .await
+                    {
+                        candidate_slots.add_permits(1);
+                    }
                     continue;
                 }
 
@@ -276,12 +312,14 @@ pub(super) async fn run_scan_logic(
                     res,
                 )
                 .await;
+                candidate_slots.add_permits(1);
 
                 if feeder_done.load(Ordering::Relaxed)
                     && pending_domains.load(Ordering::Relaxed) == 0
                     && state.deferred_retries.is_empty()
                 {
                     jobs_tx.take();
+                    retries_tx.close();
                 }
             }
         }
@@ -400,6 +438,17 @@ pub(super) async fn run_scan_logic(
             vec![
                 ("processed", json!(state.processed)),
                 ("registration_record_absent", json!(state.found)),
+                ("elapsed_ms", json!(metrics_started.elapsed().as_millis())),
+                ("conclusive_results", json!(conclusive_results)),
+                (
+                    "conclusive_per_minute",
+                    json!(
+                        conclusive_results as f64 * 60.0
+                            / metrics_started.elapsed().as_secs_f64().max(0.001)
+                    ),
+                ),
+                ("provider_deferrals", json!(provider_deferrals)),
+                ("failed_attempts", json!(failed_attempts)),
             ],
         ),
     };
@@ -491,80 +540,36 @@ fn now_epoch_seconds() -> i64 {
         .as_secs() as i64
 }
 
-async fn handle_drained_feeder(
-    db: &SqlitePool,
-    scan_stream: &broadcast::Sender<ScanStreamMessage>,
-    scan_id: &str,
-    total: i64,
-    jobs_tx: &mut Option<JobSender<String>>,
+fn schedule_due_retries(
+    sender: &JobSender<worker::RetryJob>,
     pending_domains: &Arc<AtomicUsize>,
     state: &mut ScanRuntimeState,
 ) {
-    if !state.deferred_retries.is_empty() {
-        let now = Instant::now();
-        let domains: Vec<String> = state
-            .deferred_retries
-            .keys()
-            .filter(|domain| {
-                state
-                    .deferred_retry_ready_at
-                    .get(*domain)
-                    .map(|ready_at| *ready_at <= now)
-                    .unwrap_or(true)
-            })
-            .cloned()
-            .collect();
-        if domains.is_empty() {
-            return;
-        }
-
-        let mut scheduled = 0usize;
-        if let Some(sender) = jobs_tx.as_ref() {
-            for domain in domains {
-                match sender.try_send(domain.clone()) {
-                    Ok(()) => {
-                        pending_domains.fetch_add(1, Ordering::Relaxed);
-                        state.deferred_retries.remove(&domain);
-                        state.deferred_retry_ready_at.remove(&domain);
-                        scheduled += 1;
-                    }
-                    Err(async_channel::TrySendError::Full(_)) => break,
-                    Err(async_channel::TrySendError::Closed(_)) => {
-                        jobs_tx.take();
-                        break;
-                    }
-                }
+    let now = Instant::now();
+    // Cap each dispatch pass so a large restored backlog cannot monopolize
+    // the result consumer. try_send never waits on workers consuming results.
+    for _ in 0..64 {
+        let Some((domain, ready_at)) = state.deferred_queue.pop_due(now) else {
+            break;
+        };
+        let Some(result) = state.deferred_retries.get(&domain) else {
+            continue;
+        };
+        let job = worker::RetryJob {
+            domain: domain.clone(),
+            resume_checker: result.resume_checker.clone(),
+        };
+        pending_domains.fetch_add(1, Ordering::Relaxed);
+        match sender.try_send(job) {
+            Ok(()) => {
+                state.deferred_retries.remove(&domain);
+            }
+            Err(_) => {
+                pending_domains.fetch_sub(1, Ordering::Relaxed);
+                state.deferred_queue.insert(domain, ready_at);
+                break;
             }
         }
-
-        if scheduled > 0 {
-            let _ = queue_event_log(
-                &mut state.pending_log_flush,
-                db,
-                scan_stream,
-                scan_id,
-                "WARN",
-                "task.exception_replay_scheduled",
-                None,
-                Some("Scheduling deferred exception replay".to_string()),
-                vec![("domains", json!(scheduled))],
-            )
-            .await;
-        }
-
-        state.last_published_deferred = state.deferred_count();
-        publish_scan_status(
-            scan_stream,
-            scan_id,
-            "running",
-            total,
-            state.processed,
-            state.found,
-            state.last_published_deferred,
-        )
-        .await;
-    } else {
-        jobs_tx.take();
     }
 }
 
@@ -572,63 +577,25 @@ async fn handle_retryable_result(
     db: &SqlitePool,
     scan_stream: &broadcast::Sender<ScanStreamMessage>,
     scan_id: &str,
-    worker_throttle: &Arc<worker::WorkerThrottle>,
     state: &mut ScanRuntimeState,
     res: crate::DomainResult,
     total: i64,
-) {
+) -> bool {
     let limited_service = if res.rate_limited {
         rate_limited_service(&res)
     } else {
         None
     };
 
-    if let Some(service) = limited_service {
-        let paused_until = worker_throttle.pause_for(Duration::from_secs(60));
-        let remaining_workers = worker_throttle.reduce_workers();
-        let new_delay = if remaining_workers.is_none() {
-            Some(worker_throttle.slow_down_by_percent(20))
-        } else {
-            None
-        };
-        let _ = queue_event_log(
-            &mut state.pending_log_flush,
-            db,
-            scan_stream,
-            scan_id,
-            "WARN",
-            "task.throttle_adjusted",
-            Some(res.domain.as_str()),
-            Some(match remaining_workers {
-                Some(_) => {
-                    "Rate limit detected; pausing task and reducing worker concurrency".to_string()
-                }
-                None => "Rate limit detected; pausing task and reducing scan speed".to_string(),
-            }),
-            {
-                let mut fields = vec![
-                    ("source", json!(service)),
-                    ("pause_secs", json!(60)),
-                    ("paused_until_epoch_ms", json!(paused_until)),
-                    ("active_workers", json!(worker_throttle.current_workers())),
-                ];
-                if let Some(delay) = new_delay {
-                    fields.push(("delay_ms", json!(delay.as_millis() as u64)));
-                }
-                fields
-            },
-        )
-        .await;
-    }
-
     let reason = res
         .error
         .clone()
         .unwrap_or_else(|| "transient failure".to_string());
-    let next_attempt = state.retry_attempts.get(&res.domain).copied().unwrap_or(0) + 1;
+    let next_attempt =
+        state.retry_attempts.get(&res.domain).copied().unwrap_or(0) + u32::from(!res.deferred);
     if next_attempt > MAX_EXCEPTION_REPLAY_ROUNDS {
         state.retry_attempts.remove(&res.domain);
-        state.deferred_retry_ready_at.remove(&res.domain);
+        state.deferred_queue.remove(&res.domain);
         state.deferred_retries.remove(&res.domain);
         state.processed += 1;
         let _ = queue_event_log(
@@ -653,40 +620,44 @@ async fn handle_retryable_result(
                 signatures: String::new(),
             });
         flush_retry_terminal_results_if_needed(db, scan_stream, scan_id, state).await;
-        return;
+        return true;
     }
 
-    let _ = queue_event_log(
-        &mut state.pending_log_flush,
-        db,
-        scan_stream,
-        scan_id,
-        if res.rate_limited { "WARN" } else { "INFO" },
-        "domain.deferred_retry_recorded",
-        Some(res.domain.as_str()),
-        Some(reason),
-        vec![
-            ("replay_round", json!(next_attempt)),
-            ("rate_limited", json!(res.rate_limited)),
-            ("retry_after_secs", json!(res.retry_after_secs.unwrap_or(0))),
-            ("source", json!(limited_service.unwrap_or("unknown"))),
-        ],
-    )
-    .await;
+    if !res.deferred {
+        let _ = queue_event_log(
+            &mut state.pending_log_flush,
+            db,
+            scan_stream,
+            scan_id,
+            if res.rate_limited { "WARN" } else { "INFO" },
+            "domain.deferred_retry_recorded",
+            Some(res.domain.as_str()),
+            Some(reason),
+            vec![
+                ("replay_round", json!(next_attempt)),
+                ("rate_limited", json!(res.rate_limited)),
+                ("retry_after_secs", json!(res.retry_after_secs.unwrap_or(0))),
+                ("source", json!(limited_service.unwrap_or("unknown"))),
+            ],
+        )
+        .await;
+    }
 
-    let retry_after_secs = res.retry_after_secs.unwrap_or(0).min(24 * 60 * 60);
+    let retry_after_secs = res.retry_after_secs.unwrap_or(1).clamp(1, 24 * 60 * 60);
     let ready_at = Instant::now() + Duration::from_secs(retry_after_secs);
     let next_retry_at = now_epoch_seconds().saturating_add(retry_after_secs as i64);
     if let Err(err) = sqlx::query(
         "INSERT INTO scan_retries
-            (scan_id, domain, attempt, next_retry_at, error, rate_limited, retry_after_secs)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+            (scan_id, domain, attempt, next_retry_at, error, rate_limited, retry_after_secs, deferred, resume_checker)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(scan_id, domain) DO UPDATE SET
             attempt = excluded.attempt,
             next_retry_at = excluded.next_retry_at,
             error = excluded.error,
             rate_limited = excluded.rate_limited,
-            retry_after_secs = excluded.retry_after_secs",
+            retry_after_secs = excluded.retry_after_secs,
+            deferred = excluded.deferred,
+            resume_checker = excluded.resume_checker",
     )
     .bind(scan_id)
     .bind(&res.domain)
@@ -695,6 +666,8 @@ async fn handle_retryable_result(
     .bind(&res.error)
     .bind(res.rate_limited)
     .bind(retry_after_secs as i64)
+    .bind(res.deferred)
+    .bind(&res.resume_checker)
     .execute(db)
     .await
     {
@@ -723,14 +696,12 @@ async fn handle_retryable_result(
                 signatures: String::new(),
             });
         flush_retry_terminal_results_if_needed(db, scan_stream, scan_id, state).await;
-        return;
+        return true;
     }
     state
         .retry_attempts
         .insert(res.domain.clone(), next_attempt);
-    state
-        .deferred_retry_ready_at
-        .insert(res.domain.clone(), ready_at);
+    state.deferred_queue.insert(res.domain.clone(), ready_at);
     state.deferred_retries.insert(res.domain.clone(), res);
     let deferred = state.deferred_count();
     if deferred != state.last_published_deferred {
@@ -746,6 +717,7 @@ async fn handle_retryable_result(
         )
         .await;
     }
+    false
 }
 
 async fn flush_retry_terminal_results_if_needed(
@@ -781,6 +753,7 @@ async fn handle_completed_result(
     res: crate::DomainResult,
 ) {
     state.processed += 1;
+    state.retry_attempts.remove(&res.domain);
 
     if res.registration_record_absent {
         state.found += 1;
@@ -960,7 +933,7 @@ async fn queue_exhausted_retries(
         return;
     }
 
-    state.deferred_retry_ready_at.clear();
+    state.deferred_queue.clear();
     state.retry_attempts.clear();
     let exhausted: Vec<crate::DomainResult> =
         state.deferred_retries.drain().map(|(_, res)| res).collect();
@@ -1088,21 +1061,251 @@ async fn transition_after_storage_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checker::{CheckResult, CheckerPriority, DomainChecker};
+
+    #[derive(Debug)]
+    struct DeferredChecker {
+        cool_calls: AtomicUsize,
+        fast_calls: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct CountingChecker {
+        calls: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl DomainChecker for CountingChecker {
+        fn name(&self) -> &'static str {
+            "CountingStub"
+        }
+        fn priority(&self) -> CheckerPriority {
+            CheckerPriority::Local
+        }
+        fn supports_tld(&self, _: &str) -> bool {
+            true
+        }
+        fn should_stop_pipeline(&self, _: &CheckResult) -> bool {
+            true
+        }
+        async fn check(&self, _: &str) -> CheckResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            CheckResult::registered(vec!["STUB".into()])
+                .with_trace("RDAP: mock registration record")
+        }
+    }
 
     #[tokio::test]
-    async fn retry_replay_never_blocks_the_result_consumer_on_a_full_queue() {
-        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let (scan_stream, _) = broadcast::channel(8);
+    async fn pause_and_resume_preserves_candidates_without_rechecking_committed_results() {
+        let db = super::super::test_support::scan_db().await;
+        let control = TaskControl::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(Arc::new(CountingChecker {
+            calls: calls.clone(),
+            delay: Duration::from_millis(80),
+        }));
+        let request: StartScanRequest = serde_json::from_value(json!({
+            "suffix":".test", "domains":(0..100).map(|i|format!("domain-{i}.test")).collect::<Vec<_>>()
+        })).unwrap();
+        let scan_db = db.clone();
+        let scan_control = control.clone();
+        let first_request = request.clone();
+        let first_run = tokio::spawn(async move {
+            run_scan_logic(
+                &scan_db,
+                "scan-1",
+                first_request,
+                Arc::new(registry),
+                scan_control,
+                &StreamHub::new(),
+                2,
+                Arc::new(Semaphore::new(2)),
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while calls.load(Ordering::Relaxed) < 4 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(control.pause("scan-1"));
+        tokio::time::timeout(Duration::from_secs(3), first_run)
+            .await
+            .unwrap()
+            .unwrap();
+        let (status, committed): (String, i64) =
+            sqlx::query_as("SELECT status, processed FROM scans WHERE id='scan-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status, "paused");
+        assert!((1..100).contains(&committed));
+        let resumed_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(Arc::new(CountingChecker {
+            calls: resumed_calls.clone(),
+            delay: Duration::ZERO,
+        }));
+        // One worker plus a RDAP trace catches accidental reintroduction of the
+        // old one-second post-check sleep. No external requests are involved.
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_scan_logic(
+                &db,
+                "scan-1",
+                request,
+                Arc::new(registry),
+                control,
+                &StreamHub::new(),
+                1,
+                Arc::new(Semaphore::new(2)),
+            ),
+        )
+        .await
+        .expect("ready mock results should not incur per-domain sleeps");
+        assert_eq!(
+            resumed_calls.load(Ordering::Relaxed),
+            100 - committed as usize
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM results")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 100);
+    }
+
+    #[async_trait::async_trait]
+    impl DomainChecker for DeferredChecker {
+        fn name(&self) -> &'static str {
+            "DeferredStub"
+        }
+        fn priority(&self) -> CheckerPriority {
+            CheckerPriority::Local
+        }
+        fn supports_tld(&self, _: &str) -> bool {
+            true
+        }
+        fn should_stop_pipeline(&self, result: &CheckResult) -> bool {
+            result.has_registration_evidence()
+        }
+        async fn check(&self, domain: &str) -> CheckResult {
+            if domain == "cool.test" && self.cool_calls.fetch_add(1, Ordering::Relaxed) < 4 {
+                return CheckResult::deferred("provider cooldown", Duration::from_millis(1));
+            }
+            self.fast_calls.fetch_add(1, Ordering::Relaxed);
+            CheckResult::registered(vec!["STUB".into()])
+        }
+    }
+
+    #[tokio::test]
+    async fn cooling_domain_does_not_pause_other_work_or_exhaust_attempts() {
+        let db = super::super::test_support::scan_db().await;
+        let checker = Arc::new(DeferredChecker {
+            cool_calls: AtomicUsize::new(0),
+            fast_calls: AtomicUsize::new(0),
+        });
+        let mut registry = CheckerRegistry::new();
+        registry.add_checker(checker.clone());
+        let request: StartScanRequest = serde_json::from_value(json!({
+            "suffix":".test", "domains":["cool.test", "fast.test", "FAST.test."]
+        }))
+        .unwrap();
+        let scan_db = db.clone();
+        let task = tokio::spawn(async move {
+            run_scan_logic(
+                &scan_db,
+                "scan-1",
+                request,
+                Arc::new(registry),
+                TaskControl::default(),
+                &StreamHub::new(),
+                2,
+                Arc::new(Semaphore::new(2)),
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while checker.fast_calls.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("healthy domain should complete during the other provider's cooldown");
+        tokio::time::timeout(Duration::from_secs(12), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let row: (String, i64, i64) =
+            sqlx::query_as("SELECT status, total, processed FROM scans WHERE id='scan-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(row, ("finished".into(), 2, 2));
+        assert_eq!(checker.cool_calls.load(Ordering::Relaxed), 5);
+        assert_eq!(checker.fast_calls.load(Ordering::Relaxed), 2);
+        let unknown: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM results WHERE signatures = ''")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            unknown, 0,
+            "waiting for capacity must not become an inconclusive terminal result"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_attempt_and_pipeline_checkpoint_survive_restart() {
+        let db = super::super::test_support::scan_db().await;
+        let (stream, _) = broadcast::channel(8);
+        let mut state = ScanRuntimeState::new(0, 0);
+        let result = crate::DomainResult {
+            domain: "waiting.test".into(),
+            registration_record_absent: false,
+            purchasable: None,
+            error: Some("cooling".into()),
+            signatures: vec![],
+            expiration_date: None,
+            rate_limited: false,
+            retryable: true,
+            deferred: true,
+            resume_checker: Some("RDAP".into()),
+            retry_after_secs: Some(60),
+            trace: vec![],
+        };
+        assert!(!handle_retryable_result(&db, &stream, "scan-1", &mut state, result, 1).await);
+        let mut restored = ScanRuntimeState::new(0, 0);
+        load_persisted_retries(&db, "scan-1", &mut restored)
+            .await
+            .unwrap();
+        assert_eq!(restored.retry_attempts["waiting.test"], 0);
+        assert_eq!(
+            restored.deferred_retries["waiting.test"]
+                .resume_checker
+                .as_deref(),
+            Some("RDAP")
+        );
+        assert!(
+            restored.deferred_queue.next_deadline().unwrap()
+                > Instant::now() + Duration::from_secs(58)
+        );
+    }
+
+    #[test]
+    fn retry_replay_never_blocks_the_result_consumer_on_a_full_queue() {
         let (jobs_tx, jobs_rx) = bounded(2);
-        let mut jobs_tx = Some(jobs_tx);
         let pending_domains = Arc::new(AtomicUsize::new(0));
         let mut state = ScanRuntimeState::new(0, 0);
 
         for index in 0..5 {
             let domain = format!("retry-{index}.test");
-            state
-                .deferred_retry_ready_at
-                .insert(domain.clone(), Instant::now());
+            state.deferred_queue.insert(domain.clone(), Instant::now());
             state.deferred_retries.insert(
                 domain.clone(),
                 crate::DomainResult {
@@ -1114,26 +1317,15 @@ mod tests {
                     expiration_date: None,
                     rate_limited: false,
                     retryable: true,
+                    deferred: false,
+                    resume_checker: None,
                     retry_after_secs: None,
                     trace: Vec::new(),
                 },
             );
         }
 
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            handle_drained_feeder(
-                &db,
-                &scan_stream,
-                "scan-1",
-                5,
-                &mut jobs_tx,
-                &pending_domains,
-                &mut state,
-            ),
-        )
-        .await
-        .expect("retry scheduling must not await queue capacity");
+        schedule_due_retries(&jobs_tx, &pending_domains, &mut state);
 
         assert_eq!(jobs_rx.len(), 2);
         assert_eq!(pending_domains.load(Ordering::Relaxed), 2);

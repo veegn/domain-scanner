@@ -62,14 +62,19 @@ fn normalized_dns_name(value: &str) -> String {
 }
 
 fn validate_doh_response(response: &DohResponse, domain: &str) -> Result<bool, &'static str> {
-    if response.status != 0 {
-        return Err("DNS response status was not NOERROR");
-    }
     let requested = normalized_dns_name(domain);
     if !response.question.iter().any(|question| {
         question.record_type == 2 && normalized_dns_name(&question.name) == requested
     }) {
         return Err("DNS response question did not match the requested NS lookup");
+    }
+    // A matching NXDOMAIN is a successful DNS lookup with no NS evidence. It
+    // neither trips the provider circuit nor establishes registration absence.
+    if response.status == 3 {
+        return Ok(false);
+    }
+    if response.status != 0 {
+        return Err("DNS response status was not NOERROR or NXDOMAIN");
     }
     Ok(response
         .answer
@@ -157,53 +162,45 @@ impl DohChecker {
             .clone()
     }
 
-    async fn wait_for_turn(&self, server: &str) {
+    async fn try_claim_turn(&self, server: &str) -> Result<(), Duration> {
         let throttle = self.throttle_for_server(server).await;
-        loop {
-            let sleep_for = {
-                let mut guard = throttle.lock().await;
-                let now = Instant::now();
-                if guard.next_allowed_at <= now {
-                    guard.next_allowed_at = now + guard.min_interval;
-                    None
-                } else {
-                    Some(guard.next_allowed_at - now)
-                }
-            };
-
-            if let Some(delay) = sleep_for {
-                debug!(
-                    target: "domain_scanner::checker::doh",
-                    context = "throttle",
-                    server,
-                    delay_ms = delay.as_millis() as u64,
-                    "waiting for DoH throttle window"
-                );
-                tokio::time::sleep(delay).await;
-            } else {
-                break;
-            }
+        let mut guard = throttle.lock().await;
+        let now = Instant::now();
+        if guard.next_allowed_at > now {
+            return Err(guard.next_allowed_at - now);
         }
+        guard.next_allowed_at = now + guard.min_interval;
+        Ok(())
     }
 
-    async fn is_server_ready(&self, server: &str) -> bool {
+    async fn server_delay(&self, server: &str) -> Duration {
         let throttle = self.throttle_for_server(server).await;
         let guard = throttle.lock().await;
-        guard.next_allowed_at <= Instant::now()
+        let delay = guard
+            .next_allowed_at
+            .saturating_duration_since(Instant::now());
+        drop(guard);
+        let breaker = self.breaker_for_server(server).await;
+        delay.max(Duration::from_secs(breaker.retry_after_secs().unwrap_or(0)))
     }
 
-    async fn select_server(&self) -> &str {
+    async fn select_server(&self) -> (&str, Duration) {
         let len = self.servers.len();
         let start = self.current_idx.fetch_add(1, Ordering::Relaxed);
+        let mut selected = (&self.servers[start % len], Duration::MAX);
         for offset in 0..len {
             let idx = (start + offset) % len;
             let server = &self.servers[idx];
-            if self.is_server_ready(server).await {
-                return server;
+            let delay = self.server_delay(server).await;
+            if delay.is_zero() {
+                return (server, delay);
+            }
+            if delay < selected.1 {
+                selected = (server, delay);
             }
         }
 
-        &self.servers[start % len]
+        (selected.0, selected.1)
     }
 
     async fn record_success(&self, server: &str) {
@@ -223,7 +220,7 @@ impl DohChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
-        guard.next_allowed_at = Instant::now() + retry_after;
+        guard.next_allowed_at = guard.next_allowed_at.max(Instant::now() + retry_after);
         warn!(
             target: "domain_scanner::checker::doh",
             context = "backoff",
@@ -246,7 +243,7 @@ impl DohChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
-        guard.next_allowed_at = Instant::now() + retry_after;
+        guard.next_allowed_at = guard.next_allowed_at.max(Instant::now() + retry_after);
         warn!(
             target: "domain_scanner::checker::doh",
             context = "backoff",
@@ -281,21 +278,33 @@ impl DomainChecker for DohChecker {
                 .with_trace("DoH: no servers available");
         }
 
-        // Prefer a currently ready provider, falling back to round-robin when all are cooling down.
-        let server = self.select_server().await;
-        let breaker = self.breaker_for_server(server).await;
-        let Some(_circuit_request) = breaker.acquire_request() else {
-            return CheckResult::retryable_error("DoH provider circuit breaker open", Some(30))
-                .with_trace(format!("DoH: circuit breaker open for {}", server));
-        };
-        self.wait_for_turn(server).await;
-        let _permit = match acquire_network_permit().await {
+        let (server, delay) = self.select_server().await;
+        if !delay.is_zero() {
+            return CheckResult::deferred("DoH providers cooling down", delay)
+                .with_trace(format!("DoH: deferred until provider {} is ready", server));
+        }
+        let _permit = match acquire_network_permit() {
             Ok(permit) => permit,
             Err(_) => {
-                return CheckResult::retryable_error("global network limiter closed", Some(1))
-                    .with_trace("DoH: global network limiter closed");
+                return CheckResult::deferred(
+                    "global network limiter busy",
+                    Duration::from_secs(1),
+                )
+                .with_trace("DoH: global network limiter busy");
             }
         };
+        let breaker = self.breaker_for_server(server).await;
+        let Some(_circuit_request) = breaker.acquire_request() else {
+            return CheckResult::deferred(
+                "DoH provider circuit breaker open",
+                Duration::from_secs(breaker.retry_after_secs().unwrap_or(1)),
+            )
+            .with_trace(format!("DoH: circuit breaker open for {}", server));
+        };
+        if let Err(delay) = self.try_claim_turn(server).await {
+            return CheckResult::deferred("DoH provider cooling down", delay)
+                .with_trace(format!("DoH: provider {} deferred", server));
+        }
 
         let url = format!("{}?name={}.&type=NS", server, domain);
 
@@ -460,6 +469,65 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn repeated_nxdomain_keeps_provider_healthy_and_remains_inconclusive() {
+        let app = axum::Router::new().route(
+            "/resolve",
+            axum::routing::get(|| async {
+                axum::Json(
+                    serde_json::json!({"Status":3,"Question":[{"name":"example.test.","type":2}]}),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("http://{}/resolve", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let checker = DohChecker::with_servers(vec![server.clone()]).await;
+        let throttle = checker.throttle_for_server(&server).await;
+        for _ in 0..25 {
+            throttle.lock().await.next_allowed_at = Instant::now();
+            let result = checker.check("example.test").await;
+            assert!(result.error.is_none(), "{:?}", result);
+            assert!(!result.registration_record_absent);
+            assert!(!result.has_registration_evidence());
+        }
+        assert_eq!(
+            checker.breaker_for_server(&server).await.retry_after_secs(),
+            None
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn selection_skips_open_circuit_and_cooldown_does_not_hold_global_capacity() {
+        let checker = DohChecker::with_servers(vec![
+            "http://broken.test".into(),
+            "http://healthy.test".into(),
+        ])
+        .await;
+        let breaker = checker.breaker_for_server("http://broken.test").await;
+        for _ in 0..20 {
+            breaker.record_failure();
+        }
+        assert_eq!(checker.select_server().await.0, "http://healthy.test");
+        checker
+            .throttle_for_server("http://healthy.test")
+            .await
+            .lock()
+            .await
+            .next_allowed_at = Instant::now() + Duration::from_secs(30);
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let result = super::super::traits::with_network_permits(
+            permits.clone(),
+            checker.check("example.test"),
+        )
+        .await;
+        assert!(result.deferred);
+        assert_eq!(permits.available_permits(), 1);
+    }
 
     #[test]
     fn validates_requested_ns_evidence() {

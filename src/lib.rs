@@ -22,6 +22,12 @@ pub struct DomainResult {
     pub expiration_date: Option<String>,
     pub rate_limited: bool,
     pub retryable: bool,
+    /// Waiting for a provider slot, without consuming a failed-query attempt.
+    #[serde(default)]
+    pub deferred: bool,
+    /// Resume a deferred pipeline without repeating earlier network checks.
+    #[serde(default)]
+    pub resume_checker: Option<String>,
     pub retry_after_secs: Option<u64>,
     pub trace: Vec<String>,
 }

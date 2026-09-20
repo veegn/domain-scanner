@@ -14,8 +14,9 @@
 - 实时更新：任务列表、单任务状态、扫描日志和未发现注册记录的候选域名通过 SSE 推送。
 - 扫描来源：支持生成式扫描、手动域名列表、内联字典、持久化字典和多字典组合。
 - 多源检查：内置 LocalReserved、DoH、RDAP 和 WHOIS 检查器。
-- 任务恢复：服务启动时恢复未完成任务，并修复计数器。
-- 限流处理：WHOIS 检测到限流或超时后会退避、降低并发并记录可重试异常。
+- 任务恢复：候选域名与生成游标在同一事务中保存，恢复时补齐未完成候选并从游标继续生成，支持乱序完成。
+- 限流处理：DoH、RDAP、WHOIS 按服务端点控制请求间隔，冷却请求进入有界延期队列；到期重试与新候选交替执行，等待配额不消耗失败重试次数。
+- 候选去重：对最终拼接出的域名进行规范化和持久化去重，避免字典组合碰撞产生重复网络请求。
 - 公开发布：完成后的扫描可以发布为静态页面，并写入公开搜索索引。
 
 ## 合规使用
@@ -63,6 +64,11 @@ http://localhost:3000/published.html
   "whois_servers": {},
   "rdap_servers": {},
   "rdap_bootstrap_url": "https://data.iana.org/rdap/dns.json",
+  "scheduler": {
+    "max_parallel_tlds": 3,
+    "workers_per_scan": 10,
+    "max_global_checks": 20
+  },
   "logging": {
     "console_enabled": true,
     "file_enabled": true,
@@ -79,6 +85,7 @@ http://localhost:3000/published.html
 - `whois_servers`：补充或覆盖 WHOIS server 映射，格式为 `TLD -> host` 或 `TLD -> host:port`。
 - `rdap_servers`：补充或覆盖 RDAP endpoint。
 - `rdap_bootstrap_url`：RDAP bootstrap 数据源，默认使用 IANA `dns.json`。
+- `scheduler`：同时运行的 TLD 分组数、每任务 worker 数、全局网络请求并发上限。服务端点仍保留请求间隔和 `Retry-After` 退避；增加 worker 不会跳过这些限制。
 - `logging`：控制台日志、文件日志目录、文件名前缀和保留数量。
 
 ## 数据目录
@@ -110,6 +117,10 @@ logs/                              文件日志
 - `dictionary_ids`：多字典笛卡尔组合，支持 `{0}`、`{1}` 形式模板。
 
 系统会校验任务规模、正则长度、域名格式、字典词格式和模板格式，避免提交不可控任务。
+
+正则枚举在阻塞任务中执行，按 500 个匹配候选或 50 毫秒分批交付，稀疏匹配无需等待全部枚举结束。候选表用于记录唯一域名和未完成工作；生成游标与候选批次一起提交，结果与候选完成标记一起提交。已有任务首次恢复会建立该记录；后续恢复可直接定位。字典内容改变时会重新枚举，并通过候选表过滤已生成的域名。
+
+任务日志中的 `task.summary` 包含本次运行的 `elapsed_ms`、`conclusive_results`、`conclusive_per_minute`、`provider_deferrals` 和 `failed_attempts`。需要分析各检查阶段时，可启用 `domain_scanner::checker::registry=debug` 日志过滤器，查看 `stage_metrics` 中的耗时、延期和错误类型。正常 NXDOMAIN 只表示 DNS 名称不存在，仍须继续权威注册记录检查。
 
 ## 任务状态
 

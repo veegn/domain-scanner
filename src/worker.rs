@@ -233,6 +233,97 @@ pub async fn worker(
     stop_signal: Arc<AtomicU8>,
     global_check_permits: Arc<Semaphore>,
 ) {
+    run_worker(
+        id,
+        jobs,
+        None,
+        results,
+        Some(throttle),
+        registry,
+        stop_signal,
+        global_check_permits,
+    )
+    .await;
+}
+
+pub(crate) struct RetryJob {
+    pub domain: String,
+    pub resume_checker: Option<String>,
+}
+
+/// Production workers have separate bounded input lanes. Alternating ready
+/// lanes keeps retries moving even while the fresh-candidate lane is full.
+pub(crate) async fn worker_with_retries(
+    id: usize,
+    jobs: Receiver<String>,
+    retries: Receiver<RetryJob>,
+    results: mpsc::Sender<crate::WorkerMessage>,
+    registry: Arc<CheckerRegistry>,
+    stop_signal: Arc<AtomicU8>,
+    global_check_permits: Arc<Semaphore>,
+) {
+    run_worker(
+        id,
+        jobs,
+        Some(retries),
+        results,
+        None,
+        registry,
+        stop_signal,
+        global_check_permits,
+    )
+    .await;
+}
+
+async fn next_job(
+    jobs: &Receiver<String>,
+    retries: Option<&Receiver<RetryJob>>,
+    prefer_retry: bool,
+) -> Option<RetryJob> {
+    let fresh = |domain| RetryJob {
+        domain,
+        resume_checker: None,
+    };
+    let Some(retries) = retries else {
+        return jobs.recv().await.ok().map(fresh);
+    };
+    loop {
+        if prefer_retry && let Ok(job) = retries.try_recv() {
+            return Some(job);
+        }
+        if let Ok(domain) = jobs.try_recv() {
+            return Some(fresh(domain));
+        }
+        if let Ok(job) = retries.try_recv() {
+            return Some(job);
+        }
+        let fresh_open = !jobs.is_closed() || !jobs.is_empty();
+        let retries_open = !retries.is_closed() || !retries.is_empty();
+        if !fresh_open && !retries_open {
+            return None;
+        }
+        tokio::select! {
+            job = jobs.recv(), if fresh_open => {
+                if let Ok(domain) = job { return Some(fresh(domain)); }
+            }
+            job = retries.recv(), if retries_open => {
+                if let Ok(job) = job { return Some(job); }
+            }
+        }
+    }
+}
+
+async fn run_worker(
+    id: usize,
+    jobs: Receiver<String>,
+    retries: Option<Receiver<RetryJob>>,
+    results: mpsc::Sender<crate::WorkerMessage>,
+    throttle: Option<Arc<WorkerThrottle>>,
+    registry: Arc<CheckerRegistry>,
+    stop_signal: Arc<AtomicU8>,
+    global_check_permits: Arc<Semaphore>,
+) {
+    let mut prefer_retry = true;
     loop {
         if stop_signal.load(Ordering::Relaxed) != 0 {
             debug!(
@@ -244,7 +335,9 @@ pub async fn worker(
             break;
         }
 
-        if !throttle.wait_until_ready(id, &stop_signal, &jobs).await {
+        if let Some(throttle) = &throttle
+            && !throttle.wait_until_ready(id, &stop_signal, &jobs).await
+        {
             debug!(
                 target: "domain_scanner::worker",
                 context = "lifecycle",
@@ -254,13 +347,21 @@ pub async fn worker(
             break;
         }
 
-        let Some(domain_name) = while_running(&stop_signal, jobs.recv()).await else {
+        let Some(job) = while_running(
+            &stop_signal,
+            next_job(&jobs, retries.as_ref(), prefer_retry),
+        )
+        .await
+        else {
             break;
         };
-        let domain_name = domain_name.ok();
+        prefer_retry = !prefer_retry;
 
-        match domain_name {
-            Some(domain) => {
+        match job {
+            Some(RetryJob {
+                domain,
+                resume_checker,
+            }) => {
                 // Notify scanning
                 let Some(scanning_sent) = while_running(
                     &stop_signal,
@@ -283,7 +384,11 @@ pub async fn worker(
                 // Use the registry to check the domain
                 let Some(check_result) = while_running(
                     &stop_signal,
-                    registry.check_with_permits(&domain, global_check_permits.clone()),
+                    registry.check_with_permits_from(
+                        &domain,
+                        global_check_permits.clone(),
+                        resume_checker.as_deref(),
+                    ),
                 )
                 .await
                 else {
@@ -303,7 +408,9 @@ pub async fn worker(
                     && !check_result.rate_limited
                     && !check_result.retryable
                 {
-                    throttle.record_progress();
+                    if let Some(throttle) = &throttle {
+                        throttle.record_progress();
+                    }
                 }
 
                 let result = DomainResult {
@@ -315,6 +422,8 @@ pub async fn worker(
                     expiration_date: check_result.expiration_date,
                     rate_limited: check_result.rate_limited,
                     retryable: check_result.retryable,
+                    deferred: check_result.deferred,
+                    resume_checker: check_result.resume_checker,
                     retry_after_secs: check_result.retry_after_secs,
                     trace: check_result.trace,
                 };
@@ -347,7 +456,8 @@ pub async fn worker(
                     break;
                 }
 
-                if reached_rate_limited_service
+                if let Some(throttle) = &throttle
+                    && reached_rate_limited_service
                     && while_running(&stop_signal, tokio::time::sleep(throttle.current_delay()))
                         .await
                         .is_none()
@@ -371,6 +481,41 @@ pub async fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_retry_lane_is_not_starved_by_fresh_jobs() {
+        let (fresh_tx, fresh_rx) = async_channel::bounded(32);
+        let (retry_tx, retry_rx) = async_channel::bounded(2);
+        for index in 0..32 {
+            fresh_tx.send(format!("fresh-{index}.test")).await.unwrap();
+        }
+        retry_tx
+            .send(RetryJob {
+                domain: "retry.test".into(),
+                resume_checker: Some("RDAP".into()),
+            })
+            .await
+            .unwrap();
+        let job = next_job(&fresh_rx, Some(&retry_rx), true).await.unwrap();
+        assert_eq!(job.domain, "retry.test");
+        assert_eq!(job.resume_checker.as_deref(), Some("RDAP"));
+        retry_tx
+            .send(RetryJob {
+                domain: "retry-2.test".into(),
+                resume_checker: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            next_job(&fresh_rx, Some(&retry_rx), false)
+                .await
+                .unwrap()
+                .domain,
+            "fresh-0.test"
+        );
+        fresh_rx.close();
+        retry_rx.close();
+    }
 
     /// Regression: a worker parked because of a reduced concurrency limit must
     /// be released once the job channel closes, otherwise it would hold its

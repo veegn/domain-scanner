@@ -161,7 +161,10 @@ impl RdapChecker {
         }
 
         endpoint_map.extend(normalize_endpoint_map(custom_endpoints));
-        let throttle_cache_path = default_rdap_rate_limit_cache_path();
+        let throttle_cache_path = cache_dir
+            .as_ref()
+            .map(|path| path.join("rate_limits.json"))
+            .unwrap_or_else(default_rdap_rate_limit_cache_path);
         let (throttle_cache_entries, initial_throttles) =
             load_cached_rdap_throttles(&throttle_cache_path);
         if !throttle_cache_entries.is_empty() {
@@ -236,33 +239,15 @@ impl RdapChecker {
             .clone()
     }
 
-    async fn wait_for_turn(&self, endpoint: &str) {
+    async fn try_claim_turn(&self, endpoint: &str) -> Result<(), Duration> {
         let throttle = self.throttle_for_endpoint(endpoint).await;
-        loop {
-            let sleep_for = {
-                let mut guard = throttle.lock().await;
-                let now = Instant::now();
-                if guard.next_allowed_at <= now {
-                    guard.next_allowed_at = now + guard.min_interval;
-                    None
-                } else {
-                    Some(guard.next_allowed_at - now)
-                }
-            };
-
-            if let Some(delay) = sleep_for {
-                debug!(
-                    target: "domain_scanner::checker::rdap",
-                    context = "throttle",
-                    endpoint,
-                    delay_ms = delay.as_millis() as u64,
-                    "waiting for RDAP throttle window"
-                );
-                tokio::time::sleep(delay).await;
-            } else {
-                break;
-            }
+        let mut guard = throttle.lock().await;
+        let now = Instant::now();
+        if guard.next_allowed_at > now {
+            return Err(guard.next_allowed_at - now);
         }
+        guard.next_allowed_at = now + guard.min_interval;
+        Ok(())
     }
 
     async fn record_success(&self, endpoint: &str) {
@@ -282,7 +267,7 @@ impl RdapChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(60).max(guard.min_interval));
-        guard.next_allowed_at = Instant::now() + retry_after;
+        guard.next_allowed_at = guard.next_allowed_at.max(Instant::now() + retry_after);
         warn!(
             target: "domain_scanner::checker::rdap",
             context = "backoff",
@@ -310,7 +295,7 @@ impl RdapChecker {
         guard.min_interval = Duration::from_millis(next_ms);
         let retry_after =
             retry_after.unwrap_or_else(|| Duration::from_secs(30).max(guard.min_interval));
-        guard.next_allowed_at = Instant::now() + retry_after;
+        guard.next_allowed_at = guard.next_allowed_at.max(Instant::now() + retry_after);
         warn!(
             target: "domain_scanner::checker::rdap",
             context = "backoff",
@@ -377,18 +362,27 @@ impl DomainChecker for RdapChecker {
 
         let breaker = self.breaker_for_endpoint(&endpoint).await;
         let Some(_circuit_request) = breaker.acquire_request() else {
-            return CheckResult::retryable_error("RDAP endpoint circuit breaker open", Some(60))
-                .with_trace(format!("RDAP: circuit breaker open for {}", endpoint));
+            return CheckResult::deferred(
+                "RDAP endpoint circuit breaker open",
+                Duration::from_secs(breaker.retry_after_secs().unwrap_or(1)),
+            )
+            .with_trace(format!("RDAP: circuit breaker open for {}", endpoint));
         };
 
-        self.wait_for_turn(&endpoint).await;
-        let _permit = match acquire_network_permit().await {
+        let _permit = match acquire_network_permit() {
             Ok(permit) => permit,
             Err(_) => {
-                return CheckResult::retryable_error("global network limiter closed", Some(1))
-                    .with_trace("RDAP: global network limiter closed");
+                return CheckResult::deferred(
+                    "global network limiter busy",
+                    Duration::from_secs(1),
+                )
+                .with_trace("RDAP: global network limiter busy");
             }
         };
+        if let Err(delay) = self.try_claim_turn(&endpoint).await {
+            return CheckResult::deferred("RDAP endpoint cooling down", delay)
+                .with_trace(format!("RDAP: endpoint {} deferred", endpoint));
+        }
 
         let url = format!("{}domain/{}", ensure_trailing_slash(&endpoint), domain);
         let response = match RDAP_CLIENT
@@ -400,8 +394,8 @@ impl DomainChecker for RdapChecker {
             Ok(response) => response,
             Err(err) => {
                 breaker.record_failure();
+                let retry_after = self.record_transient_failure(&endpoint, None).await;
                 if err.is_timeout() {
-                    let retry_after = self.record_transient_failure(&endpoint, None).await;
                     return CheckResult::retryable_error(
                         format!("RDAP request timeout: {}", err),
                         Some(retry_after.as_secs().max(1)),
@@ -410,7 +404,7 @@ impl DomainChecker for RdapChecker {
                 }
                 return CheckResult::retryable_error(
                     format!("RDAP request failed: {}", err),
-                    Some(30),
+                    Some(retry_after.as_secs().max(1)),
                 )
                 .with_trace(format!("RDAP: request error via {}", endpoint));
             }

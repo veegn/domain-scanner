@@ -291,10 +291,19 @@ async fn test_rdap_mocked_check_registered_absent_and_rate_limited() {
         Some("2030-01-02T03:04:05Z")
     );
 
+    let deferred = checker.check("free.alpha").await;
+    assert!(
+        deferred.deferred,
+        "a busy endpoint should return control to the scheduler"
+    );
+    tokio::time::sleep(Duration::from_secs(deferred.retry_after_secs.unwrap())).await;
     let free = checker.check("free.alpha").await;
     assert!(free.registration_record_absent);
     assert!(free.error.is_none());
 
+    let deferred = checker.check("unverified-404.alpha").await;
+    assert!(deferred.deferred);
+    tokio::time::sleep(Duration::from_secs(deferred.retry_after_secs.unwrap())).await;
     let unverified = checker.check("unverified-404.alpha").await;
     assert!(!unverified.registration_record_absent);
     assert_eq!(
@@ -302,6 +311,9 @@ async fn test_rdap_mocked_check_registered_absent_and_rate_limited() {
         Some("RDAP returned an unverified HTTP 404 response")
     );
 
+    let deferred = checker.check("limited.alpha").await;
+    assert!(deferred.deferred);
+    tokio::time::sleep(Duration::from_secs(deferred.retry_after_secs.unwrap())).await;
     let limited = checker.check("limited.alpha").await;
     assert!(limited.rate_limited);
     assert_eq!(
@@ -1486,6 +1498,8 @@ fn test_domain_result_construction() {
         expiration_date: None,
         rate_limited: false,
         retryable: false,
+        deferred: false,
+        resume_checker: None,
         retry_after_secs: None,
         trace: vec![],
     };
@@ -1504,6 +1518,8 @@ fn test_domain_result_with_error() {
         expiration_date: None,
         rate_limited: false,
         retryable: false,
+        deferred: false,
+        resume_checker: None,
         retry_after_secs: None,
         trace: vec![],
     };
@@ -1522,6 +1538,8 @@ fn test_domain_result_serialization() {
         expiration_date: None,
         rate_limited: false,
         retryable: false,
+        deferred: false,
+        resume_checker: None,
         retry_after_secs: None,
         trace: vec![],
     };

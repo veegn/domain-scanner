@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 tokio::task_local! {
     static NETWORK_PERMITS: Arc<Semaphore>;
@@ -29,13 +30,23 @@ pub(crate) async fn with_network_permits<T>(
     NETWORK_PERMITS.scope(permits, future).await
 }
 
-/// Acquire a global slot immediately before network I/O. Direct checker tests
+/// Claim a global slot immediately before network I/O, without queuing workers.
+/// Endpoint admission must happen after this claim, so requests cannot bunch up
+/// behind a global semaphore after already reserving different endpoint slots.
+/// Direct checker tests
 /// do not install a task-local semaphore and therefore run without a slot.
-pub(crate) async fn acquire_network_permit() -> Result<Option<OwnedSemaphorePermit>, AcquireError> {
+pub(crate) fn acquire_network_permit() -> Result<Option<OwnedSemaphorePermit>, TryAcquireError> {
     match NETWORK_PERMITS.try_with(Clone::clone) {
-        Ok(permits) => permits.acquire_owned().await.map(Some),
+        Ok(permits) => permits.try_acquire_owned().map(Some),
         Err(_) => Ok(None),
     }
+}
+
+pub(crate) fn retry_delay_secs(delay: Duration) -> u64 {
+    delay
+        .as_secs()
+        .saturating_add(u64::from(delay.subsec_nanos() > 0))
+        .max(1)
 }
 
 /// Result of a domain check operation
@@ -58,6 +69,11 @@ pub struct CheckResult {
     pub retryable: bool,
     /// Suggested delay before retrying the same domain
     pub retry_after_secs: Option<u64>,
+    /// No request failed: only provider/global admission prevented this attempt.
+    /// Such deferrals must not consume the domain's retry budget.
+    pub deferred: bool,
+    /// First unresolved checker, used to avoid repeating completed stages.
+    pub resume_checker: Option<String>,
     /// Pipeline trace collected from the contributing checkers
     pub trace: Vec<String>,
 }
@@ -73,6 +89,8 @@ impl CheckResult {
             rate_limited: false,
             retryable: false,
             retry_after_secs: None,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -87,6 +105,8 @@ impl CheckResult {
             rate_limited: false,
             retryable: false,
             retry_after_secs: None,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -101,6 +121,8 @@ impl CheckResult {
             rate_limited: false,
             retryable: false,
             retry_after_secs: None,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -115,6 +137,8 @@ impl CheckResult {
             rate_limited: false,
             retryable: false,
             retry_after_secs: None,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -132,6 +156,8 @@ impl CheckResult {
             rate_limited: true,
             retryable: true,
             retry_after_secs,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -145,6 +171,8 @@ impl CheckResult {
             rate_limited: false,
             retryable: true,
             retry_after_secs,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
@@ -159,12 +187,20 @@ impl CheckResult {
             rate_limited: false,
             retryable: false,
             retry_after_secs: None,
+            deferred: false,
+            resume_checker: None,
             trace: vec![],
         }
     }
 
     pub fn has_registration_evidence(&self) -> bool {
         !self.registration_record_absent && !self.signatures.is_empty() && self.error.is_none()
+    }
+
+    pub fn deferred(msg: impl Into<String>, delay: Duration) -> Self {
+        let mut result = Self::retryable_error(msg, Some(retry_delay_secs(delay)));
+        result.deferred = true;
+        result
     }
 
     pub fn with_trace(mut self, entry: impl Into<String>) -> Self {

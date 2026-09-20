@@ -4,12 +4,164 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+pub const CANDIDATE_BATCH_SIZE: usize = 500;
+const CANDIDATE_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// `cursor` is the next raw enumeration position, including regex misses. A
+/// consumer may checkpoint it only together with all candidates in this batch.
+pub struct CandidateBatch {
+    pub cursor: usize,
+    pub domains: Vec<String>,
+}
+
+pub struct CandidateGenerator {
+    pub batches: mpsc::Receiver<CandidateBatch>,
+    pub total_count: usize,
+}
+
+/// Enumerate on a blocking thread with bounded buffering. Empty timed batches
+/// checkpoint sparse filters, and closing the receiver cancels CPU enumeration.
+pub fn stream_candidates<I>(candidates: I, start: usize, total_count: usize) -> CandidateGenerator
+where
+    I: Iterator<Item = Option<String>> + Send + 'static,
+{
+    let (tx, batches) = mpsc::channel(2);
+    tokio::task::spawn_blocking(move || {
+        let mut domains = Vec::with_capacity(CANDIDATE_BATCH_SIZE);
+        let mut cursor = start;
+        let mut flushed_at = Instant::now();
+        for domain in candidates {
+            if tx.is_closed() {
+                return;
+            }
+            cursor += 1;
+            if let Some(domain) = domain {
+                domains.push(domain);
+            }
+            if domains.len() >= CANDIDATE_BATCH_SIZE
+                || flushed_at.elapsed() >= CANDIDATE_FLUSH_INTERVAL
+            {
+                let batch = CandidateBatch {
+                    cursor,
+                    domains: std::mem::replace(
+                        &mut domains,
+                        Vec::with_capacity(CANDIDATE_BATCH_SIZE),
+                    ),
+                };
+                if tx.blocking_send(batch).is_err() {
+                    return;
+                }
+                flushed_at = Instant::now();
+            }
+        }
+        let _ = tx.blocking_send(CandidateBatch { cursor, domains });
+    });
+    CandidateGenerator {
+        batches,
+        total_count,
+    }
+}
+
+/// Seek directly to a raw odometer position rather than skipping completed
+/// network checks, which can arrive out of order.
+pub fn generate_candidate_batches(
+    length: usize,
+    suffix: String,
+    pattern: String,
+    regex_filter: String,
+    priority_words: Vec<String>,
+    start: usize,
+) -> Result<CandidateGenerator, String> {
+    let charset: &'static [u8] = match pattern.as_str() {
+        "d" => b"0123456789",
+        "D" => b"abcdefghijklmnopqrstuvwxyz",
+        "a" => b"abcdefghijklmnopqrstuvwxyz0123456789",
+        _ => return Err("Invalid pattern. Use -d, -D or -a".to_string()),
+    };
+    let regex = if regex_filter.is_empty() {
+        None
+    } else {
+        Some(Regex::new(&regex_filter).map_err(|error| format!("Invalid regex pattern: {error}"))?)
+    };
+    let mut priority_set = HashSet::new();
+    let priorities: Vec<String> = priority_words
+        .into_iter()
+        .map(|word| word.trim().to_string())
+        .filter(|word| !word.is_empty())
+        .filter(|word| regex.as_ref().is_none_or(|filter| filter.is_match(word)))
+        .filter(|word| priority_set.insert(word.clone()))
+        .collect();
+    let combinations = if length == 0 {
+        0
+    } else {
+        charset
+            .len()
+            .checked_pow(length as u32)
+            .ok_or_else(|| "Domain search space exceeds supported size".to_string())?
+    };
+    let total_count = combinations.saturating_add(priorities.len());
+    let priority_count = priorities.len();
+    let candidates = (start..total_count).map(move |position| {
+        if position < priority_count {
+            return Some(format!("{}{}", priorities[position], suffix));
+        }
+        let mut counter = position - priority_count;
+        let mut bytes = vec![charset[0]; length];
+        for byte in bytes.iter_mut().rev() {
+            *byte = charset[counter % charset.len()];
+            counter /= charset.len();
+        }
+        let word = String::from_utf8(bytes).expect("generator charset is ASCII");
+        if priority_set.contains(&word)
+            || regex.as_ref().is_some_and(|filter| !filter.is_match(&word))
+        {
+            None
+        } else {
+            Some(format!("{word}{suffix}"))
+        }
+    });
+    Ok(stream_candidates(candidates, start, total_count))
+}
 
 pub struct DomainGenerator {
     pub domains: mpsc::Receiver<String>,
     pub total_count: usize,
     pub generated: Arc<AtomicI64>,
+}
+
+#[cfg(test)]
+mod candidate_batch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sparse_input_emits_first_candidate_before_enumeration_finishes() {
+        let candidates = (0..200).map(|index| {
+            std::thread::sleep(Duration::from_millis(2));
+            (index == 0).then(|| "first.test".to_string())
+        });
+        let mut generator = stream_candidates(candidates, 0, 200);
+        let first = tokio::time::timeout(Duration::from_secs(2), generator.batches.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.domains, ["first.test"]);
+        assert!(first.cursor < 200);
+        drop(generator);
+    }
+
+    #[tokio::test]
+    async fn raw_cursor_seeks_past_regex_misses() {
+        let mut generator =
+            generate_candidate_batches(3, ".test".into(), "d".into(), "^999$".into(), vec![], 998)
+                .unwrap();
+        let batch = generator.batches.recv().await.unwrap();
+        assert_eq!(batch.cursor, 1000);
+        assert_eq!(batch.domains, ["999.test"]);
+        assert!(generator.batches.recv().await.is_none());
+    }
 }
 
 fn normalized_skip_count(skip_count: i64) -> usize {
@@ -82,7 +234,7 @@ pub fn generate_domains(
         let tx = tx.clone();
         let suffix = suffix.clone();
         let priority_set_clone = priority_set.clone();
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             let skip = normalized_skip_count(skip_count);
             let mut current_idx = 0;
 
@@ -94,7 +246,7 @@ pub fn generate_domains(
                     } else {
                         format!("{}{}", word, suffix)
                     };
-                    if tx.send(domain).await.is_err() {
+                    if tx.blocking_send(domain).is_err() {
                         return;
                     }
                     generated_clone.fetch_add(1, Ordering::Relaxed);
@@ -104,6 +256,9 @@ pub fn generate_domains(
 
             // Regular Phase
             for word in lines {
+                if tx.is_closed() {
+                    return;
+                }
                 let word = word.trim();
                 if word.is_empty() || priority_set_clone.contains(word) {
                     continue;
@@ -121,7 +276,7 @@ pub fn generate_domains(
                     } else {
                         format!("{}{}", word, suffix)
                     };
-                    if tx.send(domain).await.is_err() {
+                    if tx.blocking_send(domain).is_err() {
                         break;
                     }
                     generated_clone.fetch_add(1, Ordering::Relaxed);
@@ -156,13 +311,13 @@ pub fn generate_domains(
             let suffix = suffix.clone();
             let priority_set_clone = priority_set.clone();
 
-            tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
                 let skip = normalized_skip_count(skip_count);
                 // Priority Phase
                 for (current_idx, word) in priority_lines.into_iter().enumerate() {
                     if current_idx >= skip {
                         let domain = format!("{}{}", word, suffix);
-                        if tx.send(domain).await.is_err() {
+                        if tx.blocking_send(domain).is_err() {
                             return;
                         }
                         generated_clone.fetch_add(1, Ordering::Relaxed);
@@ -179,8 +334,7 @@ pub fn generate_domains(
                     generated_clone,
                     priority_set_clone,
                     skip,
-                )
-                .await;
+                );
             });
         }
     }
@@ -192,7 +346,7 @@ pub fn generate_domains(
     })
 }
 
-async fn generate_combinations_iterative(
+fn generate_combinations_iterative(
     tx: mpsc::Sender<String>,
     charset: String,
     length: usize,
@@ -210,6 +364,9 @@ async fn generate_combinations_iterative(
     let mut actual_idx = priority_set.len();
 
     for counter in 0..total {
+        if tx.is_closed() {
+            return;
+        }
         let mut current = String::with_capacity(length);
         let mut temp = counter;
 
@@ -232,7 +389,7 @@ async fn generate_combinations_iterative(
 
         if actual_idx >= skip {
             let domain = format!("{}{}", current, suffix);
-            if tx.send(domain).await.is_err() {
+            if tx.blocking_send(domain).is_err() {
                 break;
             }
             generated.fetch_add(1, Ordering::Relaxed);
@@ -285,6 +442,7 @@ fn exact_combination_count(charset: &str, length: usize, priority_set: &HashSet<
 ///
 /// The "least significant" dimension is the last dictionary in `word_lists`,
 /// meaning that dict advances fastest.
+#[derive(Hash)]
 pub struct DictionaryCombinator {
     word_lists: Vec<Vec<String>>,
     indices: Vec<usize>,

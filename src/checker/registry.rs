@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::doh::DohChecker;
 use super::local::LocalReservedChecker;
@@ -88,6 +89,10 @@ impl CheckerRegistry {
     /// Checkers are run in priority order. If a checker returns a definitive
     /// result (managed by `should_stop_pipeline`), subsequent checkers are skipped.
     pub async fn check(&self, domain: &str) -> CheckResult {
+        self.check_from(domain, None).await
+    }
+
+    pub async fn check_from(&self, domain: &str, resume_checker: Option<&str>) -> CheckResult {
         if domain.matches('.').count() < 1 {
             warn!(
                 target: "domain_scanner::checker::registry",
@@ -102,30 +107,39 @@ impl CheckerRegistry {
         let mut authoritative_no_record = false;
         let mut last_error: Option<String> = None;
         let mut last_retryable: Option<CheckResult> = None;
+        let mut first_unresolved = None;
+        let mut request_failed = false;
         let mut trace_log = Vec::new();
 
-        for checker in &self.checkers {
+        let start = resume_checker
+            .and_then(|name| {
+                self.checkers
+                    .iter()
+                    .position(|checker| checker.name() == name)
+            })
+            .unwrap_or(0);
+
+        for checker in &self.checkers[start..] {
             if !checker.supports_domain(domain) {
                 trace_log.push(format!("{}: skipped unsupported suffix", checker.name()));
                 continue;
             }
 
+            let started = Instant::now();
             let result = checker.check(domain).await;
+            debug!(
+                target: "domain_scanner::checker::registry",
+                context = "stage_metrics",
+                checker = checker.name(),
+                domain,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                deferred = result.deferred,
+                retryable = result.retryable,
+                rate_limited = result.rate_limited,
+                has_error = result.error.is_some(),
+                "checker stage completed"
+            );
             trace_log.extend(result.trace.clone());
-
-            if result.rate_limited {
-                warn!(
-                    target: "domain_scanner::checker::registry",
-                    context = "pipeline",
-                    checker = checker.name(),
-                    domain,
-                    reason = result.error.as_deref().unwrap_or("rate limited"),
-                    "stopping pipeline on rate limit"
-                );
-                let mut result = result;
-                result.trace = trace_log;
-                return result;
-            }
 
             if let Some(err) = &result.error {
                 debug!(
@@ -138,11 +152,18 @@ impl CheckerRegistry {
                     "checker returned error"
                 );
                 last_error = Some(err.clone());
+                request_failed |= !result.deferred;
                 if result.retryable {
-                    last_retryable = Some(result.clone());
+                    first_unresolved.get_or_insert_with(|| checker.name().to_string());
+                    if last_retryable.as_ref().is_none_or(|previous| {
+                        result.retry_after_secs.unwrap_or(30)
+                            < previous.retry_after_secs.unwrap_or(30)
+                    }) {
+                        last_retryable = Some(result.clone());
+                    }
                 }
 
-                if checker.is_authoritative() {
+                if checker.is_authoritative() && !result.deferred {
                     warn!(
                         target: "domain_scanner::checker::registry",
                         context = "pipeline",
@@ -182,6 +203,8 @@ impl CheckerRegistry {
             result
         } else if let Some(retryable) = last_retryable {
             let mut result = retryable;
+            result.deferred = !request_failed;
+            result.resume_checker = first_unresolved;
             result.trace = trace_log;
             result
         } else if let Some(err) = last_error {
@@ -203,14 +226,23 @@ impl CheckerRegistry {
     }
 
     /// Run the pipeline with a global limit that applies only while a checker
-    /// performs network I/O. Provider cooldown waits happen before acquiring a
-    /// slot, so one limited service cannot occupy all global capacity.
+    /// performs network I/O. Admission failures return immediately for the
+    /// scheduler to retry, so a cooling provider never occupies global capacity.
     pub async fn check_with_permits(
         &self,
         domain: &str,
         permits: Arc<tokio::sync::Semaphore>,
     ) -> CheckResult {
         with_network_permits(permits, self.check(domain)).await
+    }
+
+    pub async fn check_with_permits_from(
+        &self,
+        domain: &str,
+        permits: Arc<tokio::sync::Semaphore>,
+        resume_checker: Option<&str>,
+    ) -> CheckResult {
+        with_network_permits(permits, self.check_from(domain, resume_checker)).await
     }
 
     /// Get the list of registered checker names.

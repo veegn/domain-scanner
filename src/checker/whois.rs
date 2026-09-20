@@ -189,33 +189,15 @@ impl WhoisChecker {
             .clone()
     }
 
-    async fn wait_for_turn(&self, server: &str) {
+    async fn try_claim_turn(&self, server: &str) -> Result<(), Duration> {
         let throttle = self.throttle_for_server(server).await;
-        loop {
-            let sleep_for = {
-                let mut guard = throttle.lock().await;
-                let now = Instant::now();
-                if guard.next_allowed_at <= now {
-                    guard.next_allowed_at = now + guard.min_interval;
-                    None
-                } else {
-                    Some(guard.next_allowed_at - now)
-                }
-            };
-
-            if let Some(delay) = sleep_for {
-                debug!(
-                    target: "domain_scanner::checker::whois",
-                    context = "throttle",
-                    server,
-                    delay_ms = delay.as_millis() as u64,
-                    "waiting for WHOIS throttle window"
-                );
-                tokio::time::sleep(delay).await;
-            } else {
-                break;
-            }
+        let mut guard = throttle.lock().await;
+        let now = Instant::now();
+        if guard.next_allowed_at > now {
+            return Err(guard.next_allowed_at - now);
         }
+        guard.next_allowed_at = now + guard.min_interval;
+        Ok(())
     }
 
     async fn record_success(&self, server: &str) {
@@ -355,11 +337,6 @@ impl WhoisChecker {
     }
 
     async fn query_whois(&self, domain: &str, server: &str) -> Result<String, String> {
-        self.wait_for_turn(server).await;
-        let _permit = acquire_network_permit()
-            .await
-            .map_err(|_| "global network limiter closed".to_string())?;
-
         let (server_host, server_port) = parse_server_endpoint(server);
         let ip = self
             .resolve_server(&server_host)
@@ -612,11 +589,33 @@ impl DomainChecker for WhoisChecker {
         };
         let breaker = self.breaker_for_server(server).await;
         let Some(_circuit_request) = breaker.acquire_request() else {
-            return CheckResult::retryable_error("WHOIS server circuit breaker open", Some(120))
-                .with_trace(format!("WHOIS: circuit breaker open for {}", server));
+            return CheckResult::deferred(
+                "WHOIS server circuit breaker open",
+                Duration::from_secs(breaker.retry_after_secs().unwrap_or(1)),
+            )
+            .with_trace(format!("WHOIS: circuit breaker open for {}", server));
         };
-
-        match self.query_whois(domain, server).await {
+        let _permit = match acquire_network_permit() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return CheckResult::deferred(
+                    "global network limiter busy",
+                    Duration::from_secs(1),
+                )
+                .with_trace("WHOIS: global network limiter busy");
+            }
+        };
+        if let Err(delay) = self.try_claim_turn(server).await {
+            return CheckResult::deferred("WHOIS server cooling down", delay)
+                .with_trace(format!("WHOIS: provider {} deferred", server));
+        }
+        // This budget includes DNS resolution and writes as well as connect and
+        // read, so a stalled phase cannot retain a network slot indefinitely.
+        let response =
+            tokio::time::timeout(Duration::from_secs(15), self.query_whois(domain, server))
+                .await
+                .unwrap_or_else(|_| Err("Read timeout (WHOIS total request budget)".to_string()));
+        match response {
             Ok(response) => {
                 let response = response.trim();
 
