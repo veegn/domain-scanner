@@ -1,9 +1,9 @@
 use super::models::{ScanStreamMessage, StartScanRequest, StreamHub, TaskControl, TaskSignal};
 use super::scan_runtime_support::{
-    COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, STATUS_PUBLISH_INTERVAL,
-    ScanRuntimeState, flush_pending_results, flush_pending_state_logs, flush_scan_buffers,
-    get_result_counts, initialize_scan_counters, load_persisted_retries, prepare_job_feeder,
-    publish_scan_status, queue_event_log, rate_limited_service,
+    COUNTER_PERSIST_INTERVAL, MAX_EXCEPTION_REPLAY_ROUNDS, PrepareJobFeederContext,
+    STATUS_PUBLISH_INTERVAL, ScanRuntimeState, flush_pending_results, flush_pending_state_logs,
+    flush_scan_buffers, get_result_counts, initialize_scan_counters, load_persisted_retries,
+    prepare_job_feeder, publish_scan_status, queue_event_log, rate_limited_service,
 };
 pub(super) use super::scan_runtime_support::{add_event_log, mark_scan_running};
 use crate::checker::CheckerRegistry;
@@ -87,21 +87,19 @@ pub(super) async fn run_scan_logic(
     let feeder_error = Arc::new(Mutex::new(None));
     let pending_domains = Arc::new(AtomicUsize::new(0));
 
-    let total = match prepare_job_feeder(
+    let feeder_context = PrepareJobFeederContext {
         db,
         streams,
         scan_id,
-        &params,
-        &jobs_tx,
-        feeder_done.clone(),
-        feeder_error.clone(),
-        pending_domains.clone(),
-        task_signal.clone(),
-        task_control.clone(),
-        candidate_slots.clone(),
-    )
-    .await
-    {
+        jobs_tx: &jobs_tx,
+        feeder_done: &feeder_done,
+        feeder_error: &feeder_error,
+        pending_domains: &pending_domains,
+        task_signal: &task_signal,
+        task_control: &task_control,
+        candidate_slots: &candidate_slots,
+    };
+    let total = match prepare_job_feeder(feeder_context, &params).await {
         Ok(total) => total,
         Err(()) => {
             streams.cleanup_scan(scan_id).await;

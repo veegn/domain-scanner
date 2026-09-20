@@ -407,10 +407,9 @@ async fn run_worker(
                 if reached_rate_limited_service
                     && !check_result.rate_limited
                     && !check_result.retryable
+                    && let Some(throttle) = &throttle
                 {
-                    if let Some(throttle) = &throttle {
-                        throttle.record_progress();
-                    }
+                    throttle.record_progress();
                 }
 
                 let result = DomainResult {

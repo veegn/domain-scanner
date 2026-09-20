@@ -83,6 +83,64 @@ impl ScanRuntimeState {
     }
 }
 
+struct FeederResources {
+    db: SqlitePool,
+    jobs_tx: async_channel::Sender<String>,
+    scan_id: String,
+    feeder_done: Arc<AtomicBool>,
+    feeder_error: Arc<Mutex<Option<String>>>,
+    pending_domains: Arc<AtomicUsize>,
+    task_signal: Arc<AtomicU8>,
+    scan_stream: broadcast::Sender<ScanStreamMessage>,
+    candidate_slots: Arc<Semaphore>,
+}
+
+impl FeederResources {
+    fn spawn(self, source: CandidateSource) {
+        CandidateFeeder {
+            db: self.db,
+            jobs_tx: self.jobs_tx,
+            scan_id: self.scan_id,
+            feeder_done: self.feeder_done,
+            feeder_error: self.feeder_error,
+            pending_domains: self.pending_domains,
+            task_signal: self.task_signal,
+            scan_stream: self.scan_stream,
+            candidate_slots: self.candidate_slots,
+        }
+        .spawn(source);
+    }
+}
+
+pub(super) struct PrepareJobFeederContext<'a> {
+    pub(super) db: &'a SqlitePool,
+    pub(super) streams: &'a StreamHub,
+    pub(super) scan_id: &'a str,
+    pub(super) jobs_tx: &'a async_channel::Sender<String>,
+    pub(super) feeder_done: &'a Arc<AtomicBool>,
+    pub(super) feeder_error: &'a Arc<Mutex<Option<String>>>,
+    pub(super) pending_domains: &'a Arc<AtomicUsize>,
+    pub(super) task_signal: &'a Arc<AtomicU8>,
+    pub(super) task_control: &'a TaskControl,
+    pub(super) candidate_slots: &'a Arc<Semaphore>,
+}
+
+impl PrepareJobFeederContext<'_> {
+    fn resources(&self, scan_stream: broadcast::Sender<ScanStreamMessage>) -> FeederResources {
+        FeederResources {
+            db: self.db.clone(),
+            jobs_tx: self.jobs_tx.clone(),
+            scan_id: self.scan_id.to_owned(),
+            feeder_done: self.feeder_done.clone(),
+            feeder_error: self.feeder_error.clone(),
+            pending_domains: self.pending_domains.clone(),
+            task_signal: self.task_signal.clone(),
+            scan_stream,
+            candidate_slots: self.candidate_slots.clone(),
+        }
+    }
+}
+
 pub(super) async fn mark_scan_running(db: &SqlitePool, streams: &StreamHub, scan_id: &str) {
     if let Err(err) = sqlx::query(
         "UPDATE scans
@@ -154,35 +212,22 @@ pub(super) async fn add_event_log(
 }
 
 pub(super) async fn prepare_job_feeder(
-    db: &SqlitePool,
-    streams: &StreamHub,
-    scan_id: &str,
+    context: PrepareJobFeederContext<'_>,
     params: &StartScanRequest,
-    jobs_tx: &async_channel::Sender<String>,
-    feeder_done: Arc<AtomicBool>,
-    feeder_error: Arc<Mutex<Option<String>>>,
-    pending_domains: Arc<AtomicUsize>,
-    task_signal: Arc<AtomicU8>,
-    task_control: TaskControl,
-    candidate_slots: Arc<Semaphore>,
 ) -> Result<i64, ()> {
+    let db = context.db;
+    let streams = context.streams;
+    let scan_id = context.scan_id;
+    let feeder_done = context.feeder_done;
+    let feeder_error = context.feeder_error;
+    let task_control = context.task_control;
     let scan_stream = streams.sender_for_scan(scan_id).await;
 
     if let Some(domains) = params.domains.clone() {
         let total = domains.len() as i64;
-        spawn_domain_feeder(
-            domains,
-            db.clone(),
-            jobs_tx.clone(),
-            scan_id.to_string(),
-            "manual",
-            feeder_done,
-            feeder_error,
-            pending_domains,
-            task_signal,
-            scan_stream.clone(),
-            candidate_slots,
-        );
+        context
+            .resources(scan_stream.clone())
+            .spawn(CandidateSource::Domains(domains));
         return Ok(total);
     }
 
@@ -232,18 +277,9 @@ pub(super) async fn prepare_job_feeder(
             DictionaryCombinator::from_parts(all_words, &prefix, &separator, &postfix, suffix)
         };
 
-        spawn_combinator_feeder(
-            combinator,
-            db.clone(),
-            jobs_tx.clone(),
-            scan_id.to_string(),
-            feeder_done,
-            feeder_error,
-            pending_domains,
-            task_signal,
-            scan_stream.clone(),
-            candidate_slots,
-        );
+        context
+            .resources(scan_stream.clone())
+            .spawn(CandidateSource::Combinator(combinator));
         return Ok(total_i64);
     }
 
@@ -292,19 +328,9 @@ pub(super) async fn prepare_job_feeder(
             })
             .collect();
 
-        spawn_domain_feeder(
-            domains,
-            db.clone(),
-            jobs_tx.clone(),
-            scan_id.to_string(),
-            "dictionary",
-            feeder_done,
-            feeder_error,
-            pending_domains,
-            task_signal,
-            scan_stream.clone(),
-            candidate_slots,
-        );
+        context
+            .resources(scan_stream.clone())
+            .spawn(CandidateSource::Domains(domains));
         return Ok(total);
     }
 
@@ -325,19 +351,9 @@ pub(super) async fn prepare_job_feeder(
             })
             .collect();
 
-        spawn_domain_feeder(
-            domains,
-            db.clone(),
-            jobs_tx.clone(),
-            scan_id.to_string(),
-            "dictionary",
-            feeder_done,
-            feeder_error,
-            pending_domains,
-            task_signal,
-            scan_stream.clone(),
-            candidate_slots,
-        );
+        context
+            .resources(scan_stream.clone())
+            .spawn(CandidateSource::Domains(domains));
         return Ok(total);
     }
 
@@ -402,18 +418,9 @@ pub(super) async fn prepare_job_feeder(
     .await;
 
     let total = domain_gen.total_count as i64;
-    spawn_generator_feeder(
-        domain_gen,
-        db.clone(),
-        jobs_tx.clone(),
-        scan_id.to_string(),
-        feeder_done,
-        feeder_error,
-        pending_domains,
-        task_signal,
-        scan_stream.clone(),
-        candidate_slots,
-    );
+    context
+        .resources(scan_stream.clone())
+        .spawn(CandidateSource::Generated(domain_gen));
     Ok(total)
 }
 
@@ -424,85 +431,6 @@ fn emit_queued_event(scan_stream: &broadcast::Sender<ScanStreamMessage>, domain:
         level: "INFO".to_string(),
         created_at: String::new(),
     }));
-}
-
-fn spawn_domain_feeder(
-    domains: Vec<String>,
-    db: SqlitePool,
-    jobs_tx: async_channel::Sender<String>,
-    scan_id: String,
-    _source: &'static str,
-    feeder_done: Arc<AtomicBool>,
-    feeder_error: Arc<Mutex<Option<String>>>,
-    pending_domains: Arc<AtomicUsize>,
-    task_signal: Arc<AtomicU8>,
-    scan_stream: broadcast::Sender<ScanStreamMessage>,
-    candidate_slots: Arc<Semaphore>,
-) {
-    CandidateFeeder {
-        db,
-        jobs_tx,
-        scan_id,
-        feeder_done,
-        feeder_error,
-        pending_domains,
-        task_signal,
-        scan_stream,
-        candidate_slots,
-    }
-    .spawn(CandidateSource::Domains(domains));
-}
-
-fn spawn_generator_feeder(
-    domain_gen: generator::CandidateGenerator,
-    db: SqlitePool,
-    jobs_tx: async_channel::Sender<String>,
-    scan_id: String,
-    feeder_done: Arc<AtomicBool>,
-    feeder_error: Arc<Mutex<Option<String>>>,
-    pending_domains: Arc<AtomicUsize>,
-    task_signal: Arc<AtomicU8>,
-    scan_stream: broadcast::Sender<ScanStreamMessage>,
-    candidate_slots: Arc<Semaphore>,
-) {
-    CandidateFeeder {
-        db,
-        jobs_tx,
-        scan_id,
-        feeder_done,
-        feeder_error,
-        pending_domains,
-        task_signal,
-        scan_stream,
-        candidate_slots,
-    }
-    .spawn(CandidateSource::Generated(domain_gen));
-}
-
-fn spawn_combinator_feeder(
-    combinator: DictionaryCombinator,
-    db: SqlitePool,
-    jobs_tx: async_channel::Sender<String>,
-    scan_id: String,
-    feeder_done: Arc<AtomicBool>,
-    feeder_error: Arc<Mutex<Option<String>>>,
-    pending_domains: Arc<AtomicUsize>,
-    task_signal: Arc<AtomicU8>,
-    scan_stream: broadcast::Sender<ScanStreamMessage>,
-    candidate_slots: Arc<Semaphore>,
-) {
-    CandidateFeeder {
-        db,
-        jobs_tx,
-        scan_id,
-        feeder_done,
-        feeder_error,
-        pending_domains,
-        task_signal,
-        scan_stream,
-        candidate_slots,
-    }
-    .spawn(CandidateSource::Combinator(combinator));
 }
 
 pub(super) async fn enqueue_unprocessed_batch(
