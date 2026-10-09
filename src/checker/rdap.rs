@@ -105,6 +105,14 @@ struct RdapDomainResponse {
 struct RdapErrorResponse {
     #[serde(rename = "errorCode")]
     error_code: Option<u16>,
+    #[serde(default)]
+    errors: Vec<RdapErrorEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RdapErrorEntry {
+    #[serde(rename = "errorCode")]
+    error_code: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -544,10 +552,23 @@ fn is_domain_response_for(response: &RdapDomainResponse, domain: &str) -> bool {
 }
 
 fn is_valid_rdap_not_found(body: &str) -> bool {
-    serde_json::from_str::<RdapErrorResponse>(body)
-        .ok()
-        .and_then(|response| response.error_code)
-        == Some(404)
+    let response: RdapErrorResponse = match serde_json::from_str(body) {
+        Ok(response) => response,
+        Err(_) => return false,
+    };
+    if response.error_code == Some(404) {
+        return true;
+    }
+    // Some registries (e.g. OVH) don't follow RFC 9083: instead of the
+    // standard top-level {"errorCode":404}, they return a nested string
+    // code such as {"errors":[{"errorCode":"NOT_FOUND_DOMAIN_NAME_WITH_NAME"}]}.
+    response.errors.iter().any(|entry| match &entry.error_code {
+        Some(serde_json::Value::String(code)) => {
+            code.to_ascii_uppercase().contains("NOT_FOUND")
+        }
+        Some(serde_json::Value::Number(code)) => code.as_u64() == Some(404),
+        _ => false,
+    })
 }
 
 fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
