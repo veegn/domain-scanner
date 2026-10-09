@@ -563,9 +563,7 @@ fn is_valid_rdap_not_found(body: &str) -> bool {
     // standard top-level {"errorCode":404}, they return a nested string
     // code such as {"errors":[{"errorCode":"NOT_FOUND_DOMAIN_NAME_WITH_NAME"}]}.
     response.errors.iter().any(|entry| match &entry.error_code {
-        Some(serde_json::Value::String(code)) => {
-            code.to_ascii_uppercase().contains("NOT_FOUND")
-        }
+        Some(serde_json::Value::String(code)) => code.to_ascii_uppercase().contains("NOT_FOUND"),
         Some(serde_json::Value::Number(code)) => code.as_u64() == Some(404),
         _ => false,
     })

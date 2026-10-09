@@ -1,3 +1,8 @@
+// async_trait emits `#[must_use]` on desugared methods whose return type
+// (`Pin<Box<dyn Future>>`) is already `#[must_use]`; recent clippy flags this
+// as `clippy::double_must_use` and CI denies warnings, so allow it crate-wide.
+#![allow(clippy::double_must_use)]
+
 pub mod checker;
 pub mod config;
 pub mod generator;
