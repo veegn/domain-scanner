@@ -121,7 +121,7 @@ INSERT OR IGNORE INTO tlds (suffix) VALUES
 -- DNSHE-managed third-level registration suffixes. These intentionally have no
 -- port-43 WHOIS mapping; the application routes them to the DNSHE JSON API.
 INSERT OR IGNORE INTO tlds (suffix) VALUES
-  ('l.cd'),('us.ci'),('bot.cd'),('de5.net'),('ccwu.cc'),('ddns.ge'),('bbroot.com');
+  ('l.cd'),('us.ci'),('bot.cd'),('de5.net'),('ccwu.cc'),('ddns.ge'),('bbroot.com'),('new.tg');
 
 -- ── WHOIS server defaults ────────────────────────────────────────────────────
 INSERT OR IGNORE INTO whois_servers (tld, server) VALUES

@@ -96,9 +96,9 @@ http://localhost:3000/published.html
 
 ### DNSHE 三级域名
 
-`l.cd`、`us.ci`、`bot.cd`、`de5.net`、`ccwu.cc`、`ddns.ge` 和 `bbroot.com` 使用 DNSHE 官方 JSON WHOIS API。凭据只从 `DNSHE_API_KEY` 和 `DNSHE_API_SECRET` 环境变量读取，不会保存到配置数据库或通过设置接口返回。
+`l.cd`、`us.ci`、`bot.cd`、`de5.net`、`ccwu.cc`、`ddns.ge`、`bbroot.com` 和 `new.tg` 使用 DNSHE 官方 JSON WHOIS API。凭据只从 `DNSHE_API_KEY` 和 `DNSHE_API_SECRET` 环境变量读取，不会保存到配置数据库或通过设置接口返回。
 
-这些后缀只接受“一个前缀标签 + 后缀”的三级域名。DNSHE 查询间隔至少为 2001 毫秒，即所有任务、worker 和七个后缀合计不超过 30 次/分钟。限流时间保存在 `data/scans.db`，通过原子更新协调使用同一数据库的进程，应用重启不会清空尚未到期的请求间隔。DNSHE 返回错误或限流时不会回退到父级 RDAP/WHOIS，以免产生错误的“未发现注册记录”结果。
+这些后缀只接受“一个前缀标签 + 后缀”的三级域名。DNSHE 查询间隔至少为 2001 毫秒，即所有任务、worker 和八个后缀合计不超过 30 次/分钟。限流时间保存在 `data/scans.db`，通过原子更新协调使用同一数据库的进程，应用重启不会清空尚未到期的请求间隔。DNSHE 返回错误或限流时不会回退到父级 RDAP/WHOIS，以免产生错误的“未发现注册记录”结果。
 
 同一组 DNSHE 凭据不要同时用于未共享该数据库的其他部署或外部程序；这些请求不在本项目的限流统计范围内。
 

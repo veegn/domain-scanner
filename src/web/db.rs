@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 const SEED_SQL: &str = include_str!("../../data/seed.sql");
 const DNSHE_SUFFIX_SEED_SQL: &str = "INSERT OR IGNORE INTO tlds (suffix) VALUES ('l.cd'), ('us.ci'), ('bot.cd'), \
-     ('de5.net'), ('ccwu.cc'), ('ddns.ge'), ('bbroot.com')";
+     ('de5.net'), ('ccwu.cc'), ('ddns.ge'), ('bbroot.com'), ('new.tg')";
 
 pub async fn init_db() -> Result<SqlitePool> {
     std::fs::create_dir_all("data").context("failed to create data directory")?;

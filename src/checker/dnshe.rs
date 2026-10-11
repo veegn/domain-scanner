@@ -52,6 +52,7 @@ pub const DNSHE_SUPPORTED_SUFFIXES: &[&str] = &[
     "ccwu.cc",
     "ddns.ge",
     "bbroot.com",
+    "new.tg",
 ];
 
 #[derive(Clone)]
