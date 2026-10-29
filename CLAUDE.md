@@ -12,6 +12,9 @@ cargo build --release          # Release build
 # Run (default port 3000)
 cargo run --release -- --port 3000
 
+# Run MCP server via stdio
+cargo run --release -- mcp
+
 # Lint / static analysis
 cargo check                    # Fast compilation check (no codegen)
 cargo fmt                      # Format code
@@ -46,7 +49,7 @@ Domain registration evidence is determined by a **priority-ordered pipeline** de
 
 Each checker has a `CircuitBreaker` (`src/checker/circuit_breaker.rs`) that trips after 20 failures and recovers after 30s.
 
-See `EXTENDING.md` for the full guide on adding new checkers.
+See `docs/extending.md` for the full guide on adding new checkers.
 
 ### Background worker (`src/web/queue.rs` + `src/web/scan_runtime.rs`)
 
@@ -68,6 +71,13 @@ Real-time updates are pushed via Server-Sent Events:
 - `/api/scans/stream` — broadcast scan list changes with event IDs like `v:{version}`.
 - `/api/scan/:id/stream` — per-scan status, logs, and result batches with event IDs `l:{log_id};r:{result_id}`.
 - Clients reconnect using `Last-Event-ID` for resumption.
+
+### MCP (Model Context Protocol) Server (`src/mcp/`)
+
+Provides Model Context Protocol integration with 11 tools (`create_scan`, `get_scan_status`, `get_scan_results`, `list_scans`, `pause_scan`, `resume_scan`, `delete_scan`, `check_domain`, `batch_check_domains`, `list_tlds`, `list_dictionaries`).
+- **HTTP Mode**: Mounted on Axum at `/mcp` via `StreamableHttpService`. Discovery endpoint at `/api/mcp/info` and `/.well-known/mcp`.
+- **Stdio Mode**: CLI subcommand `domain-scanner mcp` communicates over standard I/O (with console logging redirected to stderr to prevent JSON-RPC stream pollution).
+- **Frontend Integration**: Discoverable via `<link rel="alternate" type="application/json+mcp" href="/mcp">` and UI header modal.
 
 ### Publish system (`src/publish/`)
 

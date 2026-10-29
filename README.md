@@ -1,31 +1,60 @@
-# Domain Scanner (Rust Web Edition)
+# Domain Scanner (Rust Web & MCP Edition)
 
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](./Dockerfile)
+[![MCP](https://img.shields.io/badge/MCP-2025--03--26-purple.svg)](./docs/mcp.md)
 
-一个基于 Rust、Axum 和 SQLite 的异步域名注册记录扫描工具。项目提供 Web 控制台、任务队列、实时 SSE 状态流、DNSHE/DoH/RDAP/WHOIS 多源检查、字典组合扫描、公开结果发布和公开域名前缀搜索。
+**Domain Scanner** 是一个基于 **Rust (Edition 2024)**、**Axum** 和 **SQLite** 构建的高性能异步域名注册记录扫描与分析平台。项目深度融合了 Web 管理控制台、自适应任务调度引擎、实时 SSE 状态流、多源级联检查流水线（Local / DNSHE / DoH / RDAP / WHOIS）、词库笛卡尔积生成、公开发布系统，以及原生的 **Model Context Protocol (MCP)** 大模型上下文协议支持。
 
-> **重要：**“未发现注册记录”只表示权威 DNSHE/RDAP/WHOIS 响应明确未找到记录，不等于注册商确认该域名当前可购买。溢价、保留、注册局策略、实时库存和渠道限制仍须向注册商查询。
+> **重要声明：**“未发现注册记录（`registration_record_absent = true`）”仅代表权威 DNSHE、RDAP 或 WHOIS 响应明确未找到该域名的注册数据，**不等于注册商确认该域名当前可按普通价格购买**。注册局保留词、溢价定价、实时库存配额及渠道限制仍须向对应注册商查询。详见 [合规使用与免责声明](./docs/disclaimer.md)。
 
-## 核心功能
+---
 
-- Web 控制台：创建扫描任务，查看进度，暂停、恢复、取消任务，发布完成结果。
-- 实时更新：任务列表、单任务状态、扫描日志和未发现注册记录的候选域名通过 SSE 推送。
-- 扫描来源：支持生成式扫描、手动域名列表、内联字典、持久化字典和多字典组合。
-- 多源检查：内置 LocalReserved、DNSHE、DoH、RDAP 和 WHOIS 检查器。
-- 任务恢复：候选域名与生成游标在同一事务中保存，恢复时补齐未完成候选并从游标继续生成，支持乱序完成。
-- 限流处理：DNSHE 在全部任务和支持后缀间共享固定的 30 次/分钟限制；其他网络检查器按服务端点控制请求间隔。冷却请求进入有界延期队列，到期重试与新候选交替执行，等待配额不消耗失败重试次数。
-- 候选去重：对最终拼接出的域名进行规范化和持久化去重，避免字典组合碰撞产生重复网络请求。
-- 公开发布：完成后的扫描可以发布为静态页面，并写入公开搜索索引。
+## 目录
 
-## 合规使用
+- [核心功能特性](#核心功能特性)
+- [快速开始](#快速开始)
+  - [Docker 部署](#docker-部署)
+  - [本地编译运行](#本地编译运行)
+- [AI & Model Context Protocol (MCP) 接入](#ai--model-context-protocol-mcp-接入)
+- [配置说明](#配置说明)
+- [专题文档索引 (Docs)](#专题文档索引-docs)
+- [合规使用规范](#合规使用规范)
 
-本工具仅用于个人域名资产管理、学术研究和合法的域名注册记录分析。大量查询可能触发 DNSHE、DoH、RDAP 或 WHOIS 服务商的限制，请控制任务规模并遵守相关服务条款。不要使用本工具进行商标侵权、恶意抢注或绕过第三方服务限制。
+---
+
+## 核心功能特性
+
+- **Web 管理控制台**：提供现代化管理界面，支持创建扫描、查看实时进度、暂停/恢复/取消任务、词库字典管理与公开结果发布。
+- **MCP 开放协议集成**：原生内嵌 11 个 MCP Tools，AI Agent（Claude Desktop、Cursor、Antigravity 等）可直接发起后台长任务扫描并监控进度。
+- **全链路多源检查**：
+  - `LocalReserved` (Priority 0)：本地预留词规则检查（无网络消耗，最优先短路）。
+  - `Dnshe` (Priority 5)：专有子域名权威 API 校验（共享 30 次/分钟限流）。
+  - `DoH` (Priority 10)：基于 AliDNS、DNSPod、Google、Cloudflare、dns.sb 等公共 DoH 进行快速 NS 预筛。
+  - `Rdap` (Priority 20)：基于 IANA Bootstrap 动态路由的标准 RDAP 协议解析。
+  - `Whois` (Priority 30)：基于 TCP 43 端口直连 200+ 顶级域注册局服务器并自动嗅探状态词。
+- **智能调度与熔断保护**：
+  - 检查器均内置 `CircuitBreaker`，连续失败自动熔断并在冷却后探测自愈。
+  - `WorkerThrottle` 自适应降频机制，遇到注册局限流自动暂停并阶梯式降速。
+  - 瞬态失败进入有界延期重试队列，不浪费失败重试配额。
+- **灵活的候选词生成策略**：
+  - 纯数字、纯字母及字母数字组合模式。
+  - 内存恒定的惰性流式生成器（`CandidateFeeder`），轻松应对百万级组合。
+  - 支持持久化字典上传、多字典笛卡尔积组合及自定义拼接模板（如 `{0}-{1}`）。
+  - 支持前缀、后缀及复杂的正则表达式实时过滤。
+- **崩溃自愈与原子恢复**：
+  - 启动阶段自动修复过渡态任务（`pausing`/`cancelling`），依据已持久化数据原子重算进度。
+  - 中断的任务自动从断点游标处无缝继续执行，杜绝重复网络请求。
+- **实时更新与公开发布**：
+  - 基于 Server-Sent Events (SSE) 推送任务状态、操作日志和发现的域名结果，支持 `Last-Event-ID` 断线断点续传。
+  - 一键发布静态 HTML 报告，并建立支持前缀与模糊匹配的公开域名索引库。
+
+---
 
 ## 快速开始
 
-### Docker
+### Docker 部署
 
 ```bash
 docker pull ghcr.io/veegn/domain-scanner:latest
@@ -36,33 +65,74 @@ docker run -d -p 3000:3000 \
   ghcr.io/veegn/domain-scanner
 ```
 
-### 本地运行
+### 本地编译运行
 
-需要 Rust 1.88+。
+需要 **Rust 1.88+**：
 
 ```bash
+# 1. 克隆代码仓库
 git clone https://github.com/veegn/domain-scanner.git
 cd domain-scanner
+
+# 2. 配置环境变量 (可选)
 export DNSHE_API_KEY="your-api-key"
 export DNSHE_API_SECRET="your-api-secret"
+
+# 3. 运行 Web 服务模式 (默认端口 3000)
 cargo run --release -- --port 3000
 ```
 
-访问：
+服务就绪后：
+- **Web 控制台**：`http://localhost:3000`
+- **公开发布库**：`http://localhost:3000/published.html`
+- **MCP 服务端点**：`http://localhost:3000/mcp`
+- **MCP 自发现清单**：`http://localhost:3000/api/mcp/info`
 
-```text
-http://localhost:3000
+---
+
+## AI & Model Context Protocol (MCP) 接入
+
+Domain Scanner 支持双传输模式连接大模型客户端：
+
+### 1. HTTP 模式（推荐，与 Web 服务同进程）
+启动 Web 服务后，直接在 Claude Desktop 或 Cursor 中配置：
+```json
+{
+  "mcpServers": {
+    "domain-scanner": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
 ```
 
-公开发布入口：
-
-```text
-http://localhost:3000/published.html
+### 2. Stdio 模式（作为独立子进程）
+```json
+{
+  "mcpServers": {
+    "domain-scanner": {
+      "command": "cargo",
+      "args": ["run", "--release", "--", "mcp"]
+    }
+  }
+}
 ```
 
-## 配置
+### 支持的核心 MCP 工具：
+- `create_scan`: 提交后台长任务扫描（组合、字典、正则、列表）。
+- `get_scan_status`: 轮询扫描进度、生命周期状态与发现计数。
+- `get_scan_results`: 分页提取扫描产出的可用域名清单。
+- `check_domain` / `batch_check_domains`: 同步即时权威检测（毫秒级响应，无需入库）。
+- `pause_scan` / `resume_scan` / `delete_scan`: 任务生命周期控制。
+- `list_scans` / `list_tlds` / `list_dictionaries`: 系统元数据与资产概览。
 
-首次启动会自动生成 `config.json`：
+详细协议说明与客户端集成步骤，请参阅 [MCP 接入指南](./docs/mcp.md)。
+
+---
+
+## 配置说明
+
+首次启动时，系统会自动在数据库中生成默认配置并输出初始模板 `config.json`：
 
 ```json
 {
@@ -85,130 +155,38 @@ http://localhost:3000/published.html
 }
 ```
 
-配置说明：
+- **配置项说明**：
+  - `doh_servers`：自定义 DoH 节点；为空时采用内置节点轮询。
+  - `whois_servers`：自定义各 TLD 对应的 WHOIS 服务器，优先级高于数据库内置映射。
+  - `rdap_bootstrap_url`：IANA RDAP 根路径；留空时禁用引导发现。
+  - `scheduler.max_parallel_tlds`：同时支持不同 TLD 独立处理的并发度。
+  - `scheduler.workers_per_scan`：单个扫描任务消费域名的并发 Worker 数量（默认 10）。
+  - `scheduler.max_global_checks`：跨所有任务允许的最大网络 I/O 并发数。
 
-- `doh_servers`：自定义 DoH 服务列表；为空时使用内置默认值。
-- `whois_servers`：补充或覆盖 WHOIS server 映射，格式为 `TLD -> host` 或 `TLD -> host:port`。
-- `rdap_servers`：补充或覆盖 RDAP endpoint。
-- `rdap_bootstrap_url`：RDAP bootstrap 数据源，默认使用 IANA `dns.json`。
-- `scheduler`：同时运行的 TLD 分组数、每任务 worker 数、全局网络请求并发上限。服务端点仍保留请求间隔和 `Retry-After` 退避；增加 worker 不会跳过这些限制。
-- `logging`：控制台日志、文件日志目录、文件名前缀和保留数量。
+---
 
-### DNSHE 三级域名
+## 专题文档索引 (Docs)
 
-`l.cd`、`us.ci`、`bot.cd`、`de5.net`、`ccwu.cc`、`ddns.ge`、`bbroot.com` 和 `new.tg` 使用 DNSHE 官方 JSON WHOIS API。凭据只从 `DNSHE_API_KEY` 和 `DNSHE_API_SECRET` 环境变量读取，不会保存到配置数据库或通过设置接口返回。
+所有深入架构与定制化指南均已归档至 [`docs/`](./docs) 目录：
 
-这些后缀只接受“一个前缀标签 + 后缀”的三级域名。DNSHE 查询间隔至少为 2001 毫秒，即所有任务、worker 和八个后缀合计不超过 30 次/分钟。限流时间保存在 `data/scans.db`，通过原子更新协调使用同一数据库的进程，应用重启不会清空尚未到期的请求间隔。DNSHE 返回错误或限流时不会回退到父级 RDAP/WHOIS，以免产生错误的“未发现注册记录”结果。
+| 文档 | 主要内容 |
+| :--- | :--- |
+| 📘 **[系统架构设计与内部机制](./docs/architecture.md)** | 10 步启动依赖链、流水线优先级、CandidateFeeder 惰性生成器、Worker 调度模型、崩溃恢复与状态机设计。 |
+| 🤖 **[MCP 接入与开发指南](./docs/mcp.md)** | Model Context Protocol 双通道架构、11 个 MCP Tools 详细输入输出定义、客户端配置范式与安全隔离。 |
+| 📡 **[REST API 与 SSE 流式事件规范](./docs/api.md)** | 完整的 RESTful 接口清单、请求参数、返回 JSON Schema、游标分页拉取及 SSE 实时事件定义。 |
+| 🔌 **[检查器扩展与定制开发指南](./docs/extending.md)** | 如何实现 `DomainChecker` trait、定义优先级、接入 `CircuitBreaker` 及注册到核心流水线。 |
+| ⚖️ **[合规使用与免责声明](./docs/disclaimer.md)** | 负责任使用倡议、反网络抢注（Anti-Cybersquatting）、第三方服务协议遵从及责任限制声明。 |
 
-同一组 DNSHE 凭据不要同时用于未共享该数据库的其他部署或外部程序；这些请求不在本项目的限流统计范围内。
+---
 
-## 数据目录
+## 合规使用规范
 
-```text
-data/scans.db                      SQLite 数据库
-data/seed.sql                      默认 TLD 和 WHOIS server 种子
-data/dictionaries/                 上传的字典文件
-data/cache/rdap/                   RDAP bootstrap 本地缓存
-data/cache/whois/rate_limits.json  WHOIS 限流缓存
-data/published/<slug>/             已发布的静态结果页
-logs/                              文件日志
-```
+本工具仅用于个人域名资产管理、学术研究与授权技术分析。使用期间必须严格遵守相关第三方服务商（如 DoH 供应商、ICANN、各大顶级域注册局）的使用条款与频率上限。
 
-## 扫描规则
+严禁利用本工具进行分布式拒绝服务攻击（DoS）、恶意扫库、域名抢注侵权或其他破坏互联网公共设施的行为。
 
-生成式扫描支持三种模式：
+---
 
-- `d`：数字，字符集 `0-9`
-- `D`：字母，字符集 `a-z`
-- `a`：字母数字，字符集 `a-z0-9`
+## 许可证 (License)
 
-其他输入方式：
-
-- `regex`：在生成阶段过滤候选前缀。
-- `priority_words`：优先扫描指定前缀。
-- `domains`：直接提交完整域名列表。
-- `dictionary_words` / `dictionary_id`：按字典词加前缀、后缀和 TLD 生成候选。
-- `dictionary_ids`：多字典笛卡尔组合，支持 `{0}`、`{1}` 形式模板。
-
-系统会校验任务规模、正则长度、域名格式、字典词格式和模板格式，避免提交不可控任务。
-
-正则枚举在阻塞任务中执行，按 500 个匹配候选或 50 毫秒分批交付，稀疏匹配无需等待全部枚举结束。候选表用于记录唯一域名和未完成工作；生成游标与候选批次一起提交，结果与候选完成标记一起提交。已有任务首次恢复会建立该记录；后续恢复可直接定位。字典内容改变时会重新枚举，并通过候选表过滤已生成的域名。
-
-任务日志中的 `task.summary` 包含本次运行的 `elapsed_ms`、`conclusive_results`、`conclusive_per_minute`、`provider_deferrals` 和 `failed_attempts`。需要分析各检查阶段时，可启用 `domain_scanner::checker::registry=debug` 日志过滤器，查看 `stage_metrics` 中的耗时、延期和错误类型。正常 NXDOMAIN 只表示 DNS 名称不存在，仍须继续权威注册记录检查。
-
-## 任务状态
-
-任务状态包括：
-
-```text
-pending
-running
-pausing
-paused
-cancelling
-cancelled
-finished
-failed
-```
-
-只有 `finished` 且存在“未发现注册记录”候选域名的扫描可以发布；发布结果不构成可购买保证。
-
-## API 概览
-
-任务接口：
-
-```text
-GET    /api/scans
-GET    /api/scans/stream
-POST   /api/scan
-GET    /api/scan/:id
-DELETE /api/scan/:id
-POST   /api/scan/:id/pause
-POST   /api/scan/:id/resume
-GET    /api/scan/:id/stream
-GET    /api/scan/:id/results?offset=0&limit=500
-GET    /api/scan/:id/logs
-POST   /api/scan/:id/reorder
-```
-
-发布接口：
-
-```text
-POST   /api/scan/:id/publish
-GET    /api/published
-GET    /api/published/:id
-PUT    /api/published/:id
-DELETE /api/published/:id
-```
-
-公开接口：
-
-```text
-GET    /api/public/published
-GET    /api/public/search?q=<prefix>
-```
-
-字典接口：
-
-```text
-POST   /api/dictionary?name=<name>
-GET    /api/dictionaries
-GET    /api/dictionary/:id
-PUT    /api/dictionary/:id
-DELETE /api/dictionary/:id
-GET    /api/dictionary/:id/words?offset=0&limit=100
-```
-
-## 开发验证
-
-```bash
-cargo fmt
-cargo check
-cargo test
-```
-
-如果 Windows 上已有 `target/debug/domain-scanner.exe` 正在运行，测试或构建可能因为文件锁失败。先停止运行中的服务后再执行完整测试。
-
-## 许可
-
-MIT License。详见 [LICENSE](./LICENSE)。
+本项目基于 [MIT License](./LICENSE) 开源。

@@ -33,6 +33,7 @@ pub fn init(config: &LoggingConfig) {
                 .with_thread_ids(false)
                 .with_thread_names(false)
                 .compact()
+                .with_writer(std::io::stderr)
                 .boxed(),
         )
     } else {

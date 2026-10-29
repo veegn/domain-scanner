@@ -26,7 +26,7 @@
 //! 3. Add `pub mod my_checker;` to this file
 //! 4. Register in `CheckerRegistry::with_defaults()` or add manually
 //!
-//! See the [EXTENDING.md](../../../EXTENDING.md) file for detailed instructions.
+//! See the [docs/extending.md](../../docs/extending.md) file for detailed instructions.
 //!
 //! # Example
 //!

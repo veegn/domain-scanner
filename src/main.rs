@@ -2,6 +2,7 @@ use clap::Parser;
 use domain_scanner::checker::CheckerRegistry;
 use domain_scanner::config::AppConfig;
 use domain_scanner::logging;
+use domain_scanner::mcp;
 use domain_scanner::web;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -9,11 +10,21 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "Domain Scanner - Web Service Mode")]
+#[command(author, version, about = "Domain Scanner - Web Service & MCP Mode")]
 struct Args {
-    /// Port to listen on
+    /// Port to listen on (web mode)
     #[arg(short, long, default_value_t = 3000)]
     port: u16,
+
+    /// Execution mode or subcommand
+    #[command(subcommand)]
+    command: Option<SubCommand>,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum SubCommand {
+    /// Run as an MCP (Model Context Protocol) server via stdio
+    Mcp,
 }
 
 #[tokio::main]
@@ -30,7 +41,7 @@ async fn main() {
     };
 
     // 2. Load runtime config from database, or migrate from file
-    let config = match web::load_app_config(&db).await {
+    let mut config = match web::load_app_config(&db).await {
         Ok(Some(cfg)) => cfg,
         Ok(None) => {
             // Migration logic
@@ -52,10 +63,15 @@ async fn main() {
         }
     };
 
+    // In MCP stdio mode, disable console stdout logging so JSON-RPC protocol stream is clean
+    if matches!(args.command, Some(SubCommand::Mcp)) {
+        config.logging.console_enabled = false;
+    }
+
     let scheduler_config = config.scheduler.clone();
     logging::init(&config.logging);
 
-    info!(target: "domain_scanner::main", port = args.port, context = "startup", "initializing web server");
+    info!(target: "domain_scanner::main", port = args.port, context = "startup", "initializing domain scanner");
 
     info!(
         target: "domain_scanner::main",
@@ -184,40 +200,66 @@ async fn main() {
         let _ = state.task_tx.try_send(());
     }
 
-    // 10. Build router and start server
-    let app = web::router(state)
-        .nest_service(
-            "/published",
-            tower_http::services::ServeDir::new("data/published"),
-        )
-        .fallback_service(tower_http::services::ServeDir::new("web"));
+    // 10. Instantiate MCP Server instance
+    let mcp_server = mcp::create_mcp_server(state.clone(), registry.clone());
 
-    info!(
-        target: "domain_scanner::main",
-        context = "startup",
-        bind = %format!("0.0.0.0:{}", args.port),
-        local_url = %format!("http://localhost:{}", args.port),
-        "server listening"
-    );
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            error!(
+    // 11. Dispatch based on CLI mode
+    match args.command {
+        Some(SubCommand::Mcp) => {
+            info!(
+                target: "domain_scanner::main",
+                context = "mcp",
+                "running Model Context Protocol (MCP) server via stdio"
+            );
+            if let Err(err) = mcp::run_mcp_stdio(mcp_server).await {
+                error!(
+                    target: "domain_scanner::main",
+                    context = "mcp",
+                    error = %err,
+                    "MCP stdio server terminated with error"
+                );
+                std::process::exit(1);
+            }
+        }
+        None => {
+            // Build router with web APIs, static files, and MCP endpoints
+            let app = web::router(state).nest_service(
+                "/published",
+                tower_http::services::ServeDir::new("data/published"),
+            );
+            let app = mcp::mount_mcp_routes(app, mcp_server, args.port)
+                .fallback_service(tower_http::services::ServeDir::new("web"));
+
+            info!(
                 target: "domain_scanner::main",
                 context = "startup",
-                port = args.port,
-                error = %err,
-                "failed to bind web server listener"
+                bind = %format!("0.0.0.0:{}", args.port),
+                local_url = %format!("http://localhost:{}", args.port),
+                mcp_endpoint = %format!("http://localhost:{}/mcp", args.port),
+                "server listening"
             );
-            std::process::exit(1);
+            let listener =
+                match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        error!(
+                            target: "domain_scanner::main",
+                            context = "startup",
+                            port = args.port,
+                            error = %err,
+                            "failed to bind web server listener"
+                        );
+                        std::process::exit(1);
+                    }
+                };
+            if let Err(err) = axum::serve(listener, app).await {
+                error!(
+                    target: "domain_scanner::main",
+                    context = "shutdown",
+                    error = %err,
+                    "axum server exited with error"
+                );
+            }
         }
-    };
-    if let Err(err) = axum::serve(listener, app).await {
-        error!(
-            target: "domain_scanner::main",
-            context = "shutdown",
-            error = %err,
-            "axum server exited with error"
-        );
     }
 }
