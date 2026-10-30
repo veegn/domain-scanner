@@ -31,10 +31,30 @@ pub fn create_mcp_server(
 pub fn create_mcp_http_service(
     server: DomainScannerMcpServer,
 ) -> StreamableHttpService<DomainScannerMcpServer, LocalSessionManager> {
+    let mut config = StreamableHttpServerConfig::default();
+
+    if let Ok(hosts) = std::env::var("MCP_ALLOWED_HOSTS") {
+        let hosts = hosts.trim();
+        if hosts == "*" || hosts.eq_ignore_ascii_case("all") {
+            config = config.disable_allowed_hosts();
+        } else {
+            let list: Vec<String> = hosts
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            config = config.with_allowed_hosts(list);
+        }
+    } else {
+        // By default, disable strict loopback Host validation so LAN, Docker,
+        // and reverse-proxy setups work smoothly without throwing "Host not allowed".
+        config = config.disable_allowed_hosts();
+    }
+
     StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        config,
     )
 }
 
