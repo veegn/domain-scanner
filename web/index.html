@@ -1190,6 +1190,90 @@
          * UI Manipulation and Rendering
          */
         const UI = {
+            currentMcpTab: 'http',
+            openMcpModal() {
+                const modal = document.getElementById('mcpModal');
+                if (!modal) return;
+                modal.classList.remove('hidden');
+                const origin = window.location.origin || `${window.location.protocol}//${window.location.hostname}${window.location.port ? ':' + window.location.port : ''}`;
+                const httpUrl = `${origin}/mcp`;
+                const urlEl = document.getElementById('mcpHttpUrl');
+                if (urlEl) urlEl.innerText = httpUrl;
+                this.switchMcpTab(this.currentMcpTab || 'http');
+            },
+            closeMcpModal() {
+                const modal = document.getElementById('mcpModal');
+                if (modal) modal.classList.add('hidden');
+            },
+            switchMcpTab(tab) {
+                this.currentMcpTab = tab;
+                const tabHttp = document.getElementById('tabMcpHttp');
+                const tabStdio = document.getElementById('tabMcpStdio');
+                const pre = document.getElementById('mcpConfigPre');
+                const origin = window.location.origin || `${window.location.protocol}//${window.location.hostname}${window.location.port ? ':' + window.location.port : ''}`;
+
+                if (tab === 'http') {
+                    if (tabHttp) tabHttp.className = "px-3 py-1.5 text-xs font-bold rounded-lg bg-purple-50 text-purple-700 transition-all";
+                    if (tabStdio) tabStdio.className = "px-3 py-1.5 text-xs font-bold rounded-lg text-gray-400 hover:text-gray-700 transition-all";
+                    if (pre) pre.textContent = JSON.stringify({
+                        "mcpServers": {
+                            "domain-scanner": {
+                                "url": `${origin}/mcp`
+                            }
+                        }
+                    }, null, 2);
+                } else {
+                    if (tabStdio) tabStdio.className = "px-3 py-1.5 text-xs font-bold rounded-lg bg-purple-50 text-purple-700 transition-all";
+                    if (tabHttp) tabHttp.className = "px-3 py-1.5 text-xs font-bold rounded-lg text-gray-400 hover:text-gray-700 transition-all";
+                    if (pre) pre.textContent = JSON.stringify({
+                        "mcpServers": {
+                            "domain-scanner": {
+                                "command": "cargo",
+                                "args": ["run", "--release", "--", "mcp"]
+                            }
+                        }
+                    }, null, 2);
+                }
+            },
+            copyText(text, btnEl, successMsg) {
+                const doFeedback = () => {
+                    if (btnEl) {
+                        const original = btnEl.innerText;
+                        btnEl.innerText = successMsg || 'Copied!';
+                        setTimeout(() => { btnEl.innerText = original; }, 2000);
+                    }
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(doFeedback).catch(() => {
+                        this.fallbackCopyText(text, doFeedback);
+                    });
+                } else {
+                    this.fallbackCopyText(text, doFeedback);
+                }
+            },
+            fallbackCopyText(text, cb) {
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-9999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    if (cb) cb();
+                } catch (e) {
+                    prompt('Copy to clipboard:', text);
+                }
+                document.body.removeChild(textArea);
+            },
+            copyCurrentMcpConfig() {
+                const pre = document.getElementById('mcpConfigPre');
+                const btn = document.getElementById('btnCopyConfigText');
+                if (pre) {
+                    this.copyText(pre.textContent, btn, 'Config JSON Copied!');
+                }
+            },
             switchTaskMode(mode) {
                 State.taskMode = mode;
                 document.getElementById('formCombinatorial').classList.toggle('hidden', mode !== 'combinatorial');
@@ -2374,6 +2458,12 @@
 
             setupSuffixAutocomplete('suffix', 'suffix-dropdown');
             setupSuffixAutocomplete('dict_suffix', 'dict_suffix-dropdown');
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    UI.closeMcpModal();
+                }
+            });
         };
     </script>
     <!-- MCP AI Integration Modal -->
@@ -2410,7 +2500,7 @@
                         <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest block">Streamable HTTP Endpoint</span>
                         <div class="flex items-center justify-between mt-1">
                             <code id="mcpHttpUrl" class="text-xs font-mono font-bold text-purple-700">http://localhost:3000/mcp</code>
-                            <button type="button" onclick="UI.copyText(document.getElementById('mcpHttpUrl').innerText, 'HTTP URL Copied!')" class="text-[10px] font-bold text-gray-500 hover:text-purple-600 ml-2">Copy</button>
+                            <button type="button" onclick="UI.copyText(document.getElementById('mcpHttpUrl').innerText, this, 'URL Copied!')" class="text-[10px] font-bold text-gray-500 hover:text-purple-600 ml-2">Copy</button>
                         </div>
                     </div>
                     <div class="p-3.5 bg-gray-50 rounded-xl border border-gray-100">
